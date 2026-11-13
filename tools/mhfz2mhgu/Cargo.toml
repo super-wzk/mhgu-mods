@@ -1,0 +1,21 @@
+[package]
+name = "mhfz2mhgu"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+members = ["crates/mhf-resource", "crates/mhgu-resource"]
+resolver = "3"
+
+[workspace.dependencies]
+anyhow = "1"
+glam = "0.33"
+
+[dependencies]
+anyhow.workspace = true
+clap = { version = "4", features = ["derive"] }
+glam.workspace = true
+mhf-resource = { path = "crates/mhf-resource" }
+mhgu-resource = { path = "crates/mhgu-resource" }
+espinas-behavior = { path = "../../plugins/monster-espinas/behavior" }

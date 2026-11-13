@@ -1,0 +1,10 @@
+[package]
+name = "mhf-resource"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+glam.workspace = true
+png = "0.17"

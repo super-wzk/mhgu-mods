@@ -1,0 +1,12 @@
+[package]
+name = "mhgu-sdk"
+version = "0.1.0"
+edition = "2024"
+description = "Typed runtime bindings for MHGU 1.4 (Switch ARM32)"
+publish = false
+
+[dependencies]
+libm = "0.2"
+
+[target.'cfg(all(target_arch = "arm", target_endian = "little"))'.dependencies]
+mhgu-forge-sys = "1.5.0"
