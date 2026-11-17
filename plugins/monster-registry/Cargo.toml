@@ -1,0 +1,15 @@
+[package]
+name = "monster-registry"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+doctest = false
+
+[dependencies]
+mhgu-sdk = { path = "../../crates/mhgu-sdk" }
+
+[target.'cfg(all(target_arch = "arm", target_endian = "little"))'.dependencies]
+mhgu-forge = "1.5.0"

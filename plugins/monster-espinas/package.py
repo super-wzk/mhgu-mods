@@ -7,6 +7,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from quest_package import build_quest
+
 PLUGIN = Path(__file__).resolve().parent
 REPO = PLUGIN.parents[1]
 MOD_NAME = "monster-espinas"
@@ -19,20 +21,47 @@ def build(pac, elf, enemy):
     with tempfile.TemporaryDirectory(prefix=".build-", dir=dist) as temp:
         package = Path(temp) / MOD_NAME
         nx = package / "romfs/nativeNX"
-        arc = nx / "arc/enemy/em001_00.arc"
+        arc = nx / "arc/enemy/em107_00.arc"
         arc.parent.mkdir(parents=True)
+        converter = [
+            "cargo",
+            "run",
+            "--release",
+            "--manifest-path",
+            "tools/mhfz2mhgu/Cargo.toml",
+            "--",
+        ]
         subprocess.run(
             [
-                "cargo", "run", "--release", "--manifest-path", "tools/mhfz2mhgu/Cargo.toml",
-                "--", "hunt", pac, "--vita-elf", elf, "--donor", enemy / "em001_00.arc",
-                "--material-template", enemy / "em030_00.arc", "-o", arc,
+                *converter,
+                "hunt",
+                pac,
+                "--vita-elf",
+                elf,
+                "--donor",
+                enemy / "em001_00.arc",
+                "--material-template",
+                enemy / "em030_00.arc",
+                "-o",
+                arc,
             ],
-            cwd=REPO, check=True,
+            cwd=REPO,
+            check=True,
         )
+        icon = nx / "GUI/monster/espinas.tex"
+        icon.parent.mkdir(parents=True)
+        subprocess.run(
+            [*converter, "hunt-icon", "--data", pac.parent.parent, "-o", icon],
+            cwd=REPO,
+            check=True,
+        )
+        build_quest(enemy.parents[1], nx)
         # Forge uses the plugin's pinned nightly, even when invoked from a host Cargo process.
         env = os.environ.copy()
         env.pop("RUSTUP_TOOLCHAIN", None)
-        subprocess.run(["cargo", "forge", "build", "--release"], cwd=PLUGIN, env=env, check=True)
+        subprocess.run(
+            ["cargo", "forge", "build", "--release"], cwd=PLUGIN, env=env, check=True
+        )
         plugins = nx / "plugins"
         plugins.mkdir()
         nro = PLUGIN / "monster_espinas.nro"

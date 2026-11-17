@@ -1,23 +1,37 @@
 //! Species-80 normal quest hitzones and anger gauge from mhfemd.bin.
-use super::*;
+use super::{Actors, package::Directory};
+use mhgu_sdk::monster::damage::HitzoneRow;
+use mhgu_sdk::monster::{Monster, MonsterState, anger::AngerMode};
 
-unsafe fn hunt_state<'a>(actor: u32) -> Option<(Directory<'a>, MonsterState<'a>)> {
-    let monster = unsafe { Monster::from_raw(actor)? };
-    Some((Directory::read(monster)?, monster.state()?))
+// The GU setter can run inside a hunt update or independently during perception.
+static RAGE_ENTRIES: Actors<()> = Actors::new();
+
+pub(super) fn take_rage_entry(actor: u32) -> bool {
+    RAGE_ENTRIES.with(|entries| entries.remove(&actor).is_some())
 }
 
-// GU asks for the current ten-byte row separately for each contacting body part.
-#[forge::hook(offset = 0xbab60)]
-pub unsafe fn hitzone(actor: u32, part: u32) -> u32 {
-    unsafe {
-        if part < 7
-            && let Some((d, state)) = hunt_state(actor)
-        {
-            let enraged = u32::from(state.anger_mode() == AngerMode::Enraged);
-            return d.physiology() + 60 + (7 * enraged + part) * 10;
-        }
+pub(super) fn forget(actor: u32) {
+    RAGE_ENTRIES.remove(actor);
+}
+
+unsafe fn hunt_state<'a>(actor: u32) -> Option<(Monster<'a>, Directory<'a>, MonsterState<'a>)> {
+    let monster = unsafe { Monster::from_raw(actor)? };
+    Some((monster, Directory::read(monster)?, monster.state()?))
+}
+
+// GU already initialized the normal rows from this actor's DTT (BABF4).
+// Select its alternate rows on rage transitions only; BAB60 remains native.
+fn select_hitzones(monster: Monster, enraged: bool) {
+    for part in 0..7 {
+        monster.select_hitzone(
+            part,
+            if enraged {
+                HitzoneRow::Alternate(part)
+            } else {
+                HitzoneRow::Default
+            },
+        );
     }
-    original!(actor, part)
 }
 
 // Native GU damage dispatch supplies the amount before its own anger multipliers.
@@ -25,15 +39,13 @@ pub unsafe fn hitzone(actor: u32, part: u32) -> u32 {
 #[forge::hook(offset = 0xbcc04)]
 pub unsafe fn add_anger(actor: u32, amount: i32) -> u32 {
     unsafe {
-        if let Some((d, state)) = hunt_state(actor) {
-            let p = d.physiology();
+        if let Some((_, d, state)) = hunt_state(actor) {
             let max_hp = state.max_hp() as u32;
             if max_hp != 0 && state.anger_mode() == AngerMode::Calm {
                 let percent = u64::from(state.hp() as u32) * 100 / u64::from(max_hp);
-                let lane = 10 - (percent.min(100) as u32 / 10);
-                let factor = f32::from_bits(u32at(p, 16 + 4 * lane));
+                let factor = d.anger_gain_factor(percent);
                 let next = (i32::from(state.anger_gauge()) + (amount as f32 * factor) as i32)
-                    .clamp(0, i32::from(u16at(p, 0)));
+                    .clamp(0, i32::from(d.anger_threshold()));
                 state.set_anger_gauge(next as u16);
                 return next as u32;
             }
@@ -46,20 +58,36 @@ pub unsafe fn add_anger(actor: u32, amount: i32) -> u32 {
 #[forge::hook(offset = 0xbce6c)]
 pub unsafe fn mode(actor: u32, next: u32) -> u32 {
     unsafe {
-        let entering = if next == u32::from(AngerMode::Enraged.raw()) {
-            hunt_state(actor)
-                .and_then(|(d, state)| (state.anger_mode() != AngerMode::Enraged).then_some(d))
-        } else {
-            None
-        };
+        let change = hunt_state(actor).and_then(|(monster, _, state)| {
+            let was = state.anger_mode() == AngerMode::Enraged;
+            let enraged = next == u32::from(AngerMode::Enraged.raw());
+            (was != enraged).then_some((monster, state, enraged))
+        });
         let result = original!(actor, next);
-        if let Some(d) = entering
-            && let Some(state) = Monster::from_raw(actor).and_then(Monster::state)
+        if let Some((monster, state, enraged)) = change
+            && (state.anger_mode() == AngerMode::Enraged) == enraged
         {
-            // GU counts animation frames; Vita duration is in 30 Hz logic ticks.
-            let frames = 2.0 * f32::from(u16at(d.physiology(), 2));
-            state.set_anger_timer(frames);
+            select_hitzones(monster, enraged);
+            if enraged {
+                RAGE_ENTRIES.with(|entries| entries.insert(actor, ()));
+            } else {
+                forget(actor);
+            }
         }
         result
     }
+}
+
+// GU 76154 also ends ordinary rage through BA874, bypassing BCE6C.
+#[forge::hook(offset = 0xba874)]
+pub unsafe fn reset_anger(actor: u32, keep_secondary: u32) -> u32 {
+    let enraged = unsafe { hunt_state(actor) }.and_then(|(monster, _, state)| {
+        (state.anger_mode() == AngerMode::Enraged).then_some(monster)
+    });
+    let result = original!(actor, keep_secondary);
+    if let Some(monster) = enraged {
+        forget(actor);
+        select_hitzones(monster, false);
+    }
+    result
 }

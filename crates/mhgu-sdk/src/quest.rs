@@ -23,7 +23,7 @@ impl<'a> Quest<'a> {
         unsafe { draw() }
     }
 
-    /// Look up a hunter by slot, returning a position only if they are in the requested area.
+    /// GU C4BA8: the hunter must be present, active and in the requested area.
     pub fn player_position_in_area(self, area: u8, slot: u8) -> Option<[f32; 3]> {
         if slot >= 4 {
             return None;
@@ -33,7 +33,21 @@ impl<'a> Quest<'a> {
             let player: unsafe extern "C" fn(u32, u32) -> u32 =
                 core::mem::transmute(entry(0x274ce4));
             let player = Object::at(player(manager.addr(), slot.into()))?;
-            (player.get(PLAYER_AREA) == area).then(|| player.get(PLAYER_POSITION))
+            if player.get(PLAYER_AREA) != area {
+                return None;
+            }
+            let vtable = Object::at(player.get(Field::<u32>::at(0)))?;
+            let active: unsafe extern "C" fn(u32) -> u32 =
+                core::mem::transmute(vtable.get(Field::<u32>::at(136)));
+            let unavailable: unsafe extern "C" fn(u32) -> u32 =
+                core::mem::transmute(entry(0x49240));
+            if active(player.addr()) != 1
+                || unavailable(player.get(Field::<u8>::at(4177)).into()) != 0
+            {
+                return None;
+            }
+            let pos = player.get(PLAYER_POSITION);
+            pos.iter().all(|v| v.is_finite()).then_some(pos)
         }
     }
 
@@ -64,11 +78,5 @@ pub struct AreaNode<'a>(Object<'a>);
 impl AreaNode<'_> {
     pub fn position(self) -> [f32; 3] {
         self.0.get(Field::at(16))
-    }
-    pub(crate) fn flags(self) -> u8 {
-        self.0.get(Field::at(40))
-    }
-    pub(crate) fn mask(self) -> u32 {
-        self.0.get(Field::at(48))
     }
 }

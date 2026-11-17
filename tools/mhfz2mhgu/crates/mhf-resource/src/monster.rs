@@ -25,6 +25,18 @@ pub struct Attack<'a> {
     pub volumes: Vec<BodyVolume>,
 }
 
+pub struct ShellContact<'a> {
+    pub record: &'a [u8; 40],
+    pub radius: f32,
+}
+
+pub struct Fireball<'a> {
+    pub flight: ShellContact<'a>,
+    pub impact: ShellContact<'a>,
+    pub speed: f32,
+    pub offset: [f32; 3],
+}
+
 pub struct MotionBinding {
     pub clip: usize,
     pub blend_steps: usize,
@@ -76,46 +88,72 @@ impl<'a> Tables<'a> {
     /// 81CE4E06 uses consecutive (frame, displacement) pairs. After the final
     /// key the vertical speed continues under gravity until terrain contact.
     pub fn flight_curves(&self, kind: usize) -> Result<[Vec<(f32, f32)>; 2]> {
-        let mut curves = [vec![], vec![]];
-        for (curve, base) in curves.iter_mut().zip([0x82c70690, 0x82c706d8]) {
-            let data = self.elf.tail(self.elf.ptr(base, kind)?)?;
-            for row in data.as_chunks::<8>().0 {
-                let frame = f32::from_le_bytes(row[..4].try_into()?);
-                let pos = f32::from_le_bytes(row[4..].try_into()?);
-                if frame == 0. && !curve.is_empty() {
-                    break;
-                }
-                ensure!(
-                    frame.is_finite()
-                        && pos.is_finite()
-                        && curve.last().is_none_or(|&(t, _)| frame > t),
-                    "invalid FZ flight curve"
-                );
-                curve.push((frame, pos));
-            }
-            ensure!(curve.len() > 1, "empty FZ flight curve");
-        }
-        Ok(curves)
+        Ok([
+            self.motion_curve(self.elf.ptr(0x82c70690, kind)?)?,
+            self.motion_curve(self.elf.ptr(0x82c706d8, kind)?)?,
+        ])
     }
 
-    /// Ordinary breath ID 31: 81DD4314 -> 8183F946, flight record 56.
-    pub fn fireball(&self) -> Result<(&[u8], f32, f32, [f32; 3])> {
-        let row = &self.elf.tail(self.elf.ptr(0x827114b8, 0)? + 56 * 40)?[..40];
-        let g = u16::from_le_bytes(row[16..18].try_into()?);
-        let sphere = self.elf.tail(self.elf.ptr(0x82c77c70, usize::from(g))?)?;
-        ensure!(
-            sphere[..4] == [126, 0, 0, 0] && sphere[40..42] == [255, 255],
-            "expected object-space fireball sphere"
-        );
+    /// 81CE4C4C: hover displacement for airborne approach (2:7).
+    pub fn hover_curve(&self) -> Result<Vec<(f32, f32)>> {
+        self.motion_curve(self.elf.ptr(0x82c7065c, 1)?)
+    }
+
+    fn motion_curve(&self, addr: u32) -> Result<Vec<(f32, f32)>> {
+        let data = self.elf.tail(addr)?;
+        let mut curve = vec![];
+        for row in data.as_chunks::<8>().0 {
+            let frame = f32::from_le_bytes(row[..4].try_into()?);
+            let pos = f32::from_le_bytes(row[4..].try_into()?);
+            if frame == 0. && !curve.is_empty() {
+                break;
+            }
+            ensure!(
+                frame.is_finite()
+                    && pos.is_finite()
+                    && curve.last().is_none_or(|&(t, _)| frame > t),
+                "invalid FZ flight curve"
+            );
+            curve.push((frame, pos));
+        }
+        ensure!(curve.len() > 1, "empty FZ flight curve");
+        Ok(curve)
+    }
+
+    /// Breath 31 initializes flight row 56. On impact 81DCC628 spawns
+    /// kind 9, effect 45; 81DDBD28 selects its own attack table at index 45+1.
+    pub fn fireball(&self) -> Result<Fireball<'a>> {
+        let contact = |table, index, shapes, joint| -> Result<ShellContact<'a>> {
+            let record: &[u8; 40] = self
+                .elf
+                .tail(self.elf.ptr(table, 0)? + 40u32 * index)?
+                .get(..40)
+                .context("missing FZ shell attack")?
+                .try_into()?;
+            let group = u16::from_le_bytes(record[16..18].try_into()?);
+            let geometry = self.elf.tail(self.elf.ptr(shapes, usize::from(group))?)?;
+            let sphere = geometry.get(..42).context("short FZ shell sphere")?;
+            ensure!(
+                u16::from_le_bytes(sphere[..2].try_into()?) == joint
+                    && sphere[2..12] == [0; 10]
+                    && sphere[16..40] == [0; 24]
+                    && sphere[40..42] == [255; 2],
+                "unsupported shell geometry"
+            );
+            Ok(ShellContact {
+                record,
+                radius: f32::from_le_bytes(sphere[12..16].try_into()?),
+            })
+        };
         let offset = self.elf.tail(0x82712434 + 31 * 12)?;
-        Ok((
-            row,
-            f32::from_bits(self.elf.ptr(0x8271221c, 31)?),
-            f32::from_le_bytes(sphere[12..16].try_into()?),
-            core::array::from_fn(|i| {
+        Ok(Fireball {
+            flight: contact(0x827114b8, 56, 0x82c77c70, 126)?,
+            impact: contact(0x827152e0, 46, 0x82c77e64, 127)?,
+            speed: f32::from_bits(self.elf.ptr(0x8271221c, 31)?),
+            offset: core::array::from_fn(|i| {
                 f32::from_le_bytes(offset[4 * i..4 * i + 4].try_into().unwrap())
             }),
-        ))
+        })
     }
 
     /// Default incoming transition for an ordinary action with no explicit blend override.

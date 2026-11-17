@@ -198,6 +198,121 @@ def verify(path):
         binding,
     )
 
+    # Use the original turn handler and its retail table. Isolate the input
+    # bearing, animation clock and flag services; leave clip selection and
+    # heading arithmetic in the Vita code.
+    service(0x81719FC4, lambda *_: (heading + 0x4000) & 65535)
+    service(0x8182B488, lambda *_: 0)
+    service(0x8182D39E, lambda *_: 0)
+    service(0x817333AA, lambda *_: 0)  # outside the calm turn's frame window
+    for profile, heading, expected, duration in (
+        (0, 4096, 6, 160), (1, 4096, 2, 58),
+        (1, 8192, 2, 58), (1, 8193, 8, 48), (2, -25000, 7, 48),
+    ):
+        cpu.mem_write(actor, bytes(4176))
+        setat(3, "B", 80)
+        setat(2848, "f", 1.)
+        observed.clear()
+        run(0x81CD3DF2, actor, ctx, profile)
+        assert observed == [("motion", expected)], (profile, heading, observed)
+        setat(468, "I", 1)
+        setat(488, "f", duration)
+        run(0x81CD3DF2, actor, ctx, profile)
+        step = int(32768 / duration) if profile else 0
+        assert getat(164, "H") == (step if heading > 0 else -step) & 65535
+    print("Vita turns: calm window and enraged short, left and right clips verified.")
+
+    # The native flight controller uses the full animation step for velocity
+    # and its integer part for the separate curve cursor. These reference values
+    # also exercise the motion-rate assumptions in the shipping NRO regression.
+    for kind, start in [(14, 76), (17, 70)]:
+        cpu.mem_write(actor, bytes(4176))
+        setat(1040, "B", 2)
+        setat(1353, "B", 1)
+        setat(1354, "B", 1)
+        setat(1356, "B", kind)
+        setat(1358, "h", start)
+        setat(480, "f", 2.6)
+        peak, steps = 0., []
+        for t in range(200):
+            z = getat(180, "f")
+            run(0x81CE4E06, actor)
+            steps.append(getat(180, "f") - z)
+            assert getat(1358, "h") == start + 2 * (t + 1)
+            peak = max(peak, getat(176, "f"))
+            if peak > 0 and getat(176, "f") <= 0:
+                break
+        assert abs(peak - 596.7) < .1, (kind, peak)
+        if kind == 17:
+            assert all(abs(dz + 150.475) < .02 for dz in steps[5:10]), steps[5:10]
+    print("Vita rage flight: both curves peak at 596.7; backhop reaches 150.475 units per tick.")
+
+    # Ordinary 1:11 reads species 80's own area table. Use the real records
+    # for field 226 and the empty sentinel for an unmapped field; only the
+    # stage identity/count services are supplied by the surrounding quest.
+    u32 = lambda addr: s.unpack("<I", cpu.mem_read(addr, 4))[0]
+    routes = u32(0x8257F99C + 40 * 80 + 4)
+    first = u32(routes + 4)
+    field, count, points = s.unpack("<hhI", cpu.mem_read(first, 8))
+    assert (field, count) == (226, 2)
+    coords = [s.unpack("<3f", cpu.mem_read(points + i * 12, 12)) for i in range(count)]
+    service(0x818E1AC4, lambda *_: 256)
+    service(0x818E37EA, lambda field, *_: field)
+    for area_id, roll, start, expected in [
+        (999, 0, coords[0], None),
+        (226, 0, coords[0], None),  # retries keep this roll, never switch to point 1
+        (226, 1, coords[0], coords[1]),
+    ]:
+        cpu.mem_write(actor, bytes(4176))
+        setat(3, "B", 80)
+        setat(20, "B", 11)
+        setat(2040, "H", area_id)
+        setat(2900, "I", routes)
+        setat(1096, "H", roll)
+        cpu.mem_write(actor + 172, s.pack("<3f", *start))
+        observed.clear()
+        run(0x81CD3E9A, actor, ctx)
+        if expected is None:
+            assert getat(5, "B") == 7 and not observed
+            run(0x81CD3E9A, actor, ctx)
+            assert observed == [("request", 0, 1)]
+        else:
+            assert observed == [("request", 1, 12)]
+            assert s.unpack("<3f", cpu.mem_read(actor + 2852, 12)) == expected
+    print("Vita patrol: unmapped area and near point skip; mapped far point starts patrol.")
+
+    for request_id, clip in [(3, 110), (0, 111)]:
+        cpu.mem_write(actor, bytes(4176))
+        setat(3, "B", 80)
+        setat(20, "H", 3 << 8 | request_id)
+        setat(2726, "B", 1)
+        observed.clear()
+        run(0x81CCE8E2, actor, ctx)
+        assert observed == [("motion", clip)]
+        setat(468, "I", 1)
+        run(0x81CCE8E2, actor, ctx)
+        assert observed == [("motion", clip)]
+        setat(468, "I", 0)
+        run(0x81CCE8E2, actor, ctx)
+        assert observed == [("motion", clip), ("request", 0, 1)]
+    print("Vita: rage entry plays 110; the repeatable battle request 3:0 plays 111.")
+
+    # 3:12 is the calm stationary tail action, not either spinning-tail variant.
+    cpu.mem_write(actor, bytes(4176))
+    setat(3, "B", 80)
+    setat(20, "H", 3 << 8 | 12)
+    setat(164, "H", 7070)
+    observed.clear()
+    run(0x81CCE8E2, actor, ctx)
+    assert observed == [("motion", 106)] and getat(164, "H") == 7070
+    setat(468, "I", 1)
+    run(0x81CCE8E2, actor, ctx)
+    assert observed == [("motion", 106)] and getat(164, "H") == 7070
+    setat(468, "I", 0)
+    run(0x81CCE8E2, actor, ctx)
+    assert observed == [("motion", 106), ("request", 0, 1)] and getat(164, "H") == 7070
+    print("Vita 3:12: motion 106, unchanged facing until return to idle.")
+
 
 if __name__ == "__main__":
     a = argparse.ArgumentParser(description=__doc__)

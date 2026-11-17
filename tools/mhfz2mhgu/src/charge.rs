@@ -1,16 +1,17 @@
-//! Ordinary Espinas single-action experiment on GU Rathian's existing 1:0 handler.
+//! Build the independent Espinas hunt and the single-action replay archives.
+mod contacts;
 use crate::{Monster, model, motion, package, read};
 use anyhow::{Context, Result, ensure};
 use glam::{Quat, Vec4};
 use mhf_resource::{
-    monster::{BodyVolume, MotionBinding, Tables},
+    monster::{MotionBinding, Tables},
     motion::MotionArchive,
     pac,
     rig::{Rig, rotation},
 };
 use mhgu_resource::{
     arc::{self, Asset},
-    bdd, emc, focus, graft,
+    dtt, emc, graft,
     lmt::{Track, Usage, Writer},
 };
 use std::{collections::BTreeMap, path::Path};
@@ -30,7 +31,35 @@ fn put(b: &mut [u8], p: usize, v: usize) {
     b[p..p + 4].copy_from_slice(&(v as u32).to_le_bytes());
 }
 
-fn selector(b: &[u8]) -> Result<Vec<u8>> {
+// GU's ordinary quest/perception entries schedule one native action, 1:0.
+// Its callback runs the Espinas selector. No secondary script or retail
+// monster command table participates in a tower hunt. Damage/death/capture
+// dispatch directly through the GU actor and retain their completion logic.
+fn hunt_commands() -> Result<Vec<u8>> {
+    let mut scripts = emc::Scripts::new();
+    for (group, count) in [
+        (0, 51),
+        (3, 1),
+        (4, 1),
+        (5, 2),
+        (6, 1),
+        (8, 2),
+        (9, 1),
+        (10, 3),
+        (11, 1),
+        (12, 1),
+        (13, 1),
+        (16, 1),
+        (18, 3),
+    ] {
+        for slot in 0..count {
+            scripts.insert((group, slot), vec![0, 1, 0, emc::END]);
+        }
+    }
+    emc::encode(&scripts)
+}
+
+fn replay_selector(b: &[u8]) -> Result<Vec<u8>> {
     ensure!(
         b.starts_with(b"EMC\0") && u32_at(b, 8)? == 21,
         "not a native GU command table"
@@ -42,6 +71,9 @@ fn selector(b: &[u8]) -> Result<Vec<u8>> {
         for i in 0..count {
             let len = u32_at(b, table + i * 16)?;
             let pos = u32_at(b, table + i * 16 + 4)?;
+            // GU's perception dispatcher (7F0CC) switches directly into these
+            // EMC groups, bypassing the normal selector, including on rage entry.
+            // Keep native damage and other quest scripts intact.
             let data = if g == 0 {
                 vec![0, 1, 0, emc::END]
             } else {
@@ -280,178 +312,6 @@ pub fn replay(sequence: &[(u8, u8)]) -> Result<Action> {
     })
 }
 
-fn melee(
-    tables: &Tables<'_>,
-    ids: &[u8],
-    hz: &[u8],
-    atk: &[u8],
-    events: &[(u16, u16, u16)],
-) -> Result<(Vec<u8>, Vec<u8>)> {
-    ensure!(
-        hz.starts_with(b"HTS\0") && atk.starts_with(b"HDE\0") && u32_at(atk, 8)? == 64,
-        "expected em001_00 attack data"
-    );
-    let n = u32_at(hz, 8)?;
-    let mut groups = Vec::new();
-    for i in 0..n {
-        let len = u32_at(hz, 16 + i * 8)?;
-        let off = u32_at(hz, 20 + i * 8)?;
-        groups.push(
-            hz.get(off..off + 48 * len)
-                .context("short native HTS group")?
-                .to_vec(),
-        );
-    }
-    let empty = u8::try_from(
-        groups
-            .iter()
-            .position(Vec::is_empty)
-            .context("missing empty native hit group")?,
-    )?;
-    let mut dst = atk.to_vec();
-    let attack_count = 63 + events.len();
-    dst.resize(16 + 32 * attack_count, 0);
-    let mut cut_groups = Vec::new();
-    let mut mapped_groups = BTreeMap::new();
-    for i in [8, 50] {
-        dst[16 + 32 * i + 25] = empty;
-    }
-    for (index, &(effect, frame, end)) in events.iter().enumerate() {
-        let slot = if index == 0 { 19 } else { 63 + index };
-        let a = tables.melee(effect)?;
-        let r = a.record;
-        let shape_group = |severed: bool| -> Result<Vec<u8>> {
-            let mut bytes = vec![];
-            for v in &a.volumes {
-                if severed && v.disabled_by & 1 != 0 {
-                    continue;
-                }
-                ensure!(
-                    v.disabled_by <= 1 && v.flags == 0,
-                    "unmapped melee contact flags"
-                );
-                for h in [
-                    if v.joint == 127 {
-                        255
-                    } else {
-                        u16::from(ids[usize::from(v.joint)])
-                    },
-                    0,
-                    v.shape,
-                    0,
-                ] {
-                    bytes.extend(h.to_le_bytes());
-                }
-                for f in [
-                    0., v.radius, v.start[0], v.start[1], v.start[2], 0., v.end[0], v.end[1],
-                    v.end[2], 0.,
-                ] {
-                    bytes.extend(f.to_le_bytes());
-                }
-            }
-            Ok(bytes)
-        };
-        // FZ reuses one geometry group from multiple effects and motions.
-        // GU stores group IDs in one byte; only distinct geometries need slots.
-        let (group, cut) = *match mapped_groups.entry(a.group) {
-            std::collections::btree_map::Entry::Occupied(o) => o.into_mut(),
-            std::collections::btree_map::Entry::Vacant(v) => {
-                let group = u8::try_from(groups.len())?;
-                groups.push(shape_group(false)?);
-                let cut = if a.volumes.iter().any(|v| v.disabled_by != 0) {
-                    let cut = u8::try_from(groups.len())?;
-                    groups.push(shape_group(true)?);
-                    cut
-                } else {
-                    group
-                };
-                v.insert((group, cut))
-            }
-        };
-        cut_groups.push(cut);
-        let source_status = u32::from_le_bytes(r[20..24].try_into()?);
-        ensure!(
-            matches!(source_status, 0 | 2),
-            "unmapped FZ melee status {source_status:#x}"
-        );
-        // Rathian physical/poison contact policy; transplant the FZ timing, base
-        // power, reaction, guard strength and poison amount, not unknown bitfields.
-        let native = if source_status == 2 { 7 } else { 1 };
-        let row = &mut dst[16 + 32 * slot..48 + 32 * slot];
-        row.copy_from_slice(&atk[16 + 32 * native..48 + 32 * native]);
-        let delay = u16::from_le_bytes(r[0..2].try_into()?);
-        let duration = u16::from_le_bytes(r[2..4].try_into()?);
-        let start = frame + delay;
-        row[0..2].copy_from_slice(&start.to_le_bytes());
-        row[2..4].copy_from_slice(&duration.min(end - start).to_le_bytes());
-        row[4..8].copy_from_slice(&r[4..8]);
-        row[11] = r[14];
-        row[16..20].copy_from_slice(&source_status.to_le_bytes());
-        row[25] = group;
-        row[29] = u8::try_from(u32::from_le_bytes(r[24..28].try_into()?))?;
-    }
-    // Native HDE loads counted 32-byte rows. These last rows are never armed.
-    // They let the companion plugin recover the tail variant for every contact,
-    // including the primary slot, without hardcoding the move or the donor's group IDs.
-    let cut_start = dst.len();
-    dst.extend(&cut_groups);
-    dst.resize(cut_start + 32 * events.len().div_ceil(32), 0);
-    let footer = dst.len();
-    dst.resize(footer + 32, 0);
-    dst[footer..footer + 4].copy_from_slice(b"ESP1");
-    put(&mut dst, footer + 4, events.len());
-    let total = (dst.len() - 16) / 32;
-    put(&mut dst, 8, total);
-    let mut h = hz[..16].to_vec();
-    put(&mut h, 8, groups.len());
-    h.resize(16 + 8 * groups.len(), 0);
-    for (i, g) in groups.into_iter().enumerate() {
-        let off = h.len();
-        put(&mut h, 16 + i * 8, g.len() / 48);
-        put(&mut h, 20 + i * 8, off);
-        h.extend(g);
-    }
-    Ok((h, dst))
-}
-
-fn body(donor: &[u8], source: Vec<BodyVolume>, ids: &[u8]) -> Result<Vec<u8>> {
-    let mut gu = bdd::Body::read(donor)?;
-    let native = std::mem::take(&mut gu.volumes);
-    for fz in source {
-        // These three actor-root utility spheres aren't ordinary damage volumes. Keep
-        // Rathian's native actor-level volume below, not three extra hittable body parts.
-        if fz.joint == 1 && matches!(fz.flags, 5 | 0x300 | 0x1800) {
-            continue;
-        }
-        // Keep GU contact flags from the same anatomical part, preferring the same
-        // hitzone as well. FZ packs its contact flags differently from GU.
-        let policy = native
-            .iter()
-            .filter(|v| v.part == fz.part && v.bone != 255)
-            .min_by_key(|v| (v.hitzone != fz.hitzone, v.disabled_by != 0))
-            .with_context(|| format!("no Rathian body part {}", fz.part))?;
-        let bone = *ids
-            .get(usize::from(fz.joint))
-            .context("FZ body joint outside Espinas skeleton")?;
-        gu.volumes.push(bdd::Volume {
-            bone: u16::from(bone),
-            other_bone: u16::MAX,
-            shape: fz.shape,
-            hitzone: fz.hitzone,
-            part: fz.part,
-            flags: policy.flags,
-            disabled_by: fz.disabled_by,
-            extra: policy.extra,
-            radius: fz.radius,
-            start: fz.start,
-            end: fz.end,
-        });
-    }
-    gu.volumes
-        .extend(native.into_iter().filter(|v| v.bone == 255));
-    gu.encode()
-}
-
 pub fn build(
     input: &Path,
     donor_path: &Path,
@@ -491,6 +351,7 @@ fn build_mode(
     let tables = Tables::espinas(&elf)?;
     let visual = package::build(&monster, template, E, 1, 2, 0)?;
     let mut replacements = BTreeMap::new();
+    let mut audio = Vec::new();
     for e in arc::entries(&visual)? {
         if e.kind != arc::MOTION {
             replacements.insert((e.name.to_string(), e.kind), e.unpack()?);
@@ -505,10 +366,17 @@ fn build_mode(
             .with_context(|| format!("missing donor resource {name}"))?
             .unpack()
     };
+    let mot = pac::member(&source, 2)?;
+    let a = MotionArchive::from_directory(&mot)?;
     let key = (MODEL.to_string(), arc::MODEL);
-    let (model, ids) = if action.is_none() {
-        let body = model::hunt_body(&pac::member(&pair, 0)?, &rig)?;
-        let (mut b, ids) = graft::graft(&get(MODEL, arc::MODEL)?, &body, &[])?;
+    let body_source = pac::member(&pair, 0)?;
+    let (model, ids, opening) = if action.is_none() {
+        let soles = model::Soles::espinas(&body_source, &rig)?;
+        let source_ids: Vec<_> = (0..rig.joints.len() as u8).collect();
+        let (_, mut opening, _) = bake_phases(&a, &rig, &source_ids, &[tables.motion(39)?])?;
+        soles.ground_sleep(&rig, &source_ids, 1, &mut opening)?;
+        let mut b = model::hunt_body(&body_source, &rig, &opening)?;
+        let ids = model::HUNT_JOINTS.to_vec();
         let mesh = u32_at(&b, 48)?;
         let groups = u32_at(&b, 40)?;
         // GU Rathian: 101 = intact tip, 8 = cut surface. Mesh group ids are
@@ -531,15 +399,21 @@ fn build_mode(
             };
             put(&mut b, q, (row & !4095) | group);
         }
-        (b, ids)
+        for t in &mut opening {
+            if t.bone != 255 {
+                t.bone = ids[usize::from(t.bone)];
+            }
+            t.samples.truncate(1);
+        }
+        (b, ids, Some((soles, opening)))
     } else {
-        graft::graft(&get(MODEL, arc::MODEL)?, &replacements[&key], &[1])?
+        let (body, ids) = graft::graft(&get(MODEL, arc::MODEL)?, &replacements[&key], &[1])?;
+        (body, ids, None)
     };
     replacements.insert(key, model);
-    let mot = pac::member(&source, 2)?;
-    let a = MotionArchive::from_directory(&mot)?;
     let hn = r"enemy\hit_data\em001_00_hitsize";
     let an = r"enemy\hit_data\em001_00_attackdata";
+    let mut hunt_tune = None;
     if let Some(action) = action {
         let mut writer = Writer::from_existing(get(MOT, arc::MOTION)?)?;
         let (frames, tracks, _) = bake_phases(&a, &rig, &ids, &[tables.motion(1)?])?;
@@ -559,10 +433,12 @@ fn build_mode(
         }
         writer.clip(4, frames, &tracks)?;
         replacements.insert((MOT.into(), arc::MOTION), writer.finish());
-        let (hits, attacks) = melee(&tables, &ids, &get(hn, HTS)?, &get(an, HDE)?, &events)?;
+        let (hits, attacks) =
+            contacts::replay_melee(&tables, &ids, &get(hn, HTS)?, get(an, HDE)?, &events)?;
         replacements.insert((hn.into(), HTS), hits);
         replacements.insert((an.into(), HDE), attacks);
     } else {
+        let (soles, opening) = opening.context("missing hunt opening pose")?;
         let tail = format!("{MODEL}_tail");
         replacements.insert(
             (tail.clone(), arc::MODEL),
@@ -572,14 +448,30 @@ fn build_mode(
             (tail, arc::MATERIAL),
             replacements[&(MODEL.to_string(), arc::MATERIAL)].clone(),
         );
+        // Forlorn Arena is a single-zone hunt. There are no waypoints, food
+        // routes or map transitions belonging to this GU encounter.
+        for (name, kind, revision) in [
+            ("area_link", 0x4bf84f6f, 0),
+            ("area_eat", 0x56d892d0, 0),
+            ("area_select", 0x15e98d21, 0x1fd),
+            ("area_patrol", 0x0947f3c8, 0x100),
+        ] {
+            replacements.insert(
+                (format!(r"enemy\{name}\{E}"), kind),
+                mhgu_resource::area::empty_routes(kind, revision),
+            );
+        }
+        replacements.insert(
+            (format!(r"enemy\map_info\{E}"), 0x197e4d7a),
+            mhgu_resource::area::empty_map_info(),
+        );
         let combat = mhf_resource::combat::Combat::espinas(&elf)?;
         let bank_name = MOT.strip_suffix("_0").unwrap().to_owned() + "_1";
-        let mut bank = Writer::from_existing(get(&bank_name, arc::MOTION)?)?;
-        let mut available = bank
-            .empty_slots()
-            .filter(|&i| i != 0)
-            .collect::<Vec<_>>()
-            .into_iter();
+        // Bank 1 belongs to the hunt controller. Keep its requests out of
+        // the common class's numbered native motion range.
+        let mut bank = Writer::new(256)?;
+        let mut available = 128..256;
+        let mut timeline = crate::sound::Timeline::new()?;
         let mut entries = Vec::new();
         let mut all_events = Vec::new();
         let mut runs = Vec::new();
@@ -600,7 +492,7 @@ fn build_mode(
                 (0, 13) => Some(220),
                 _ => None,
             };
-            let (frames, tracks, bounds) = match overlay {
+            let (frames, mut tracks, bounds) = match overlay {
                 Some(clip) => layered(
                     &a,
                     &rig,
@@ -611,34 +503,65 @@ fn build_mode(
                 )?,
                 None => bake_phases(&a, &rig, &ids, &phases)?,
             };
+            if matches!((g, id), (255, 39 | 34 | 37 | 62) | (0, 41 | 42)) {
+                soles.ground_sleep(&rig, &ids, frames, &mut tracks)?;
+            }
+            // From takeoff, the original flight handler supplies displacement.
+            // The MOT resets its local origin here; baking that reset as GU
+            // root motion pulled the actor back ~209 units in a single frame.
+            let takeoff = match (g, id) {
+                (3, 17) => Some(76),
+                (252, 116) => Some(36),
+                _ => None,
+            };
+            if let Some(frame) = takeoff {
+                let root = tracks
+                    .iter_mut()
+                    .find(|t| t.usage == Usage::RootTranslation)
+                    .context("missing flight root track")?;
+                let position = *root
+                    .samples
+                    .get(frame - 1)
+                    .context("short flight anticipation")?;
+                root.samples[frame..].fill(position);
+            }
             let mut loop_frame = looped.then_some(0);
-            if matches!((g, id), (3, 1 | 2 | 18 | 19) | (1, 0) | (251, 10)) {
-                // 81007FFE reads the compiled MOT loop flag and frame. Both
-                // run handlers use source 107; its repeat starts at 24, not 0.
+            let running = matches!((g, id), (3, 1 | 2 | 18 | 19) | (1, 0) | (251, 10));
+            if running || takeoff.is_some() {
+                // FZ keeps playing the authored loop until the handler brakes or lands.
                 let m = a
                     .motion_by_native_id(phases[0].clip)?
-                    .context("missing charge motion")?;
-                ensure!(m.metadata_present == 1, "charge has no authored loop");
+                    .context("missing looping motion")?;
+                ensure!(m.metadata_present == 1, "motion has no authored loop");
                 let f = f32::from_bits(m.metadata);
                 ensure!(
                     f.fract() == 0. && (0.0..frames as f32).contains(&f),
-                    "invalid charge loop"
+                    "invalid motion loop"
                 );
                 loop_frame = Some(f as u32);
-                let root = tracks
-                    .iter()
-                    .find(|t| t.usage == Usage::RootTranslation)
-                    .context("missing charge travel")?;
-                ensure!(
-                    root.samples.len() == frames as usize,
-                    "invalid charge root curve"
-                );
-                runs.push((
-                    entries.len(),
-                    root.samples.iter().map(|s| s.z).collect::<Vec<_>>(),
-                    f as u16,
-                ));
+                if running {
+                    let root = tracks
+                        .iter()
+                        .find(|t| t.usage == Usage::RootTranslation)
+                        .context("missing charge travel")?;
+                    ensure!(
+                        root.samples.len() == frames as usize,
+                        "invalid charge root curve"
+                    );
+                    runs.push((
+                        entries.len(),
+                        root.samples.iter().map(|s| s.z).collect::<Vec<_>>(),
+                        f as u16,
+                    ));
+                }
             }
+            timeline.bind(
+                1000 + slot,
+                action.motions,
+                &bounds,
+                overlay.unwrap_or(0),
+                &ids,
+            )?;
             bank.clip_with_loop(slot, frames, &tracks, loop_frame)?;
             let mut row = [0u8; 32];
             row[0] = g;
@@ -699,6 +622,16 @@ fn build_mode(
                 m == 34,
             )?;
         }
+        // An awake monster without a hunter waits in its FZ standing idle.
+        bind(
+            255,
+            1,
+            Action {
+                motions: &[1],
+                events: &[],
+            },
+            true,
+        )?;
         for id in [41, 42] {
             bind(
                 0,
@@ -1020,15 +953,48 @@ fn build_mode(
         for id in [9, 12, 15] {
             bind(3, id, replay(&[(3, id)])?, false)?;
         }
+        // 81CE4652 remaps an ordinary turn to 1:2/3 while enraged. Both
+        // use the same three clips. 81CD8FFE dispatches their melee by clip.
+        for (id, motions, events) in [
+            (2, &[2][..], &[][..]),
+            (7, &[7], &[(0, 2, 63), (0, 18, 62)]),
+            (8, &[8], &[(0, 2, 64), (0, 18, 65)]),
+        ] {
+            bind(253, id, Action { motions, events }, false)?;
+        }
+        bind(
+            2,
+            7,
+            Action {
+                motions: &[15],
+                events: &[],
+            },
+            true,
+        )?;
+        // Rage entry (11:0) ends in 3:3 even though battle 0:3 never draws it.
+        bind(
+            3,
+            3,
+            Action {
+                motions: &[110],
+                events: &[(0, 110, 76), (0, 122, 77)],
+            },
+            false,
+        )?;
         // GU 9B2BC -> CF43D8 -> A134C: grounded death 11:0 ends on
         // bank 3 slot 17. Keep its native completion/quest command.
         let reaction_bank = MOT.strip_suffix("_0").unwrap().to_owned() + "_3";
         let mut native_reactions = Writer::from_existing(get(&reaction_bank, arc::MOTION)?)?;
-        for (slot, source) in [(17, 68), (10, 77), (11, 78), (12, 82)] {
-            let (frames, tracks, _) = bake_phases(&a, &rig, &ids, &[tables.motion(source)?])?;
+        for (slot, source) in [(17, 68), (10, 77), (11, 78), (12, 82), (14, 38), (20, 97)] {
+            let binding = tables.motion(source)?;
+            let (frames, mut tracks, _) =
+                bake_phases(&a, &rig, &ids, std::slice::from_ref(&binding))?;
+            if source == 38 {
+                soles.ground_sleep(&rig, &ids, frames, &mut tracks)?;
+            }
             let lp = if slot == 10 {
                 let m = a
-                    .motion_by_native_id(tables.motion(source)?.clip)?
+                    .motion_by_native_id(binding.clip)?
                     .context("missing airborne fall")?;
                 (m.metadata_present == 1)
                     .then(|| f32::from_bits(m.metadata) as u32)
@@ -1036,6 +1002,7 @@ fn build_mode(
             } else {
                 None
             };
+            timeline.bind(3000 + slot, &[source], &[0, frames], 0, &ids)?;
             native_reactions.clip_with_loop(slot, frames, &tracks, lp)?;
         }
         replacements.insert((reaction_bank, arc::MOTION), native_reactions.finish());
@@ -1048,8 +1015,7 @@ fn build_mode(
             .zip([60u8, 66, 63, 64, 69, 70, 71, 74, 75, 72])
         {
             let binding = tables.motion(source)?;
-            let (frames, tracks, _) = bake_phases(&a, &rig, &ids, &[binding])?;
-            let binding = tables.motion(source)?;
+            let (frames, tracks, _) = bake_phases(&a, &rig, &ids, std::slice::from_ref(&binding))?;
             let m = a
                 .motion_by_native_id(binding.clip)?
                 .context("missing flinch")?;
@@ -1058,6 +1024,7 @@ fn build_mode(
             } else {
                 None
             };
+            timeline.bind(4000 + slot, &[source], &[0, frames], 0, &ids)?;
             rx.clip_with_loop(slot, frames, &tracks, lp)?;
             let mut row = [0; 32];
             row[0] = 249;
@@ -1068,9 +1035,7 @@ fn build_mode(
             entries.push(row);
         }
         replacements.insert((reaction_bank, arc::MOTION), rx.finish());
-        let (hits, mut hde) = melee(&tables, &ids, &get(hn, HTS)?, &get(an, HDE)?, &all_events)?;
-        // Replace the replay footer; everything before it is still native HDE rows.
-        hde.truncate(hde.len() - 32);
+        let (hits, mut hde) = contacts::hunt_melee(&tables, &ids, &all_events)?;
         for (index, samples, repeat) in runs {
             put(&mut entries[index], 8, (hde.len() - 16) / 32);
             entries[index][12..14].copy_from_slice(&u16::try_from(samples.len())?.to_le_bytes());
@@ -1080,47 +1045,30 @@ fn build_mode(
             }
             hde.resize(16 + (hde.len() - 16).next_multiple_of(32), 0);
         }
-        let (fire, speed, radius, offset) = tables.fireball()?;
+        let fireball = tables.fireball()?;
+        let offset = fireball.offset;
         for entry in &mut entries {
             let (g, id) = (entry[0], entry[1]);
-            let flight = match (g, id) {
-                (3, 17) => Some(14),
-                (252, 116) => Some(17),
-                _ => None,
+            let curves = match (g, id) {
+                (3, 17) => Vec::from(tables.flight_curves(14)?),
+                (252, 116) => Vec::from(tables.flight_curves(17)?),
+                (2, 7) => vec![tables.hover_curve()?],
+                _ => continue,
             };
-            if let Some(kind) = flight {
-                let curves = tables.flight_curves(kind)?;
-                for (i, c) in curves.into_iter().enumerate() {
-                    put(entry, 8 + 4 * i, (hde.len() - 16) / 32);
-                    hde.extend((c.len() as u32).to_le_bytes());
-                    for (frame, val) in c {
-                        hde.extend(frame.to_le_bytes());
-                        hde.extend(val.to_le_bytes());
-                    }
-                    hde.resize(16 + (hde.len() - 16).next_multiple_of(32), 0);
+            for (i, c) in curves.into_iter().enumerate() {
+                put(entry, 8 + 4 * i, (hde.len() - 16) / 32);
+                hde.extend((c.len() as u32).to_le_bytes());
+                for (frame, val) in c {
+                    hde.extend(frame.to_le_bytes());
+                    hde.extend(val.to_le_bytes());
                 }
+                hde.resize(16 + (hde.len() - 16).next_multiple_of(32), 0);
             }
         }
         let sh = r"shell\em\em001_00_shell00\em001_00_00";
-        let n = format!("{sh}_hitdata");
-        let k = 0x4eb68cee;
-        let mut shell = get(&n, k)?;
-        ensure!(
-            shell.starts_with(b"HDS\0") && shell.len() == 128,
-            "unexpected Rathian shell HDS"
-        );
-        // The first HDS row is the moving fireball. Leave the explosion a
-        // separate resource, so the native impact can register it independently.
-        shell[16..24].copy_from_slice(&fire[..8]);
-        shell[27] = fire[14];
-        shell[32..36].copy_from_slice(&fire[20..24]);
-        shell[45] = u8::try_from(u32::from_le_bytes(fire[24..28].try_into()?))?;
-        replacements.insert((n, k), shell);
-        let n = format!("{sh}_hitsize");
-        let mut shapes = get(&n, HTS)?;
-        let pos = u32_at(&shapes, 20)?;
-        shapes[pos + 12..pos + 16].copy_from_slice(&radius.to_le_bytes());
-        replacements.insert((n, HTS), shapes);
+        let (shell, shapes) = contacts::fireball(&fireball)?;
+        replacements.insert((format!("{sh}_hitdata"), 0x4eb68cee), shell);
+        replacements.insert((format!("{sh}_hitsize"), HTS), shapes);
         let directory = (hde.len() - 16) / 32;
         for entry in &entries {
             hde.extend(entry);
@@ -1132,36 +1080,54 @@ fn build_mode(
             .and_then(Path::parent)
             .context("expected dat/emmodel PAC")?
             .join("mhfemd.bin");
+        // Native GU capture 11:16 plays 3:14 then holds 0:19. FZ 6:5
+        // settles with motion 38 and breathes in 34; leave quest completion to GU.
+        let (frames, mut resting, _) = bake_phases(&a, &rig, &ids, &[tables.motion(34)?])?;
+        soles.ground_sleep(&rig, &ids, frames, &mut resting)?;
+        timeline.bind(19, &[34], &[0, frames], 0, &ids)?;
+        audio = timeline.assets(&emd_path.with_file_name("sound"))?;
+        let dat = pac::decode(read(&emd_path.with_file_name("mhfdat.bin"))?)?;
+        for rank in 0..5 {
+            let base = if rank < 2 { 407 } else { 410 };
+            replacements.insert(
+                (format!(r"enemy\hagi\hagi_s{rank}_em001_00"), 0x33a84e14),
+                carve_table(&dat, base)?,
+            );
+        }
         let emd = pac::decode(read(&emd_path)?)?;
         let species = u32_at(&emd, 12)? + 192 * 80;
         let zones = u32_at(&emd, species + 12)?;
         let anger = u32_at(&emd, species + 72)?;
         let physiology = (hde.len() - 16) / 32;
-        hde.extend(
-            emd.get(anger..anger + 60)
-                .context("missing FZ anger profile")?,
-        );
-        for z in emd
+        let profile = emd
+            .get(anger..anger + 60)
+            .context("missing FZ anger profile")?;
+        hde.extend(profile);
+        let raw_zones: &[u8; 140] = emd
             .get(zones..zones + 140)
             .context("missing FZ body hitzones")?
-            .as_chunks::<10>()
-            .0
-        {
-            // FZ 816A09AC: physical columns begin at +1; GU BAB60 at +0.
-            // GU's additional mount accumulation is not an FZ hitzone.
-            hde.extend(&z[1..10]);
-            hde.push(0);
-        }
+            .try_into()?;
+        let hitzones = std::array::from_fn(|i| {
+            let mut row = [0; 10];
+            // FZ 816A09AC starts at +1; GU starts at +0. No FZ mount column.
+            row[..9].copy_from_slice(&raw_zones[10 * i + 1..10 * i + 10]);
+            row
+        });
+        hunt_tune = Some(dtt::HuntTune {
+            hitzones,
+            anger: profile[..16].try_into()?,
+        });
         hde.resize(16 + (hde.len() - 16).next_multiple_of(32), 0);
         let params = (hde.len() - 16) / 32;
         let mut header = [0; 32];
         for (i, d) in combat.distances.iter().enumerate() {
             header[4 * i..4 * i + 4].copy_from_slice(&d.to_le_bytes());
         }
-        header[16..20].copy_from_slice(&speed.to_le_bytes());
+        header[16..20].copy_from_slice(&fireball.speed.to_le_bytes());
         header[20..24].copy_from_slice(&offset[1].to_le_bytes());
         header[24..28].copy_from_slice(&offset[2].to_le_bytes());
         header[28] = ids[34];
+        header[29] = ids[35]; // sleep breath origin
         header[30..32].copy_from_slice(&u16::try_from(physiology)?.to_le_bytes());
         ensure!(offset[0] == 0., "unexpected lateral projectile origin");
         hde.extend(header);
@@ -1243,49 +1209,42 @@ fn build_mode(
         replacements.insert((hn.into(), HTS), hits);
         replacements.insert((bank_name, arc::MOTION), bank.finish());
         let mut base = Writer::from_existing(get(MOT, arc::MOTION)?)?;
-        // The donor can request its neutral pose before the first AI callback.
-        let (frames, tracks, _) = bake_phases(&a, &rig, &ids, &[tables.motion(34)?])?;
-        base.clip_with_loop(1, frames, &tracks, Some(0))?;
+        // A neutral request can precede the AI. Hold the first lying-down
+        // frame without advancing the sequence; the first callback starts 39.
+        base.clip_with_loop(1, 2, &opening, Some(0))?;
+        base.clip_with_loop(19, frames, &resting, Some(0))?;
         replacements.insert((MOT.into(), arc::MOTION), base.finish());
     }
     let bn = r"enemy\body_data\em001_00_bodydata";
-    replacements.insert(
-        (bn.into(), BDD),
-        body(&get(bn, BDD)?, tables.body()?, &ids)?,
-    );
+    let body = if action.is_none() {
+        contacts::hunt_body(tables.body()?, &ids)?
+    } else {
+        contacts::replay_body(&get(bn, BDD)?, tables.body()?, &ids)?
+    };
+    replacements.insert((bn.into(), BDD), body.encode()?);
     let dn = r"enemy\dt_tune\em001_00_dttune";
     replacements.insert(
         (dn.into(), DTT),
-        focus::rathian(get(dn, DTT)?, ids[3], ids[30])?,
+        dtt::rathian(get(dn, DTT)?, ids[3], ids[30], hunt_tune.as_ref())?,
     );
     let cam = r"enemy\cam_body_data\em001_00_cambodydata";
-    // Same surface the camera can actually see: torso, neck, skull, legs and tail,
-    // excluding wing membranes and the special actor-level damage helper.
-    let mut camera = bdd::Body::read(&get(cam, BDD)?)?;
-    camera.volumes = bdd::Body::read(&replacements[&(bn.into(), BDD)])?
-        .volumes
-        .into_iter()
-        .filter(|v| v.bone != 255 && !matches!(v.part, 1 | 2))
-        .map(|v| bdd::Volume {
-            flags: 0,
-            extra: 0,
-            hitzone: 0,
-            part: 0,
-            ..v
-        })
-        .collect();
-    replacements.insert((cam.into(), BDD), camera.encode()?);
+    replacements.insert((cam.into(), BDD), contacts::camera_body(body).encode()?);
     let cn = r"enemy\cmd_tbl\em001_00_cmdtbl";
     replacements.insert(
         (cn.into(), arc::COMMAND),
-        selector(&get(cn, arc::COMMAND)?)?,
+        if action.is_none() {
+            hunt_commands()?
+        } else {
+            replay_selector(&get(cn, arc::COMMAND)?)?
+        },
     );
     let mut assets = vec![];
-    for e in native {
+    for e in &native {
         let key = (e.name.to_string(), e.kind);
         let data = match replacements.remove(&key) {
             Some(b) => b,
-            None => e.unpack()?,
+            None if action.is_some() || hunt_support(e.name, e.kind) => e.unpack()?,
+            None => continue,
         };
         assets.push(Asset {
             name: key.0,
@@ -1299,7 +1258,117 @@ fn build_mode(
         .map(|((name, kind), data)| Asset { name, kind, data })
         .collect();
     ordered.append(&mut assets);
+    if action.is_none() {
+        isolate_hunt(&mut ordered, audio)?;
+    }
     arc::encode(&ordered)
+}
+
+// Only the GU class services still consumed by the encounter. New resources
+// appearing in the reference archive must not silently become Espinas content.
+fn hunt_support(name: &str, kind: u32) -> bool {
+    match name.split('\\').next() {
+        Some("enemy") => {
+            matches!(
+                kind,
+                0x59d9c3da | 0x1bbc291e |   // physical parameters and break controller
+            0x39c52040 | 0x7cd0e77e |   // camera and model support
+            0x1f149aec
+            ) || kind == arc::MOTION && (name.ends_with("_2") || name.ends_with("_option"))
+        }
+        Some("shell") => name.starts_with(r"shell\em\em001_00_shell00\"),
+        Some("effect") => true, // renderer assets referenced by the two PEL lists
+        Some("sound") => name.starts_with(r"sound\pts\") || name.starts_with(r"sound\se\com\"),
+        _ => false,
+    }
+}
+
+// FZ mhfdat's four-byte carve rows have implicit quantity one. GU rHagi
+// uses a directory, then up to 80 (weight, quantity, item) records.
+fn carve_table(dat: &[u8], base: usize) -> Result<Vec<u8>> {
+    let directory = u32_at(dat, 288)?;
+    let mut out = vec![255; 26];
+    out[..4].copy_from_slice(&0x14120103u32.to_le_bytes());
+    for (offset, group) in [1, 4, 10].into_iter().enumerate() {
+        let start = u32_at(dat, directory + 4 * (base + offset))?;
+        out[4 + group] = ((out.len() - 26) / 4).try_into()?;
+        let mut total = 0u16;
+        let mut input = dat
+            .get(start..)
+            .context("missing Espinas carve table")?
+            .chunks_exact(4);
+        loop {
+            let r = input.next().context("unterminated Espinas carve table")?;
+            let w = u16::from_le_bytes(r[..2].try_into()?);
+            if w == u16::MAX {
+                break;
+            }
+            ensure!(w > 0 && w <= 100 - total, "invalid Espinas carve weight");
+            total += w;
+            let item: u16 = match u16::from_le_bytes(r[2..].try_into()?) {
+                i @ 1046..=1052 => 2980 + i - 1046,
+                322 => 432,
+                325 => 2128,
+                950 => 452,
+                i => anyhow::bail!("unmapped FZ carve item {i}"),
+            };
+            out.extend([w as u8, 1]);
+            out.extend(item.to_le_bytes());
+        }
+        ensure!(total == 100, "incomplete Espinas carve distribution");
+        out.extend([255, 255, 0, 0]);
+    }
+    out[4] = ((out.len() - 26) / 4).try_into()?;
+    ensure!(out.len() <= 346, "too many carve entries");
+    while out.len() < 346 {
+        out.extend([255, 255, 0, 0]);
+    }
+    Ok(out)
+}
+
+// The projectile preload list is also keyed by (hash, class), not by the ARC
+// filename. Build it from the published assets so it cannot preload em001.
+fn isolate_hunt(assets: &mut Vec<Asset>, audio: Vec<Asset>) -> Result<()> {
+    const SHELL: u32 = 0x4aa69872;
+    const PEL: u32 = 0x5a525c16;
+    const ARCS: u32 = 0x73850d05;
+    for asset in assets.iter_mut().filter(|a| a.name.contains("em001")) {
+        asset.name = asset.name.replace("em001", "em107");
+        if matches!(asset.kind, arc::MATERIAL | SHELL | PEL) {
+            rename_path(&mut asset.data);
+        }
+    }
+    assets.extend(audio);
+    let mut list = b"ARCS\x11\0\0\0\xcd\xcd\xcd\xcd".to_vec();
+    for a in assets.iter().filter(|a| {
+        a.name.starts_with(r"shell\")
+            || a.name.starts_with(r"effect\") && !a.name.starts_with(r"effect\psl\")
+            || a.name.starts_with(r"sound\") && !a.name.starts_with(r"sound\call\")
+    }) {
+        let h = a.name.bytes().fold(u32::MAX, |mut crc, b| {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = crc >> 1 ^ (0xedb88320 & 0u32.wrapping_sub(crc & 1));
+            }
+            crc
+        });
+        list.extend(h.to_le_bytes());
+        list.extend(a.kind.to_le_bytes());
+    }
+    let count = u16::try_from((list.len() - 12) / 8)?;
+    list[6..8].copy_from_slice(&count.to_le_bytes());
+    assets.push(Asset {
+        name: r"arc\shell\em\em107_00_shell".into(),
+        kind: ARCS,
+        data: list,
+    });
+    Ok(())
+}
+
+fn rename_path(path: &mut [u8]) {
+    while let Some(i) = path.windows(5).position(|w| w == b"em001") {
+        path[i..i + 5].copy_from_slice(b"em107");
+    }
 }
 
 /// Standalone, independently addressable PAC clips for the same grafted skeleton

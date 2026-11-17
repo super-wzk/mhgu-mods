@@ -3,6 +3,7 @@ mod emc;
 mod model;
 mod motion;
 mod package;
+mod sound;
 #[cfg(test)]
 mod tests;
 
@@ -93,6 +94,13 @@ enum Command {
         motion_member: usize,
         #[arg(long, default_value_t = 0)]
         group: usize,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Export the ordinary Espinas icon using Frontier's species-to-icon table
+    HuntIcon {
+        #[arg(long)]
+        data: PathBuf,
         #[arg(short, long)]
         output: PathBuf,
     },
@@ -266,6 +274,32 @@ fn main() -> Result<()> {
                 group,
             )?,
         ),
+        Command::HuntIcon { data, output } => {
+            // Vita's hunting UI indexes the u16 table at mhfdat +1308, not
+            // micon by species number. Ordinary em080 selects entry 70.
+            let dat = pac::decode(read(&data.join("mhfdat.bin"))?)?;
+            let table = u32::from_le_bytes(
+                dat.get(1308..1312)
+                    .context("missing icon table")?
+                    .try_into()?,
+            ) as usize;
+            let pos = table + 2 * 80;
+            let index = u16::from_le_bytes(
+                dat.get(pos..pos + 2)
+                    .context("missing Espinas icon index")?
+                    .try_into()?,
+            );
+            let png = pac::member(&read(&data.join("micon128.bin"))?, index.into())?;
+            let icon = mhf_resource::image::decode(&png)?;
+            anyhow::ensure!(
+                (icon.width, icon.height) == (128, 128),
+                "invalid micon128 entry"
+            );
+            save(
+                &output,
+                mhgu_resource::tex::rgba8(icon.width, icon.height, &icon.rgba)?,
+            )
+        }
         Command::Hunt {
             pac,
             donor,

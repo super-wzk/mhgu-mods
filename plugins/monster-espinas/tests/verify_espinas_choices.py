@@ -9,6 +9,7 @@ and immediately resumed, without playing the action or advancing world time.
 import argparse
 import csv
 import struct
+from itertools import chain
 from pathlib import Path
 
 from unicorn import UC_ARCH_ARM, UC_HOOK_CODE, UC_MODE_ARM, Uc
@@ -51,7 +52,7 @@ def verify(elf_path, csv_path):
 
     def fetch():
         ins = bytes(cpu.mem_read(read(arm.UC_ARM_REG_R7), 4))
-        if ins[:2] == b"\xff\x00":
+        if ins[:2] == terminal:
             cpu.emu_stop()
         elif ins[0] == 5:
             requests.append(f"{ins[1]}:{ins[2]}")
@@ -64,9 +65,20 @@ def verify(elf_path, csv_path):
     def set_actor(offset, fmt, value):
         cpu.mem_write(actor + offset, struct.pack("<" + fmt, value))
 
+    terminal = b"\xff\x00"
     checked = 0
+    # Two actual calm decisions in area 4, including the nearly head-on tail.
+    tail_cases = [
+        dict(enraged=0, airborne=0, distance=distance, angle_units=angle, rng5=roll, requests="3:12")
+        for distance, angle, roll in [(652, 6439, 5), (547, 22, 6)]
+    ]
+    # Three consecutive decisions from the same enraged tower hunt.
+    repeat_cases = [
+        dict(enraged=1, airborne=0, distance=d, angle_units=a, rng5=r, requests="3:0")
+        for d, a, r in [(335, 29949, 30), (352, 22675, 30), (1486, 23883, 31)]
+    ]
     with csv_path.open() as f:
-        for row in csv.DictReader(f):
+        for row in chain(csv.DictReader(f), tail_cases, repeat_cases):
             cpu.mem_write(actor, bytes(4176))
             cpu.mem_write(sp, bytes(160))
             cpu.mem_write(actor + 2560, bytes(thresholds))
@@ -97,8 +109,42 @@ def verify(elf_path, csv_path):
                 and requests == row["requests"].split()
             ), (row, requests, hex(read(arm.UC_ARM_REG_PC)))
             checked += 1
-    assert checked == 2560, checked
-    print(f"{checked} battle choices match the original interpreter")
+    assert checked == 2560 + len(tail_cases) + len(repeat_cases), checked
+    print("2560 battle choices, both front-tail decisions and all three repeated 3:0 draws match Vita.")
+
+    stop = 0x1070000
+
+    def call(pc, arg):
+        for reg, value in [(arm.UC_ARM_REG_R0, arg), (arm.UC_ARM_REG_SP, sp),
+                           (arm.UC_ARM_REG_LR, stop | 1)]:
+            write(reg, value)
+        cpu.emu_start(pc | 1, stop, count=1000)
+        assert read(arm.UC_ARM_REG_PC) == stop
+        return read(arm.UC_ARM_REG_R0)
+
+    cpu.mem_write(actor, bytes(4176))
+    # This is a witness seed, not a reconstruction of the GU quest RNG state.
+    cpu.mem_write(0x84369624, struct.pack("<H", 61765))
+    assert [call(0x818FE0BE, 0) & 31 for _ in range(3)] == [30, 30, 31]
+
+    # Deliver the bit set by 8169B0D6 to the original event dispatcher.
+    set_actor(3, "B", 80)
+    set_actor(2544, "I", desc)
+    set_actor(2726, "B", 1)
+    set_actor(2823, "B", 8)
+    entry = call(0x816A5474, actor)
+    assert entry == u32(u32(desc + 11 * 4)) and call(0x816A5474, actor) == 0
+    terminal = b"\xff\xf8"
+    for posture, expected in [(0, ["3:3"]), (2, ["2:7", "2:1", "3:3"])]:
+        requests = []
+        set_actor(1040, "B", posture)
+        cpu.mem_write(sp, bytes(160))
+        for reg, value in [(arm.UC_ARM_REG_R9, actor), (arm.UC_ARM_REG_R7, entry),
+                           (arm.UC_ARM_REG_R10, 0), (arm.UC_ARM_REG_SP, sp)]:
+            write(reg, value)
+        cpu.emu_start(0x816AAA6B, 0, count=10000)
+        assert read(arm.UC_ARM_REG_PC) == 0x816AAACA and requests == expected, requests
+    print("Vita rage entry: ground roars; airborne approaches, lands and then roars.")
 
 
 if __name__ == "__main__":

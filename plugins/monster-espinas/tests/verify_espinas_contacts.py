@@ -1,6 +1,8 @@
 """Run the built Forge NRO and native GU contact timers/list in Unicorn.
 
-Loader services, resource references, and the surrounding quest are fixtures. No quest, previous player hits, terrain, or damage resolution.
+Loader services, resource references, and the surrounding quest are fixtures.
+Resolved hit amounts enter GU's native HP and anger accounting; weapon damage,
+terrain and a whole quest are not simulated.
 """
 
 import argparse
@@ -16,13 +18,20 @@ from game_files import GU_ELF, VITA_ELF, assets, elf
 def verify(mod):
     root = mod / "romfs/nativeNX"
     nro = (root / "plugins/monster_espinas.nro").read_bytes()
-    archive = assets(root / "arc/enemy/em001_00.arc")
-    rows = archive[r"enemy\hit_data\em001_00_attackdata", 0x70BB64BA]
+    independent = (root / "arc/enemy/em107_00.arc").is_file()
+    if independent:
+        archive = assets(root / "arc/enemy/em107_00.arc")
+    else:
+        archive = assets(root / "arc/enemy/em001_00.arc")
+    namespace = "em107" if independent else "em001"
+    def resource(path, kind):
+        return archive[path.replace("em001", namespace), kind]
+    rows = resource(r"enemy\hit_data\em001_00_attackdata", 0x70BB64BA)
     combined = rows[-32:-28] == b"ESH5"
     total = s.unpack_from("<I", rows, 8)[0]
-    hts_data = archive[r"enemy\hit_data\em001_00_hitsize", 0x5653C1B0]
+    hts_data = resource(r"enemy\hit_data\em001_00_hitsize", 0x5653C1B0)
     if not combined:
-        lmt = archive[r"enemy\em001\em001_00\mot\em001_00_0", 0x76820D81]
+        lmt = resource(r"enemy\em001\em001_00\mot\em001_00_0", 0x76820D81)
         frames = s.unpack_from("<I", lmt, s.unpack_from("<I", lmt, 24)[0] + 8)[0]
         # Independently observed species-80 native event dispatch for each test.
         events = {
@@ -55,7 +64,7 @@ def verify(mod):
         intact = []
         severed = []
         total = s.unpack_from("<I", rows, 8)[0]
-        model = archive[r"enemy\em001\em001_00\mod\em001_00", 0x58A15856]
+        model = resource(r"enemy\em001\em001_00\mod\em001_00", 0x58A15856)
         nb = s.unpack_from("<H", model, 6)[0]
         bones = s.unpack_from("<I", model, 36)[0]
         remap = model[bones + 152 * nb : bones + 152 * nb + 256]
@@ -132,7 +141,7 @@ def verify(mod):
             cpu.reg_write(regs[0], 0 if val is None else val)
             cpu.reg_write(arm.UC_ARM_REG_PC, cpu.reg_read(arm.UC_ARM_REG_LR))
 
-        cpu.hook_add(UC_HOOK_CODE, impl, begin=p, end=p)
+        return cpu.hook_add(UC_HOOK_CODE, impl, begin=p, end=p)
 
     stop = base + 0xF0000
     sp = base + 0x1E0000
@@ -195,11 +204,11 @@ def verify(mod):
 
     def hook(retbuf, target, detour, original):
         hooks[target] = detour
-        if combined and target == 0x7DC2C:
+        if combined and target in (0x7DC2C, 0xBCC04, 0xBCE6C):
             # Forge interposes calls from the NRO into the game as well. The
             # saved original executes the PC-independent first instruction then
             # rejoins GU immediately after it.
-            trampoline = stop + 0x800
+            trampoline = stop + 0x800 + 16 * (0x7DC2C, 0xBCC04, 0xBCE6C).index(target)
             cpu.mem_write(
                 trampoline,
                 bytes(cpu.mem_read(target, 4)) + s.pack("<II", 0xE51FF004, target + 4),
@@ -216,7 +225,10 @@ def verify(mod):
         cpu.mem_write(retbuf, bytes(24))
         return retbuf
 
-    services = {"forge_hook_create": hook, "malloc": alloc, "free": free}
+    messages = []
+    def log(level, fmt, msg, _):
+        messages.append(bytes(cpu.mem_read(msg, 512)).split(b"\0", 1)[0].decode())
+    services = {"forge_hook_create": hook, "malloc": alloc, "free": free, "forge_log": log}
     for tab, size in [(tags[17], tags[18]), (tags[23], tags[2])]:
         for off in range(tab, tab + size, 8):
             where, info = s.unpack_from("<II", nro, off)
@@ -235,12 +247,29 @@ def verify(mod):
     hts = base + 0x70000
     hde = base + 0x80000
     anchor = status + 2456
+    if independent:
+        # The separate quest test runs the actual provider. Here a minimal
+        # published V2 service makes the combat replay independent of save/quest I/O.
+        owner = base + 0xe0800
+        put(0x18a6190 + 56, owner)
+        stub(0x13effd4, lambda *_: owner)
+        descriptor, api, name, register = (owner + n for n in (64, 128, 160, 200))
+        cpu.mem_write(name, b"mhgu::MonsterRegistryV2\0")
+        put(descriptor + 4, name)
+        put(descriptor + 32, int.from_bytes(b"MRG2", "little"))
+        put(descriptor + 36, api)
+        put(api, register)
+        stub(0x7aef68, lambda *_: descriptor)
+        def register_species(raw, key, length, template):
+            assert (raw, bytes(cpu.mem_read(key, length)), template) == (107, b"frontier:espinas", 1)
+            return 0
+        stub(register, register_species)
     run(exports["forge_onLoad"], base + 0xE0000)
     run(exports["forge_onInit"], base + 0xE0000)
     required = {0x7DC2C, 0x1696E4, 0x16919C, 0x6ED40}
     assert hooks.keys() in (
         required,
-        required | {0xCF5F64, 0x1696FC, 0xBAB60, 0xBCC04, 0xBCE6C, 0xA134C},
+        required | {0xCF5F64, 0x1696FC, 0xBA874, 0xBCC04, 0xBCE6C, 0xA134C} | ({0x4A858, 0x152960, 0x39BB30, 0x3D7E90, 0x560CA4, 0x3A3178, 0x192340, 0x56EF50, 0x55BDA4, 0xB84114} if independent else set()),
     )
     if combined:
         assert 0xCF5F64 in hooks
@@ -258,6 +287,8 @@ def verify(mod):
     put(0x2126764, manager + 0x8000)
     put(manager + 0x8000 + 104, 0x3F800000)
     put(actor, 0x179ACF8)
+    put(actor + 46576, 107 if independent else 1)
+    put(actor + 46580, 107 if independent else 1)
     put(actor + 5160, status)
     put(actor + 30164, hde)
     put(actor + 30172, hts)
@@ -272,7 +303,8 @@ def verify(mod):
         put(groups + 4 * i, objects + 12 * i)
         put(objects + 12 * i + 4, s.unpack_from("<I", hts_data, 16 + 8 * i)[0])
     put(actor + 1204, 4)
-    put(actor + 1292, 0x3F800000)
+    for rate in [actor + 1292, status + 908, status + 916, status + 920]:
+        put(rate, 0x3F800000)
     put(hde + 100, hde + 4096)
     put(hde + 104, hde + 4112)
     cpu.mem_write(hde + 4096, rows)
@@ -300,13 +332,23 @@ def verify(mod):
         players = base + 0xC0000
         put(0x1885B58, players)
         put(players + 28, pl)
-        cpu.mem_write(status + 564, b"\0")
+        hunter_vt = base + 0x17a000
+        active = hunter_vt + 512
+        put(pl, hunter_vt)
+        put(hunter_vt + 136, active)
+        stub(active, lambda *_: 1)
+        unavailable = set()
+        stub(0x49240, lambda slot, *_: int(slot in unavailable))
+        # Use GU's own initial "no target" descriptor, as B8C54 does.
+        run(0xC6E14, actor, 255, 0, 0, 0)
+        put(actor + 240, base + 0xD8700)
         rng = [99]
         rolls = []
 
         def draw(*_):
-            rolls.append(rng[0])
-            return rng[0]
+            value = rng.pop(0) if len(rng) > 1 else rng[0]
+            rolls.append(value)
+            return value
 
         stub(0x496F0, draw)
         entries = 16 + 32 * s.unpack_from("<I", rows, len(rows) - 20)[0]
@@ -321,7 +363,7 @@ def verify(mod):
             s.unpack_from("<H", rows, e + 2)[0]: rows[e + 7]
             for e in range(entries, entries + 32 * count, 32)
         }
-        bank = archive[r"enemy\em001\em001_00\mot\em001_00_1", 0x76820D81]
+        bank = resource(r"enemy\em001\em001_00\mot\em001_00_1", 0x76820D81)
         # Install a relocated GU LMT slot table; the SDK probes it using native B49E54.
         lmt_resource, lmt_header = base + 0xD8000, base + 0xD8100
         count_slots = s.unpack_from("<H", bank, 6)[0]
@@ -347,7 +389,9 @@ def verify(mod):
             if motions[m] == (255, 34):
                 assert s.unpack_from("<I", bank, pos + 12)[0] == 0
             cpu.mem_write(actor + 1204, s.pack("<H", m) + b"\0")
-            put(actor + 1280, 0)
+            length, loop = s.unpack_from("<II", bank, pos + 8)
+            cpu.mem_write(actor + 1276, s.pack("<4f", 0, 0, length - 1, 0 if loop == 0xffffffff else loop))
+            put(actor + 1212, 4 if loop == 0xffffffff else 0)
             played.append(motions[m])
 
         stub(0xAFF40, play)
@@ -356,7 +400,15 @@ def verify(mod):
             assert a == actor
             cpu.mem_write(status + 442, bytes([state]))
 
-        stub(0xBC8B0, environment)
+        if independent:
+            # A loaded DTB supplies GU's per-posture shape and fixed hover height.
+            dtbase = alloc(224)
+            put(actor + 30184, dtbase)
+            put(dtbase + 132, alloc(104))
+            cpu.mem_write(dtbase + 197, b"\1")
+            cpu.mem_write(dtbase + 152, s.pack("<f", 350.))
+        else:
+            stub(0xBC8B0, environment)
 
         # Observe delegation separately from an Espinas update that simply waits.
         delegated = []
@@ -366,6 +418,73 @@ def verify(mod):
             return 0xCAFE
 
         stub(0xCF5F64, original_tick)
+        if independent:
+            emc = resource(r"enemy\cmd_tbl\em001_00_cmdtbl", 0x3aabba02)
+            # Load the shipping EMC with GU's decoder. The stream and heap are
+            # test services; perception, script selection and command fetch run natively.
+            emc_obj, stream, stream_vt, arena, arena_vt = (alloc(n) for n in (224, 32, 80, 32, 64))
+            put(emc_obj, 0x1732ED4)
+            put(stream, stream_vt)
+            put(arena, arena_vt)
+            put(0x18A6308, arena)
+            stub(0x7AA47C, lambda *_: arena)
+            stub(0x7AF3A0, alloc)
+            stub(0x13EFE30, lambda dst, src, n, _: cpu.mem_write(dst, bytes(cpu.mem_read(src, n))) or dst)
+            for vt, off, service in (
+                (stream_vt, 76, lambda *_: len(emc)),
+                (stream_vt, 52, lambda _, dst, n, __: cpu.mem_write(dst, emc) or n),
+                (arena_vt, 28, lambda _, n, *__: alloc(n)),
+                (arena_vt, 52, lambda *_: 0),
+            ):
+                addr = alloc(4)
+                put(vt + off, addr)
+                stub(addr, service)
+            assert run(0x520A0, emc_obj, stream) == 1
+            put(actor + 30196, emc_obj)
+            put(0x18570D0, alloc(80))
+            # Player class descriptor and mounted-state virtuals for C4BA8.
+            player_type = 0x1898670  # GU player class descriptor (C5424)
+            for off, addr, value in ((20, active + 4, player_type), (784, active + 8, 0)):
+                put(hunter_vt + off, addr)
+                stub(addr, lambda *_, value=value: value)
+            put(0x1892550, alloc(29000))  # shell manager: no live projectiles
+            cpu.mem_write(status + 586, b"\1")
+            # GU accepts ordinary AI requests on the local authority. Leave the
+            # actual 75574 -> 76154 validation, class remap and stage writes live.
+            cpu.mem_write(status + 24228, b"\xff\xff")  # no attached scene effect
+            import math
+            def atan2f(*_):
+                y, x = (s.unpack("<f", s.pack("<I", cpu.reg_read(r)))[0]
+                        for r in (arm.UC_ARM_REG_S0, arm.UC_ARM_REG_S1))
+                cpu.reg_write(arm.UC_ARM_REG_S0, s.unpack("<I", s.pack("<f", math.atan2(y, x)))[0])
+            stub(0x13efd70, atan2f)
+            put(0x184d750, alloc(96))  # no scripted scene actor
+            put(actor + 30188, alloc(256))  # DTT with no optional per-action override
+            cpu.mem_write(actor + 29728, b"\1")
+            def perceive(native, args, expected):
+                run(0x826B4, actor)
+                assert run(native, actor, *args) == 1
+                assert bytes(cpu.mem_read(actor + 29436, 2)) == bytes(expected)
+                script = get(actor + 29432)
+                assert bytes(cpu.mem_read(script, 4)) == b"\0\1\0\xff", (expected, bytes(cpu.mem_read(script, 8)).hex())
+                observed = []
+                def observe(*_):
+                    observed.append(tuple(cpu.reg_read(r) for r in regs[:3]))
+                trap = cpu.hook_add(UC_HOOK_CODE, observe, begin=0x75574, end=0x75574)
+                run(0x82F80, actor, 0, alloc(1024))
+                cpu.hook_del(trap)
+                assert observed == [(actor, 1, 0)], (expected, observed)
+                assert bytes(cpu.mem_read(actor + 29664, 2)) == bytes((1, 0))
+                assert cpu.mem_read(status + 417, 1) == b"\0"
+
+
+            perceive(0x7EA84, (1,), (4, 0))
+            dispatcher = get(get(actor) + 500)
+            assert dispatcher == 0xcf1550
+            # The saved original is mocked here for the fallback cases below.
+            # Hook the final class-dispatch branch instead of interposing the mock.
+            cpu.hook_add(UC_HOOK_CODE, lambda *_: cpu.reg_write(arm.UC_ARM_REG_PC, hooks[0xCF5F64]),
+                         begin=0xcf1958, end=0xcf1958)
         footer = hde + 4112 + (total - 1) * 32
         for address, temporary in [
             (actor, 0),                                     # different monster class
@@ -383,29 +502,71 @@ def verify(mod):
         def tick(done=False):
             cpu.mem_write(actor + 1206, bytes([4 if done else 0]))
             cpu.reg_write(arm.UC_ARM_REG_S1, 0x42F60000)
-            assert run(hooks[0xCF5F64], actor, 0) == 0 and not delegated
+            assert run(dispatcher if independent else hooks[0xCF5F64], actor, 0) == 0 and not delegated
 
         # A monster selects the bank; the LMT independently decides whether the clip exists.
         spawn_motion = next(m for m, request in motions.items() if request == (255, 39))
         slot_ptr = lmt_header + 8 + 4 * (spawn_motion & 255)
-        for addr, size in ((actor + 3844 + 4, 4), (lmt_resource + 100, 4),
+        for addr, size in ((actor + 240, 4), (actor + 3844 + 4, 4), (lmt_resource + 100, 4),
+                           (status + 424, 1),
                            (lmt_header + 6, 2), (slot_ptr, 4)):
             saved = bytes(cpu.mem_read(addr, size))
-            cpu.mem_write(addr, bytes(size))
+            cpu.mem_write(addr, b"\4" if addr == status + 424 else bytes(size))
             tick()
-            assert not played
-            run(hooks[0x6ED40], actor)
-            cpu.mem_write(status + 417, bytes(1))
+            assert not played and cpu.mem_read(status + 417, 1) == b"\0"
             cpu.mem_write(addr, saved)
 
+        # Same actor; an unavailable resource must not consume the first request.
         tick()
         tick(True)
         assert played == [(255, 39), (255, 34)]
+        if independent:
+            # AD7B4 watches the GU group/slot, which stays 1:0 throughout a hunt.
+            # Fast-forward its timer to the last frame before recovery.
+            scene, node = alloc(10816), alloc(16)
+            prior_scene = get(0x1851fe0)
+            put(0x1851fe0, scene)
+            cpu.mem_write(scene + 10796, bytes([2]))
+            cpu.mem_write(actor + 5120, bytes((1, 0)))
+            cpu.mem_write(status + 416, bytes([2]))
+            home = (1000., 50., 1000.)
+            current_pos = (112., 50., -464.)
+            cpu.mem_write(node, s.pack("<3f", *home))
+            traps = [
+                stub(0x88f524, lambda *_: 0), # surrounding scene service
+                stub(get(get(actor) + 988), lambda *_: 0),
+                stub(0x82d8c, lambda *_: 0),
+                stub(0x5cf30, lambda *_: node),
+            ]
+            put(actor + 1188, 1)
+            # Set up the sleep loop's last frame; use GU's real clock to wrap.
+            cpu.mem_write(actor + 1276, s.pack("<f", 239.0))
+            for i in range(4):
+                run(0x951a80, actor)
+                if i == 0:
+                    tick()
+                elif s.unpack("<f", cpu.mem_read(actor + 1280, 4))[0] < 5:
+                    break
+                else:
+                    tick()
+            assert i and s.unpack("<f", cpu.mem_read(actor + 1280, 4))[0] < 5
+            for expected in (current_pos, home):
+                cpu.mem_write(status + 64, s.pack("<3f", *current_pos))
+                cpu.mem_write(actor + 5112, s.pack("<f", 7200.0))
+                tick()  # first pass: wrapped, second pass: same frozen frame
+                run(0xad7b4, actor)
+                assert s.unpack("<3f", cpu.mem_read(status + 64, 12)) == expected
+            for trap in traps:
+                cpu.hook_del(trap)
+            put(0x1851fe0, prior_scene)
+            cpu.mem_write(status + 416, bytes(1))
+            cpu.mem_write(status + 64, bytes(12))
         cpu.mem_write(pl + 72, s.pack("<f", 451.0))
         put(status + 880, 4900)
+        assert run(hooks[0xBCC04], actor, 100) == 200
         for _ in range(120):
             tick(True)
-        assert len(played) == 2 and refs[hts] == 0
+        assert len(played) == 2 and refs[hts] == 0 and get(status + 1296) & 65535 == 0
         # Merely approaching may trigger a sleeping pose, never battle AI.
         rng[0] = 25
         for z, pose in ((451.0, 42), (-451.0, 41)):
@@ -419,19 +580,169 @@ def verify(mod):
             assert played[-1] == (255, 34)
         cpu.mem_write(pl + 72, s.pack("<f", 451.0))
         rng[0] = 30
+        if independent:
+            # Two complete 135-tick intervals, while the sleep animation is held.
+            sound_mgr = alloc(16)
+            put(0x1896F5C, sound_mgr)
+            breaths = []
+            audio_stub = stub(0x4EFC70, lambda manager, cue, owner, joint:
+                              breaths.append((step, manager, cue, owner, joint)) or 0)
+            for step in range(540):
+                tick()
+            assert len(breaths) == 2 and breaths[1][0] - breaths[0][0] == 270, breaths
+            assert all((mgr, cue, owner) == (sound_mgr, 4096 + 87, actor) and 0 < joint < 255
+                       for _, mgr, cue, owner, joint in breaths)
+            put(0x1896F5C, 0)
+            cpu.hook_del(audio_stub)
         put(status + 880, 4899)
         tick()
+        assert run(hooks[0xBCC04], actor, 1) == 2
         tick(True)
         assert played[-2:] == [(255, 37), (255, 62)]
-        tick(True)
+        assert get(status + 1296) & 65535 == 0
+        # A GU perception command may re-enter 1:0 while the current FZ clip
+        # is still playing. Let GU advance every frame through the end of motion 62.
+        if independent:
+            perceive(0x7E2A4, (1, 0), (5, 0))
+            # Separate observation from selection: GU reset the primary target
+            # (e.g. an intervening action), and hasn't redetected the hunter yet.
+            run(0xBCB9C, actor, 0)
+            run(0xC6E14, actor, 255, 0, 0, 0)
+            assert cpu.mem_read(status + 560, 1) == b"\xff"
+        put(actor + 1188, 1)
+        for _ in range(200):
+            run(0x951A80, actor)
+            done = cpu.mem_read(actor + 1206, 1)[0] & 4
+            run(dispatcher if independent else hooks[0xCF5F64], actor, 0)
+            if done:
+                break
+            assert played[-1] == (255, 62) and cpu.mem_read(status + 417, 1) == b"\1"
+        assert done
         assert played[-1] == (3, 9)
+        # Verify what GU sees, independently of the plugin's chosen animation.
+        assert (run(0xC6BE4, actor, 1, 2, 0, 0), cpu.mem_read(status + 704, 1)[0]) == (1, 1), (
+            bytes(cpu.mem_read(status + 560, 6)).hex(), cpu.mem_read(status + 704, 1)[0]
+        )
+        assert s.unpack("<3f", cpu.mem_read(status + 464, 12)) == (0., 0., 451.)
         for _ in range(20):
             tick()
         assert played.count((3, 9)) == 1
-        cpu.mem_write(pl + 72, s.pack("<f", 100.0))
-        rng[0] = 5
+        if independent:
+            # Awake hunter to the right at a nonzero map position. Execute GU's
+            # timeline every frame, then transform the charge's own root track
+            # into world movement. A fresh perception notification mid-turn must
+            # not consume the pending charge or restart the turn animation.
+            import math
+            def bits(f):
+                return s.unpack("<I", s.pack("<f", f))[0]
+            def trig(fn):
+                def inner(*_):
+                    f = s.unpack("<f", s.pack("<I", cpu.reg_read(arm.UC_ARM_REG_S0)))[0]
+                    cpu.reg_write(arm.UC_ARM_REG_S0, bits(fn(f)))
+                return inner
+            stub(0x13efde8, trig(math.sin))
+            stub(0x13efdf4, trig(math.cos))
+            start = (-857., -458., 512.)
+            # The hunter starts behind the monster, then moves to its side
+            # during the turn. The following charge must commit to the new spot.
+            goal = (start[0] + 3600., start[1], start[2])
+            cpu.mem_write(status + 64, s.pack("<3f", *start))
+            cpu.mem_write(pl + 64, s.pack("<3f", start[0] + 2700, start[1], start[2] - 2700))
+            cpu.mem_write(actor + 96, s.pack("<3f", 1, 1, 1))
+            rng[0] = 1
+            tick(True)
+            assert played[-1] == (253, 6)
+            before = len(played)
+            for i in range(190):
+                if i == 12:
+                    cpu.mem_write(pl + 64, s.pack("<3f", *goal))
+                    perceive(0x7E2A4, (1, 1), (5, 1))
+                run(0x951A80, actor)
+                run(dispatcher, actor, 0)
+                if len(played) != before:
+                    break
+            assert played[before:] == [(3, 1)] and abs(16384 - get(status + 84)) < 744
+            assert tuple(s.unpack("<3f", cpu.mem_read(status + 464, 12))) == goal
+            assert any("Espinas think:" in msg and "hunter=Some(0)" in msg for msg in messages)
+            def bind_root_track():
+                clip = s.unpack_from("<I", bank, 8 + 4 * (get(actor + 1204) & 255))[0]
+                table, n = s.unpack_from("<II", bank, clip)
+                tr = next(t for t in range(table, table + 36*n, 36) if bank[t+1:t+4] == bytes((4,0,255)))
+                row = bytearray(bank[tr:tr+36])
+                for off, size in ((12, s.unpack_from("<I", row, 8)[0]), (32, 32)):
+                    src = s.unpack_from("<I", row, off)[0]
+                    ptr = alloc(size)
+                    cpu.mem_write(ptr, bank[src:src+size])
+                    s.pack_into("<I", row, off, ptr)
+                ptr = alloc(36)
+                cpu.mem_write(ptr, bytes(row))
+                run(0xafe6b4, actor + 1424, ptr)
+
+            def move_frame():
+                run(0x951A80, actor)
+                run(0xc27cc, actor)
+                cpu.reg_write(arm.UC_ARM_REG_S0, bits(0))
+                cpu.reg_write(arm.UC_ARM_REG_S1, bits(1))
+                run(0x72170, actor)
+                run(0xc2844, actor)
+                run(dispatcher, actor, 0)
+
+            bind_root_track()
+            prev = 3600.
+            for i in range(220):
+                move_frame()
+                dist = math.dist(s.unpack("<3f", cpu.mem_read(status + 64, 12)), goal)
+                assert prev - 55 < dist <= prev + 0.01, (i, prev, dist)
+                prev = dist
+                if played[-1] == (252, 108):
+                    break
+            assert played[-1] == (252, 108) and dist < 600, (played[-1], dist)
+            print(f"Awake Espinas: GU detection -> right turn -> charge; hunter distance 3600 -> {dist:.0f}.")
+            put(status + 84, 0)
+            rng[0] = 30
+        # Stay in one area at nonzero world coordinates. A type-10 target
+        # with mask 4 means hunter 2 even when hunter 0 is closer.
+        origin = (925.0, -458.0, 1460.0)
+        pos = lambda p: cpu.mem_write(p, s.pack("<3f", *origin))
+        pos(status + 64)
+        put(actor + 4180, 4)
+        other = base + 0x178000
+        put(other, hunter_vt)
+        cpu.mem_write(other + 4177, bytes([2]))
+        put(players + 28 + 2 * 4, other)
+        for ptr, distance in ((pl, 100), (other, 451)):
+            pos(ptr + 64)
+            cpu.mem_write(ptr + 72, s.pack("<f", origin[2] + distance))
+            cpu.mem_write(ptr + 4180, bytes([4]))
+        cpu.mem_write(status + 562, bytes([10]))
+        cpu.mem_write(status + 564, bytes([4]))
         tick(True)
-        assert played[-1] == (3, 12)
+        assert played[-1] == (3, 9)  # far hunter chosen over nearby slot 0
+        assert run(0xC6BE4, actor, 1, 10, 4, 0) == 1
+        assert s.unpack("<3f", cpu.mem_read(status + 464, 12)) == (origin[0], origin[1], origin[2] + 451)
+        cpu.mem_write(pl + 4180, bytes([3]))
+        unavailable.add(2)  # still in the same area, but untargetable
+        tick(True)
+        assert played[-1] == (255, 1) and cpu.mem_read(status + 560, 1) == b"\xff"
+        assert cpu.mem_read(status + 704, 1) == b"\0"
+        last = len(played), len(rolls)
+        for _ in range(120):
+            tick()
+        assert (len(played), len(rolls)) == last
+        # Selected target is still absent. Reacquire the hunter in the same
+        # area without waiting for the idle loop to finish, or moving the actor.
+        cpu.mem_write(pl + 4180, bytes([4]))
+        rng[0] = 5
+        tick()
+        assert played[-1] == (3, 12) and run(0xC6BE4, actor, 1, 2, 0, 0) == 1
+        assert s.unpack("<3f", cpu.mem_read(status + 64, 12)) == origin
+        unavailable.clear()
+        cpu.mem_write(actor + 4180, bytes(1))
+        cpu.mem_write(pl + 4180, bytes(1))
+        cpu.mem_write(status + 562, bytes(3))
+        put(players + 28 + 2 * 4, 0)
+        cpu.mem_write(status + 64, bytes(12))
+        cpu.mem_write(pl + 64, s.pack("<3f", 0, 0, 100))
         cpu.mem_write(status + 1304, b"\1")
         rng[0] = 8
         tick(True)
@@ -467,14 +778,37 @@ def verify(mod):
         cpu.mem_write(pl + 64, s.pack("<f", 451.0))
         put(pl + 72, 0)
         tick(True)
-        assert played[-1] == (253, 6) and len(submit()) == 3
+        assert played[-1] == (253, 8), ("enraged right turn", played[-1])
+        assert len(submit()) == 2
         draws = len(rolls)
         for frame in range(44):
+            if frame == 8:
+                cpu.mem_write(pl + 64, s.pack("<3f", 319.0, 0.0, 319.0))
             cpu.mem_write(actor + 1280, s.pack("<f", frame))
             tick()
-        assert abs(16384 - get(status + 84)) < 744
+        assert abs(8192 - get(status + 84)) < 744
         tick(True)
         assert played[-1] == (3, 2) and len(rolls) == draws and len(submit()) == 2
+        assert run_charge((252, 118), itertools.islice(charge_frames(), 150)) == near
+        # Stationary hunter behind-left. One quarter-turn cannot finish it:
+        # let GU clock both clips, including the part beyond frame 44.
+        put(status + 84, 0)
+        cpu.mem_write(pl + 64, s.pack("<3f", -300., 0., -380.))
+        tick(True)
+        assert played[-1] == (253, 7)
+        before = len(played)
+        heading = round(math.atan2(-300., -380.) * 65536 / math.tau) & 65535
+        late_turn = False
+        for _ in range(140):
+            run(0x951A80, actor)
+            frame = s.unpack("<f", cpu.mem_read(actor + 1280, 4))[0]
+            yaw = get(status + 84)
+            run(dispatcher, actor, 0)
+            late_turn |= frame > 44 and yaw != get(status + 84)
+            if played[-1] == (3, 2):
+                break
+        assert late_turn and played[before:] == [(253, 7), (3, 2)], played[before:]
+        assert abs(heading - get(status + 84)) < 683
         assert run_charge((252, 118), itertools.islice(charge_frames(), 150)) == near
         put(status + 84, 0)
         put(pl + 64, 0)
@@ -497,12 +831,12 @@ def verify(mod):
             (16, (0, 5)),
             (17, (0, 7)),
             (18, (0, 8)),
-            (21, (254, 9)),
-            (22, (0, 9)),
+            (20, (254, 9)),
+            (20, (0, 9)),
             (23, (0, 11)),
             (25, (0, 13)),
         ]:
-            rng[0] = roll
+            rng[:] = [roll, 109 if move == (254, 9) else 3520] if roll == 20 else [roll]
             tick(True)
             assert played[-1] == move, (roll, played[-1])
             for hit in submit():
@@ -519,7 +853,7 @@ def verify(mod):
             cpu.mem_write(actor + 1280, s.pack("<f", t))
             tick(end)
 
-        def choose(distance, roll, rage, expected, posture=0):
+        def choose(distance, roll, rage, expected, posture=0, dispatch_roll=None):
             cpu.mem_write(status + 64, bytes(12))
             cpu.mem_write(pl + 64, s.pack("<3f", 0, 0, distance))
             put(status + 84, 0)
@@ -527,7 +861,7 @@ def verify(mod):
             cpu.mem_write(status + 442, bytes([posture]))
             # GU +704 is alert/target state: a ground monster can see a hunter.
             cpu.mem_write(status + 704, bytes([1]))
-            rng[0] = roll
+            rng[:] = [roll] if dispatch_roll is None else [roll, dispatch_roll]
             tick(True)
             assert played[-1] == expected, (distance, roll, expected, played[-3:])
 
@@ -576,8 +910,63 @@ def verify(mod):
         put(area + 104, 1)
         put(node + 48, 1)
         cpu.mem_write(node + 40, bytes([16]))
-        cpu.mem_write(node + 24, s.pack("<f", 550.0))
-        choose(5001, 8, False, (1, 1))
+        # Area 4 in the reported quest. The generic stage marker is far
+        # behind the hunter; do not use it as a species patrol destination.
+        cpu.mem_write(node + 16, s.pack("<3f", 4430.76, 521.78, -2914.8))
+        patrol_data, sets, route, slots, point = (alloc(n) for n in (120, 4, 28, 8, 48))
+        put(actor + 30220, patrol_data)
+        put(patrol_data + 104, 1)
+        put(patrol_data + 116, sets)
+        put(sets, route)
+        cpu.mem_write(route + 4, bytes((11, 5, 121)))  # installed ARC has no 11/4/0
+        cpu.mem_write(actor + 4179, bytes((11, 4)))
+        cpu.mem_write(pl + 4180, bytes([4]))
+        cpu.mem_write(status + 64, s.pack("<3f", 233, -351, 1004))
+        cpu.mem_write(pl + 64, s.pack("<3f", -1047, -350, 1617))
+        put(status + 84, 55170)
+        run(0xC6E14, actor, 1, 2, 0, 0)
+        rng[0] = 1  # 1420 units, calm, facing hunter: the logged patrol choice
+        before = len(played)
+        tick(True)
+        assert len(played) == before, ("unmapped species patrol moved", played[before:])
+        assert messages[-1] == "Espinas patrol: area=4 skipped"
+        rng[0] = 5  # next roll chooses a hunter-directed walk
+        tick()
+        assert played[before:] == [(1, 0)], played[before:]
+        assert run(0xC6BE4, actor, 1, 2, 0, 0) == 1
+        bind_root_track()
+        def distance():
+            return math.dist(s.unpack("<3f", cpu.mem_read(status + 64, 12))[::2], (-1047., 1617.))
+        start_range = prev = distance()
+        for _ in range(480):
+            move_frame()
+            here = distance()
+            assert here <= prev + 0.01, (prev, here)
+            prev = here
+            if played[-1] == (252, 1):
+                break
+        assert played[-1] == (252, 1) and prev < 650
+        print(f"Steppe area 4: skipped unbound patrol; walk {start_range:.0f} -> {prev:.0f}.")
+        # A real typed route remains usable. Install a matching route with
+        # a point already reached and a far point; query native 69E6F0.
+        cpu.mem_write(route + 4, bytes((11, 4, 0)))
+        put(route + 12, 2)
+        put(route + 24, slots)
+        put(slots, point)
+        far_node = alloc(48)
+        put(slots + 4, far_node)
+        cpu.mem_write(far_node + 24, s.pack("<f", 550.))
+        cpu.mem_write(point + 20, s.pack("<f", 1200.))  # same XZ, not a far point
+        cpu.mem_write(status + 64, bytes(12))
+        put(status + 84, 0)
+        cpu.mem_write(pl + 64, s.pack("<3f", 0, 0, 5001))
+        rng[0] = 8
+        before = len(played)
+        frame(2)
+        assert len(played) == before and messages[-1] == "Espinas patrol: area=4 skipped"
+        rng[0] = 9  # same patrol choice, far point (slot 1)
+        tick()
+        assert played[-1] == (1, 1) and "point=(0, 550)" in messages[-2]
         tick(True)
         assert played[-1] == (1, 0)
 
@@ -599,8 +988,8 @@ def verify(mod):
             raise AssertionError((move, played[-5:], clip()))
 
         until((252, 1))
-        for roll, nm, turn in [(14, 18, 122), (25, 19, 119)]:
-            choose(2701, roll, True, (3, nm))
+        for roll, variant, nm, turn in [(14, 42, 18, 123), (14, 41, 18, 120), (25, 101, 19, 119)]:
+            choose(2701, roll, True, (3, nm), dispatch_roll=variant)
             draws = len(rolls)
             for i in range(nm - 17):
                 until((250, turn))
@@ -611,21 +1000,25 @@ def verify(mod):
             base + v for v in (0xC9000, 0xCA000, 0xCB000, 0xCC000)
         )
         put(0x1892550, shell_mgr)
-        # Run GU's selector: field location is fixed, resource ID varies by species/variant.
-        stub(0x48C388, lambda *_: 0)  # skip actual resource registration
         def select_resource(variant, expected):
+            if independent:
+                return 413  # the GU setup constructor's unnumbered sentinel
             cpu.mem_write(actor + 46580, bytes([1, variant]))
             run(0xD0CA90, actor)
             assert get(actor + 51908) == expected
             return expected
-
+        stub(0x48C388, lambda *_: 0)
         expected_resource = select_resource(0, 84)
         put(actor + 1176, remap)
         put(actor + 1172, joints)
-        model = archive[r"enemy\em001\em001_00\mod\em001_00", 0x58A15856]
+        model = resource(r"enemy\em001\em001_00\mod\em001_00", 0x58A15856)
         bones = s.unpack_from("<I", model, 36)[0]
         nb = s.unpack_from("<H", model, 6)[0]
-        logical = model[bones + 24 * (nb - 48 + 34)]
+        from verify_espinas_package import check_opening_feet
+        neutral = resource(r"enemy\em001\em001_00\mot\em001_00_0", 0x76820D81)
+        check_opening_feet(model, bank, neutral, motions)
+        first_skin = 0 if independent else nb - 48
+        logical = model[bones + 24 * (first_skin + 34)]
         cpu.mem_write(remap, bytes([255]) * 256)
         cpu.mem_write(remap + logical, b"\x01")
         matrix = joints + 160 + 16
@@ -637,6 +1030,7 @@ def verify(mod):
         constructed = []
         reject = False
         def construct(*_):
+            put(param + 4, 413)
             constructed.append(param)
             return param
         stub(0x3F93F8, construct)
@@ -650,6 +1044,34 @@ def verify(mod):
 
         stub(0x48C4F0, create)
 
+        if independent:
+            import zlib
+            asset_mgr, vt, find, factory, shell_vt, init, owned = (
+                base + 0xEA000 + 0x200*i for i in range(7)
+            )
+            put(0x2126A64, asset_mgr)
+            put(asset_mgr, vt)
+            put(vt+56, find)
+            available = True
+            def lookup(m, method, key, kind):
+                path = br"shell\em\em107_00_shell00\em107_00_00"
+                assert (m, method, key, kind) == (asset_mgr, find, ~zlib.crc32(path) & 0xffffffff, 0x4aa69872)
+                return owned if available else 0
+            stub(find, lookup)
+            put(0x2126f48, asset_mgr)
+            put(0x1892de8, vt)
+            put(vt+8, factory)
+            put(actor+12, 1)
+            put(shell, shell_vt)
+            put(shell_vt+316, init)
+            stub(factory, lambda *_: shell)
+            def initialize(obj, p, *_):
+                assert (obj, get(shell + 4996)) == (shell, owned)
+                return int(bool(create(shell_mgr, p)))
+            stub(init, initialize)
+            stub(0xc067ec, lambda *_: 0)
+            stub(0x48c6c8, lambda *_: 0)
+            assert get(shell_mgr + 28 + 84*4) == 0
         def shot(t, pitch, yaw):
             import math
 
@@ -673,7 +1095,7 @@ def verify(mod):
             )
             assert max(abs(x - y) for x, y in zip(want, v)) < 0.001
 
-        choose(1001, 14, True, (1, 1))
+        choose(1001, 14, True, (253, 2))
         tick(True)
         assert played[-1] == (3, 5)
         # Replay the emission frame with missing manager, sentinel slot and native rejection.
@@ -681,7 +1103,10 @@ def verify(mod):
         cpu.mem_write(shell + 4112, sentinel)
         for mgr, slot, reject, constructions in [(0, 84, False, 0), (shell_mgr, 413, False, 0), (shell_mgr, 84, True, 1)]:
             put(0x1892550, mgr)
-            put(actor + 51908, slot)
+            if independent:
+                available = slot != 413
+            else:
+                put(actor + 51908, slot)
             before = len(constructed)
             frame(79)
             frame(80)
@@ -689,17 +1114,73 @@ def verify(mod):
             assert bytes(cpu.mem_read(shell + 4112, 12)) == sentinel
         reject = False
         shot(80, 0, 0)
+        def fly_to_landing(trigger, repeat):
+            # Run the real GU clock, root movement and floor pass between NRO
+            # updates. A posture-only stub hid the retail floor snap on takeoff.
+            floor = -226.
+            cpu.mem_write(status + 64, s.pack("<3f", -2617., floor, -239.))
+            put(status + 1460, bits(floor))
+            bind_root_track()
+            before = len(emitted)
+            height = floor
+            peak = floor
+            fast_steps = []
+            wrapped = False
+            shots = []
+            last_f = 0
+            takeoff = None
+            rate = s.unpack("<f", cpu.mem_read(actor + 1292, 4))[0]
+            assert math.isclose(rate, 1.3, rel_tol=1e-6)
+            for t in range(1, 400):
+                old_z = s.unpack("<f", cpu.mem_read(status + 72, 4))[0]
+                prev_count = len(emitted)
+                move_frame()
+                run(0xBF340, actor)
+                y, z = s.unpack("<2f", cpu.mem_read(status + 68, 8))
+                # Also bounds displacement at the native clock's loop seam.
+                assert abs(z-old_z) <= (58 if repeat == 70 else 102) * rate, (t, z-old_z)
+                if played[-1] == (252, 57):
+                    assert y == floor and cpu.mem_read(status + 442, 1) == b"\0"
+                    break
+                f = s.unpack("<f", cpu.mem_read(actor + 1280, 4))[0]
+                if takeoff is None and f >= trigger:
+                    takeoff = t
+                if len(emitted) != prev_count:
+                    shots.append((last_f, f))
+                if t >= trigger + 12:
+                    assert peak > floor + 25, ("GU pinned airborne height", t, y, peak)
+                if f < last_f:
+                    assert repeat <= f <= repeat + rate + 1e-4, (last_f, f, repeat)
+                    wrapped = True
+                if repeat == 70 and takeoff is not None and 10 <= t - takeoff <= 19:
+                    fast_steps.append(z - old_z)
+                assert abs(y-height) < 35 * rate, (t, y, height)
+                height, peak, last_f = y, max(peak, y), f
+            else:
+                raise AssertionError(("never landed", played[-1], height))
+            assert abs((peak - floor) - 596.7) < .2, peak  # Vita 81CE4E06 at the same rate
+            if repeat == 70:
+                assert wrapped, "motion 116 froze before touching the floor"
+                assert len(fast_steps) == 10 and all(abs(dz + 75.2375)<0.02 for dz in fast_steps), fast_steps
+                assert len(shots) == 1 and shots[0][0] < 50 <= shots[0][1] and emitted[before:] == [(0x1E94, 0)], (shots, emitted[before:])
+            else:
+                assert not emitted[before:]
+            put(status + 1460, 0)
+            print(f"Flight from {trigger}: peak {peak-floor:.1f}, landed after {t} GU frames.")
+
         for roll, id, last in [(25, 6, 115), (27, 7, 116)]:
             choose(451, roll, True, (3, id))
             shot(76, 0x16C1, -0x1332)
-            # The second emission in the same attack must resolve the new ID.
-            expected_resource = select_resource(2, 85)
+            # Resolve the resource for each emission.
+            expected_resource = select_resource(0, 84) if independent else select_resource(2, 85)
             shot(122, 0x16C1, 0x1333)
             expected_resource = select_resource(0, 84)
             tick(True)
             assert played[-1] == (252, last)
             if last == 115:
                 shot(26, 0x1C72, 0)
+            elif independent:
+                fly_to_landing(36, 70)
             else:
                 for t in range(36, 49):
                     frame(t)
@@ -712,55 +1193,222 @@ def verify(mod):
                         break
                 assert played[-1] == (252, 57) and get(status + 68) == 0
         choose(451, 10, True, (3, 17))
-        until((252, 57))
-        assert get(status + 68) == 0
-        for posture in (1, 3):
-            choose(451, 0, False, (2, 1), posture=posture)
-            cpu.mem_write(status + 68, s.pack("<f", 400.0))
+        if independent:
+            fly_to_landing(76, 116)
+        else:
+            until((252, 57))
+            assert get(status + 68) == 0
+        if independent:
+            # The main action resumes after GU replaced the turn with a damage
+            # motion. The opening of the old ground fireball is now obsolete.
+            reaction_motion = next(m for m, req in motions.items() if req == (249, 60))
+            shot_motion = next(m for m, req in motions.items() if req == (3, 5))
+            shot_slot = lmt_header + 8 + 4 * (shot_motion & 255)
+            for pending_resource in (False, True):
+                choose(1001, 14, True, (253, 2))
+                frame(3)
+                if pending_resource:
+                    # Even a queued playback retry belongs to the original turn.
+                    saved_slot = get(shot_slot)
+                    put(shot_slot, 0)
+                    tick(True)
+                    assert played[-1] == (253, 2)
+                    put(shot_slot, saved_slot)
+                cpu.mem_write(actor + 1204, s.pack("<H", reaction_motion))
+                cpu.mem_write(pl + 72, s.pack("<f", 100))
+                rng[0] = 8
+                draws_before = len(rolls)
+                tick(True)
+                assert played[-1] == (3, 15) and len(rolls) == draws_before + 1, (
+                    "interrupted turn replayed a stale attack", played[-1]
+                )
+            # Interrupt the backhop before its frame-50 shot. With the same
+            # hunter still present, FZ selects a landing from the current posture.
+            choose(451, 27, True, (3, 7))
+            tick(True)
+            assert played[-1] == (252, 116)
+            frame(40)
+            assert cpu.mem_read(status + 442, 1) == b"\1"
+            cpu.mem_write(actor + 1204, s.pack("<H", reaction_motion))
+            frame(50, True)
+            assert played[-1] == (2, 1) and len(emitted) == 7
             until((252, 11))
             until((252, 19))
-            assert get(status + 68) == 0 and len(emitted) == 7
-        # Compare actual native lookups in both states and use the GU entry
-        # point for adding anger, without setting the enraged bit for it.
-        for mode, expected in [(0, [15, 20, 40]), (1, [70, 40, 30]), (2, [15, 20, 40])]:
-            cpu.mem_write(status + 1304, bytes([mode]))
-            hz = run(hooks[0xBAB60], actor, 0)
-            assert list(cpu.mem_read(hz, 3)) == expected
-            assert list(cpu.mem_read(hz + 8, 2)) == [100, 0]
+        for posture in (3, 1):
+            choose(451, 0, False, (2, 1), posture=posture)
+            if independent:
+                # Posture 3 has real Y at floor and a scaled display offset.
+                # Higher free flight starts at physical Y. Apply GU's retail floor
+                # pass to both, from the start of 15 through the end of 11.
+                floor = -226.
+                put(status + 1460, bits(floor))
+                if posture == 3:
+                    put(status + 68, bits(floor))
+                    put(status + 428, bits(1.25))
+                    put(status + 432, bits(1.2))
+                    run(0xBF808, actor)
+                    put(actor + 4996, 0)
+                    run(0xBF828, actor)
+                    height = floor + s.unpack("<f", cpu.mem_read(actor + 4996, 4))[0]
+                    assert height == floor + 525.
+                    put(actor + 4996, 0)
+                else:
+                    height = floor + 1500.
+                    put(status + 68, bits(height))
+                prev = height
+                delta = 0.5 if posture == 1 else 1.
+                put(actor + 28, bits(delta))
+                final_start = None
+                for i in range(700):
+                    run(0x951A80, actor)
+                    run(dispatcher, actor, 0)
+                    run(0xBF340, actor)
+                    y = s.unpack("<f", cpu.mem_read(status + 68, 4))[0]
+                    assert floor <= y <= prev + 0.001, (posture, i, prev, y)
+                    if y > floor and played[-1] == (2, 1):
+                        assert 0 < prev - y <= 22 * delta, ("stepped descent", posture, i, prev, y)
+                    if final_start is not None and y > floor + 0.01:
+                        assert abs(prev - y - final_speed*delta) < 0.002, (posture, i, prev, y)
+                    if i == 0:
+                        assert cpu.mem_read(status + 442, 1) == b"\1" and y > floor, (
+                            "hover height lost", posture, prev, y
+                        )
+                    if played[-1] == (252, 11) and final_start is None:
+                        final_start = i
+                        final_speed = (y-floor)/60.
+                    if played[-1] == (252, 19):
+                        assert final_start is not None and (i - final_start)*delta == 62
+                        assert y == floor and cpu.mem_read(status + 442, 1) == b"\0"
+                        break
+                    prev = y
+                else:
+                    raise AssertionError(("descent did not finish", posture, played[-1], prev))
+                put(actor + 28, bits(1.))
+                put(status + 1460, 0)
+            else:
+                cpu.mem_write(status + 68, s.pack("<f", 400.0))
+                until((252, 11))
+                until((252, 19))
+            assert len(emitted) == 7
+        # Initialize GU's per-instance rows from the shipped DTT. The full
+        # native DTT decoder is exercised in verify_espinas_quest.
+        tune = resource(r"enemy\dt_tune\em001_00_dttune", 0x48E8AC29)
+        res, calm, angry = (base + n for n in (0xD5000, 0xD5800, 0xD5900))
+        put(actor + 30188, res)
+        rage_params = alloc(124)
+        cpu.mem_write(rage_params, tune[510:634])  # native 57740 validates this layout in the quest test
+        put(res + 140, rage_params)
+        put(res + 112, calm)
+        put(res + 116, angry)
+        at = 140 + tune[8]
+        cpu.mem_write(calm, tune[at:at+80])
+        cpu.mem_write(angry, tune[at+80:at+160])
+        eighth = calm + 70
+        assert 0xBAB60 not in hooks and get(0xBAB60) == 0xE3510008
+        assert run(0xBABF4, actor) == eighth
+
+        def hitzones(table, head):
+            rows = [run(0xBAB60, actor, part) for part in range(8)]
+            assert rows == [table + 10*i for i in range(7)] + [eighth]
+            assert list(cpu.mem_read(rows[0], 3)) == head
+            assert list(cpu.mem_read(rows[0] + 8, 2)) == [100, 0]
+
+        hitzones(calm, [15, 20, 40])
         # Espinas only accumulates its FZ anger gauge while calm.
         gauge = get(status + 1296) & 0xFFFF
+        cpu.mem_write(status + 1304, bytes([2]))
         assert run(hooks[0xBCC04], actor, 10) == gauge
         cpu.mem_write(status + 1304, b"\0")
         cpu.mem_write(status + 704, b"\0")
-        put(status + 880, 4500)
-        assert run(hooks[0xBCC04], actor, 349) == 698
-        assert run(hooks[0xBCC04], actor, 1) == 700
-        # Real BCE6C may read the donor's resources and invoke notifications.
-        # Put a mock resource object in its normal slot. Stub the trait query;
-        # leave GU's request-bit set/clear helpers intact.
-        res = base + 0xD5000
-        put(actor + 30188, res)
+        # Feed resolved hits to GU's damage dispatcher (97DDC). GU subtracts
+        # HP and calls BCC04 itself; the test never writes the ordinary rage mode.
         vt = get(actor)
         stub(get(vt + 864), lambda *_: 0)
-        # Interpose NRO calls to the hooked GU function, as the real loader does.
         detour = hooks[0xBCE6C]
-
-        # For this call the saved original address equals the entry; hook only
-        # on our call from NRO, not the detour's call to the original.
-        def through(_, pc, *args):
-            lr = cpu.reg_read(arm.UC_ARM_REG_LR)
-            if base <= lr < base + len(nro) and not gate[0]:
-                gate[0] = True
-                cpu.reg_write(arm.UC_ARM_REG_PC, detour)
-
-        gate = [False]
-        cpu.hook_add(UC_HOOK_CODE, through, begin=0xBCE6C, end=0xBCE6C)
-        rng[0] = 18
-        cpu.mem_write(pl + 72, s.pack("<f", 100.0))
+        put(status + 880, 2418)
+        put(status + 884, 2475)
+        part = alloc(80)
+        put(res + 104, part)
+        cpu.mem_write(part, s.pack("<h", 1000))
+        cpu.mem_write(status + 958, s.pack("<h", 1000))
+        cpu.mem_write(actor + 29728, b"\1")
+        after_damage = stub(0x9A828, lambda *_: 0)  # reaction dispatch after accounting
+        def damage(amount, hp, gauge):
+            cpu.mem_write(status + 1160, s.pack("<h", amount))
+            run(0x97DDC, actor)
+            assert (get(status + 880), get(status + 1296) & 65535) == (hp, gauge)
+        damage(36, 2382, 72)
+        damage(43, 2339, 158)
+        damage(8, 2331, 174)
+        damage(100, 2231, 374)
+        damage(108, 2123, 698)
+        damage(1, 2122, 700)
+        cpu.hook_del(after_damage)
+        cpu.mem_write(status + 64, bytes(12))
+        put(status + 84, 0)
+        cpu.mem_write(pl + 64, s.pack("<3f", 0, 0, 1001))
+        rng[0] = 14
+        before = len(played), len(rolls)
         tick(True)
-        assert played[-1] == (3, 13) and get(status + 1304) & 255 == 1
+        assert played[before[0]:] == [(3, 3)] and get(status + 1304) & 255 == 1
+        run(detour, actor, 1)  # reasserting the mode must not schedule another roar
+        tick()
+        assert played[before[0]:] == [(3, 3)] and len(rolls) == before[1]
+        tick(True)
+        assert played[-1] == (253, 2)
+        tick(True)
+        assert played[-1] == (3, 5)
+        shot(80, 0, 0)
+        cpu.mem_write(pl + 72, s.pack("<f", 2701))
+        tick(True)
+        assert played[-1] == (3, 18)
+        until((250, 122))
+        until((3, 18))
+        until((252, 118))
+        print("GU damage -> 174/700 at 2331 HP -> rage entry roar -> fireball -> two-leg charge and brake.")
         assert s.unpack("<f", cpu.mem_read(status + 1300, 4))[0] == 10800.0
+        hitzones(angry, [70, 40, 30])
         assert run(hooks[0xBCC04], actor, 999) == 700
+
+        # Examine the real GU playback clocks while the same attack is active.
+        def rate_is(value):
+            for p in (status + 908, actor + 1292, actor + 1612):
+                assert math.isclose(s.unpack("<f", cpu.mem_read(p, 4))[0], value, rel_tol=1e-6), (hex(p), value)
+        put(status + 880, 496)  # max 2475: 495 is exactly 20%
+        tick()
+        rate_is(1.3)
+        put(status + 880, 495)
+        tick()
+        rate_is(1.5)
+        run(hooks[0xBA874], actor, 0)
+        tick()
+        rate_is(1.5)
+        rng[0] = 14
+        # Deliver a real rage transition while the ordinary landing is in progress.
+        put(actor + 30220, 0)  # tower: no area landing point
+        choose(1001, 14, False, (2, 1), posture=1)
+        rate_is(1.)
+        cpu.mem_write(status + 68, s.pack("<f", 400.))
+        run(detour, actor, 1)
+        started, draws = len(played), len(rolls)
+        tick()
+        assert played[started:] == [(2, 7)]
+        rate_is(1.3)  # airborne group 2 retains the normal rage rate at low HP
+        for _ in range(2):
+            tick()
+        assert played[-1] == (2, 1)
+        until((252, 11))
+        until((252, 19))
+        tick(True)
+        assert played[started:] == [(2, 7), (2, 1), (252, 11), (252, 19), (3, 3)]
+        assert not cpu.mem_read(status + 442, 1)[0] and len(rolls) == draws
+        rate_is(1.5)
+        run(detour, actor, 1)
+        tick()
+        assert played[started:].count((3, 3)) == 1
+        tick(True)
+        assert len(rolls) > draws and played[-1] != (3, 3)
+        print("GU clocks: 1.3 normal rage, 1.5 low-HP attacks; airborne event lands and roars once.")
 
         # Isolate GU's optional secondary rage path using a synthetic group 17
         # and parameter block. Neither is a claim about the FZ Espinas moveset.
@@ -778,12 +1426,16 @@ def verify(mod):
         assert get(status + 1306) & 0xFFFF == 42 and get(status + 866) & 16
         assert run(0x8172C, actor) == 1  # request pending, still in ordinary rage
         run(detour, actor, 2)  # invoke the setter as GU's group-17 dispatch does
+        hitzones(calm, [15, 20, 40])
         assert run(0x8172C, actor) == 0 and run(0x81774, actor) == 1
         assert not get(status + 866) & 16
         assert s.unpack("<f", cpu.mem_read(status + 1300, 4))[0] == 1234.0
-        run(0xBA874, actor, 0)
+        run(detour, actor, 1)
+        hitzones(angry, [70, 40, 30])
+        run(hooks[0xBA874], actor, 0)
+        hitzones(calm, [15, 20, 40])
         assert cpu.mem_read(status + 1304, 1) == b"\0" and get(status + 1300) == 0
-        tail_name = r"enemy\em001\em001_00\mod\em001_00_tail"
+        tail_name = r"enemy\em001\em001_00\mod\em001_00_tail".replace("em001", namespace)
         tail = archive[tail_name, 0x58A15856]
         assert s.unpack_from("<3H", tail, 6) == (0, 3, 22)
         assert archive[tail_name, 0x2749C8A8] == archive[tail_name[:-5], 0x2749C8A8]
@@ -802,19 +1454,19 @@ def verify(mod):
             assert s.unpack_from("<I", tail, mesh + 20)[0] == 0x5E7F2030
         # Bank 3 slot 17 is GU's ordinary 11:0 death request. Its animation
         # must now drive the added FZ joints rather than the hidden donor rig.
-        death_bank = archive[r"enemy\em001\em001_00\mot\em001_00_3", 0x76820D81]
+        death_bank = resource(r"enemy\em001\em001_00\mot\em001_00_3", 0x76820D81)
         dead = s.unpack_from("<I", death_bank, 8 + 17 * 4)[0]
         track, n, frames, loop = s.unpack_from("<4I", death_bank, dead)
         assert frames > 1 and loop == 0xFFFFFFFF
         mapping = model[bones + 152 * nb : bones + 152 * nb + 256]
         assert all(
-            bone == 255 or nb - 48 <= mapping[bone] < nb
+            bone == 255 or first_skin <= mapping[bone] < first_skin + 48
             for bone in (death_bank[track + 36 * i + 3] for i in range(n))
         )
         # Capture the exact program passed to GU's native damage handler.
         stub(0xA134C, lambda a, p, *_: p)
         cpu.mem_write(actor + 29664, bytes([10, 7]))
-        rx = archive[r"enemy\em001\em001_00\mot\em001_00_4", 0x76820D81]
+        rx = resource(r"enemy\em001\em001_00\mot\em001_00_4", 0x76820D81)
         saved_program = None
         cpu.mem_write(status + 417, b"\1")
         assert run(hooks[0xA134C], actor, 12345, 0) == 12345  # no program installed mid-action

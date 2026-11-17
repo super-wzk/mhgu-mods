@@ -1,5 +1,5 @@
 //! Plugin-owned rows appended to GU's native attack table (ESH5 hunt or ESP1 replay).
-use super::{byte, rathian, u16at, u32at};
+use super::{byte, f32at, is_espinas, u16at, u32at};
 use espinas_behavior::{BattleView, CASES, ROUTE_WIDTH, Request};
 use mhgu_sdk::monster::{Monster, attack::AttackTables, motion::MotionId};
 
@@ -27,7 +27,7 @@ pub(super) struct Package<'a> {
 }
 impl<'a> Package<'a> {
     pub(super) fn read(monster: Monster<'a>) -> Option<Self> {
-        if !rathian::RATHIAN.matches(monster) {
+        if !is_espinas(monster) {
             return None;
         }
         let tables = monster.attack_tables()?;
@@ -75,19 +75,32 @@ impl<'a> Package<'a> {
 pub(super) struct Directory<'a> {
     package: Package<'a>,
 }
+
+pub(super) enum FlightCurve {
+    Vertical = 8,
+    Forward = 12,
+}
+
 impl<'a> Directory<'a> {
     pub(super) fn read(monster: Monster<'a>) -> Option<Self> {
         let package = Package::read(monster)?;
         (package.tag() == HUNT_TAG).then_some(Self { package })
     }
-    pub(super) fn rows(&self) -> u32 {
-        self.package.rows
-    }
     pub(super) unsafe fn row(&self, field: u32) -> u32 {
         unsafe { self.package.rows + 32 * u32at(self.package.footer, field) }
     }
-    pub(super) unsafe fn physiology(&self) -> u32 {
+    unsafe fn physiology(&self) -> u32 {
         unsafe { self.package.rows + 32 * u32::from(u16at(self.row(20), 30)) }
+    }
+    pub(super) unsafe fn anger_threshold(&self) -> u16 {
+        unsafe { u16at(self.physiology(), 0) }
+    }
+    pub(super) unsafe fn enraged_motion_rate(&self) -> f32 {
+        unsafe { f32at(self.physiology(), 4) }
+    }
+    pub(super) unsafe fn anger_gain_factor(&self, hp_percent: u64) -> f32 {
+        let lane = 10 - hp_percent.min(100) as u32 / 10;
+        unsafe { f32at(self.physiology(), 16 + 4 * lane) }
     }
 
     unsafe fn entries(&self) -> impl Iterator<Item = u32> {
@@ -135,8 +148,30 @@ impl<'a> Directory<'a> {
                 capacity,
                 cuts: self.row(8),
                 world,
-                radius: f32::from_bits(u32at(entry, 24)),
+                radius: f32at(entry, 24),
             })
+        }
+    }
+    /// Slope of the first segment ending at or after this frame.
+    pub(super) unsafe fn curve_slope(
+        &self,
+        entry: u32,
+        field: FlightCurve,
+        frame: f32,
+    ) -> Option<f32> {
+        unsafe {
+            let curve = self.package.rows + 32 * u32at(entry, field as u32);
+            for i in 1..u32at(curve, 0) {
+                let point = curve + 4 + i * 8;
+                let end = f32at(point, 0);
+                if frame <= end {
+                    let previous = point - 8;
+                    return Some(
+                        (f32at(point, 4) - f32at(previous, 4)) / (end - f32at(previous, 0)),
+                    );
+                }
+            }
+            None
         }
     }
     /// Forward displacement across two motion frames, including the authored loop point.
@@ -144,7 +179,7 @@ impl<'a> Directory<'a> {
         unsafe {
             let samples = self.package.rows + 32 * u32at(entry, 8);
             let last = u32::from(u16at(entry, 12)) - 1;
-            let sample = |i| f32::from_bits(u32at(samples, i * 4));
+            let sample = |i| f32at(samples, i * 4);
             let position = |t: f32| {
                 let t = t.clamp(0., last as f32);
                 let i = t as u32;
@@ -170,7 +205,7 @@ impl<'a> Directory<'a> {
         unsafe {
             let p = self.row(20);
             BattleView {
-                thresholds: core::array::from_fn(|i| f32::from_bits(u32at(p, 4 * i as u32))),
+                thresholds: core::array::from_fn(|i| f32at(p, 4 * i as u32)),
                 decisions: core::slice::from_raw_parts((p + 32) as *const u8, CASES),
                 routes: self.routes(),
             }

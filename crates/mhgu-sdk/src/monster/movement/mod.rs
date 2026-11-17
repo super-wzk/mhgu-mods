@@ -6,8 +6,9 @@ mod native;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Posture {
     Ground,
-    /// Native posture 1; distinct from flight (3), but both count as airborne.
+    /// Posture 1: terrain bounds the actor height from below during free flight.
     Airborne,
+    /// Posture 3: the normal terrain pass pins the actor to the floor; GU adds a visual hover offset.
     Flight,
     Other(u8),
 }

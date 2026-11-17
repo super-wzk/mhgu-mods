@@ -26,6 +26,11 @@ pub struct Monster<'a>(pub(super) Object<'a>);
 pub struct MonsterState<'a>(pub(super) Object<'a>);
 
 impl<'a> Monster<'a> {
+    /// Full GU quest identity, including the variant. Independent of the native class.
+    pub fn species(self) -> Option<super::species::SpeciesId> {
+        super::species::SpeciesId::new(self.0.get(Field::<u16>::at(46576)))
+    }
+
     /// Native time step for this actor's update.
     pub fn frame_delta(self) -> f32 {
         self.0.get(Field::at(28))

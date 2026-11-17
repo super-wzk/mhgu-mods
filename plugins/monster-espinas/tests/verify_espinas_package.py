@@ -83,7 +83,7 @@ def check_body(trial, donor, model, donor_bones, elf):
     return len(original)
 
 
-def joint_path(lmt, clip, model, logical, endpoints):
+def joint_path(lmt, clip, model, logical, endpoints, frames_to_sample=None):
     """Unit actor scale, identity starting transform, flat unobstructed ground."""
     import math
 
@@ -133,7 +133,7 @@ def joint_path(lmt, clip, model, logical, endpoints):
         chain.append(bone)
         idx = parent
     assert chain[0] == logical
-    for frame in range(frames):
+    for frame in range(frames) if frames_to_sample is None else frames_to_sample:
         root = sample(255, 4, frame)[:3]
         pts = endpoints
         for bone in chain:
@@ -154,6 +154,79 @@ def joint_path(lmt, clip, model, logical, endpoints):
                 )
             pts = result
         yield root, [tuple(x + y for x, y in zip(p, root)) for p in pts]
+
+
+def check_opening_feet(model, bank, neutral, motions):
+    """Skin both soles from the shipping MOD/LMT, at unit scale on a flat floor."""
+    from collections import defaultdict
+
+    word = lambda b, at: s.unpack_from("<I", b, at)[0]
+    bones, vb = word(model, 36), word(model, 52)
+    n = s.unpack_from("<H", model, 6)[0]
+    first_skin = 0 if model[bones] == 148 else n - 48
+    local, inverse = bones + 24 * n, bones + 88 * n
+
+    def transform(at, xyz):
+        m = s.unpack_from("<16f", model, at)
+        return tuple(
+            m[12 + i] + sum(m[4 * j + i] * xyz[j] for j in range(3)) for i in range(3)
+        )
+
+    points = defaultdict(list)
+    feet = {}
+    for i in range(word(model, 12)):
+        p = vb + 28 * i
+        joints = model[p + 16 : p + 20]
+        foot = joints[0] - first_skin
+        if foot not in (20, 21, 22, 26, 27, 28):
+            continue
+        feet[i] = int(foot >= 26)
+        x, y, z, w = s.unpack_from("<4h", model, p)
+        a, b = s.unpack_from("<2e", model, p + 24)
+        weights = (w / 32767.0, a, b, 1.0 - w / 32767.0 - a - b)
+        for joint, weight in zip(joints, weights):
+            if weight > 0:
+                xyz = transform(
+                    inverse + 64 * joint, (x / 32767.0, y / 32767.0, z / 32767.0)
+                )
+                points[joint].append((i, weight, xyz))
+    assert set(feet.values()) == {0, 1}
+
+    def soles(ys):
+        return [min(y for v, y in ys.items() if feet[v] == leg) for leg in (0, 1)]
+
+    base_y = defaultdict(float)
+    for joint, vertices in points.items():
+        for v, weight, xyz in vertices:
+            parent = joint
+            while parent != 255:
+                xyz = transform(local + 64 * parent, xyz)
+                parent = model[bones + 24 * parent + 1]
+            base_y[v] += weight * xyz[1]
+    assert max(map(abs, soles(base_y))) < 3, ("unanimated model", soles(base_y))
+
+    clips = {
+        request: (bank, slot & 255)
+        for slot, request in motions.items()
+        if request in ((255, 39), (255, 34), (0, 41), (0, 42), (255, 37), (255, 62))
+    }
+    clips["before AI"] = (neutral, 1)
+    for request, (lmt, slot) in clips.items():
+        clip = word(lmt, 8 + slot * 4)
+        frames = word(lmt, clip + 8)
+        samples = sorted({0, frames // 2, frames - 1})
+        ys = [defaultdict(float) for _ in samples]
+        for joint, vertices in points.items():
+            logical = model[bones + 24 * joint]
+            track = joint_path(lmt,clip,model,logical,[p for _,_,p in vertices],samples)
+            for target,(_,positions) in zip(ys,track):
+                for (v,weight,_),(_,y,_) in zip(vertices,positions):
+                    target[v] += weight*y
+        for f, y in zip(samples,ys):
+            lowest = min(soles(y))
+            assert lowest > -0.5, (request, f, soles(y))
+            if request == "before AI" or (request == (255,39) and f == 0):
+                assert max(abs(y[v]-base_y[v]) for v in feet) < 0.4
 
 
 def trace_charge(lmt, clip, model, logical, hde, hts, offset):

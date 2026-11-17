@@ -1,10 +1,13 @@
 use anyhow::{Context, Result, bail, ensure};
-use glam::{Vec2, Vec3};
+use glam::{Mat4, Quat, Vec2, Vec3};
 use mhf_resource::{
     fmod::{Component, FaceGroup, Fmod, Object, TriangleStrip},
     rig::Rig,
 };
-use mhgu_resource::model::{self, Bone, MeshGroup, Vertex};
+use mhgu_resource::{
+    lmt::{Track, Usage},
+    model::{self, Bone, MeshGroup, Vertex},
+};
 use std::collections::BTreeMap;
 
 fn extract(o: &Object<'_>, rig: &Rig) -> Result<MeshGroup> {
@@ -155,14 +158,170 @@ pub fn material_name(i: usize) -> String {
 }
 
 pub fn convert(source: &[u8], rig: &Rig) -> Result<Vec<u8>> {
-    encode_body(source, rig, false)
+    encode_body(source, rig, None)
 }
 
-pub fn hunt_body(source: &[u8], rig: &Rig) -> Result<Vec<u8>> {
-    encode_body(source, rig, true)
+// Keep skin/animation joints in a disjoint logical range. GU's native
+// fly-wyvern callbacks address numbered attachments (wings, head, feet, tail).
+// These sockets follow the actual FZ joints, but legacy requests on a socket
+// cannot transform the skinned joint. Vertex indices stay in original PAC order.
+pub const HUNT_JOINTS: [u8; 48] = {
+    let mut ids = [0; 48];
+    let mut i = 0;
+    while i < 48 {
+        ids[i] = 148 + i as u8;
+        i += 1;
+    }
+    ids
+};
+const WYVERN_SOCKETS: &[(u8, usize)] = &[
+    (0, 0),
+    (1, 2),
+    (2, 3),
+    (100, 29),
+    (101, 29),
+    (102, 30),
+    (103, 31),
+    (3, 34),
+    (4, 35),
+    (5, 36),
+    (6, 4),
+    (7, 5),
+    (8, 6),
+    (202, 7),
+    (9, 7),
+    (60, 8),
+    (61, 9),
+    (10, 10),
+    (11, 11),
+    (12, 12),
+    (201, 13),
+    (13, 13),
+    (70, 14),
+    (71, 15),
+    (200, 3),
+    (15, 17),
+    (16, 18),
+    (17, 19),
+    (18, 20),
+    (80, 22),
+    (81, 21),
+    (19, 23),
+    (20, 24),
+    (21, 25),
+    (22, 26),
+    (90, 28),
+    (91, 27),
+    (140, 40),
+    (141, 41),
+    (142, 42),
+    (143, 42),
+    (144, 43),
+    (145, 44),
+];
+
+pub fn hunt_body(source: &[u8], rig: &Rig, spawn: &[Track]) -> Result<Vec<u8>> {
+    encode_body(source, rig, Some(spawn))
 }
 
-fn encode_body(source: &[u8], rig: &Rig, attach_tail: bool) -> Result<Vec<u8>> {
+/// Weighted points on the two feet in the original em080 skin. Keep the
+/// inverse bind per influence: a toe can also be weighted to the ankle.
+pub struct Soles(Vec<Vec<(usize, f32, Vec3)>>);
+
+impl Soles {
+    pub fn espinas(source: &[u8], rig: &Rig) -> Result<Self> {
+        let model = Fmod::parse(source)?;
+        let mut points = Vec::new();
+        for object in model.objects() {
+            let body = extract(object, rig)?;
+            points.extend(
+                body.vertices
+                    .iter()
+                    .filter(|v| matches!(v.bones[0], 20..=22 | 26..=28))
+                    .map(|v| {
+                        v.bones
+                            .iter()
+                            .zip(v.weights)
+                            .filter(|&(_, w)| w > 0.)
+                            .map(|(&joint, w)| {
+                                let i = usize::from(joint);
+                                (
+                                    i,
+                                    w,
+                                    rig.joints[i].world.inverse().transform_point3(v.position),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+            );
+        }
+        ensure!(!points.is_empty(), "Espinas foot skin missing");
+        Ok(Self(points))
+    }
+
+    /// GU has no Frontier foot solver. Apply only the measured penetration to
+    /// the visible skeleton; the actor's position and horizontal travel stay intact.
+    pub fn ground_sleep(
+        &self,
+        rig: &Rig,
+        ids: &[u8],
+        frames: u32,
+        tracks: &mut [Track],
+    ) -> Result<()> {
+        let mut indices = Vec::with_capacity(ids.len());
+        for &id in ids {
+            let index = |usage| {
+                tracks
+                    .iter()
+                    .position(|t| t.bone == id && t.usage == usage)
+                    .context("incomplete sleep pose")
+            };
+            indices.push([
+                index(Usage::Scale)?,
+                index(Usage::Rotation)?,
+                index(Usage::Translation)?,
+            ]);
+        }
+        let root_y = indices[rig.roots[0]][2];
+        let mut corrected = Vec::with_capacity(frames as usize);
+        let mut world = vec![Mat4::IDENTITY; ids.len()];
+        for f in 0..frames as usize {
+            let sample = |i: usize| {
+                let values = &tracks[i].samples;
+                values[if values.len() == 1 { 0 } else { f }]
+            };
+            for (i, &[s, r, p]) in indices.iter().enumerate() {
+                let local = Mat4::from_scale_rotation_translation(
+                    sample(s).truncate(),
+                    Quat::from_array(sample(r).to_array()),
+                    sample(p).truncate(),
+                );
+                world[i] = rig.joints[i]
+                    .parent
+                    .map_or(local, |parent| world[parent] * local);
+            }
+            let floor = self
+                .0
+                .iter()
+                .map(|v| {
+                    v.iter()
+                        .map(|&(j, w, p)| world[j].transform_point3(p).y * w)
+                        .sum::<f32>()
+                })
+                .fold(0., f32::min);
+            let mut root = sample(root_y);
+            root.y -= floor;
+            corrected.push(root);
+        }
+        if corrected.iter().all(|&p| p == corrected[0]) {
+            corrected.truncate(1);
+        }
+        tracks[root_y].samples = corrected;
+        Ok(())
+    }
+}
+
+fn encode_body(source: &[u8], rig: &Rig, spawn: Option<&[Track]>) -> Result<Vec<u8>> {
     let f = Fmod::parse(source)?;
     let names = f
         .materials()
@@ -174,7 +333,7 @@ fn encode_body(source: &[u8], rig: &Rig, attach_tail: bool) -> Result<Vec<u8>> {
         .enumerate()
         .map(|(i, o)| extract(o, rig).with_context(|| format!("FMOD object {i}")))
         .collect::<Result<Vec<_>>>()?;
-    if attach_tail {
+    if spawn.is_some() {
         // 43/44 and 46/47 have identical local orientation and child length.
         // Rebind the prop's two weighted joints to the animated body tip.
         let tail = objects.get_mut(1).context("missing tail object")?;
@@ -195,18 +354,55 @@ fn encode_body(source: &[u8], rig: &Rig, attach_tail: bool) -> Result<Vec<u8>> {
             }
         }
     }
-    let bones = rig
+    let mut bones = rig
         .joints
         .iter()
-        .map(|b| {
+        .enumerate()
+        .map(|(i, b)| {
+            // GU can draw the base skeleton before an LMT is active. Keep the
+            // original inverse bind for skinning, but initialize the local pose
+            // to frame zero of the same FZ clip that the action will start.
+            let local = if let Some(tracks) = spawn {
+                let sample = |usage| {
+                    tracks
+                        .iter()
+                        .find(|t| t.bone == i as u8 && t.usage == usage)
+                        .map(|t| t.samples[0])
+                        .context("incomplete Espinas spawn pose")
+                };
+                Mat4::from_scale_rotation_translation(
+                    sample(Usage::Scale)?.truncate(),
+                    Quat::from_array(sample(Usage::Rotation)?.to_array()),
+                    sample(Usage::Translation)?.truncate(),
+                )
+            } else {
+                b.local
+            };
             Ok(Bone {
                 parent: b.parent.map(u8::try_from).transpose()?,
-                local: b.local,
+                local,
                 world: b.world,
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    model::encode(&bones, &objects, &names)
+    if spawn.is_some() {
+        ensure!(
+            bones.len() == HUNT_JOINTS.len(),
+            "unexpected Espinas skeleton"
+        );
+        let mut logical = HUNT_JOINTS.to_vec();
+        for &(id, parent) in WYVERN_SOCKETS {
+            bones.push(Bone {
+                parent: Some(parent as u8),
+                local: Mat4::IDENTITY,
+                world: rig.joints[parent].world,
+            });
+            logical.push(id);
+        }
+        model::encode_with_ids(&bones, &objects, &names, &logical)
+    } else {
+        model::encode(&bones, &objects, &names)
+    }
 }
 
 /// Detached em080 tail: the PAC authors object 1 in its own root coordinate

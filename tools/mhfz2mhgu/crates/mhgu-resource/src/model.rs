@@ -113,6 +113,27 @@ pub fn encode(
     objects: &[MeshGroup],
     material_names: &[String],
 ) -> Result<Vec<u8>> {
+    let logical: Vec<_> = (0..joints.len())
+        .map(u8::try_from)
+        .collect::<Result<_, _>>()?;
+    encode_with_ids(joints, objects, material_names, &logical)
+}
+
+pub fn encode_with_ids(
+    joints: &[Bone],
+    objects: &[MeshGroup],
+    material_names: &[String],
+    logical: &[u8],
+) -> Result<Vec<u8>> {
+    ensure!(joints.len() == logical.len(), "missing logical joint IDs");
+    let mut remap = [255u8; 256];
+    for (i, &id) in logical.iter().enumerate() {
+        ensure!(
+            id != 255 && remap[usize::from(id)] == 255,
+            "duplicate or invalid logical joint"
+        );
+        remap[usize::from(id)] = i.try_into()?;
+    }
     ensure!(
         !joints.is_empty() && joints.len() <= 255,
         "MOD needs 1..=255 bone records"
@@ -222,7 +243,7 @@ pub fn encode(
     }
     let mut bones = vec![];
     for (i, b) in joints.iter().enumerate() {
-        bones.extend([i as u8, b.parent.unwrap_or(255), i as u8, 0]);
+        bones.extend([logical[i], b.parent.unwrap_or(255), i as u8, 0]);
         let p = b.local.w_axis.truncate();
         bones.floats([furthest[i], p.length(), p.x, p.y, p.z]);
     }
@@ -232,7 +253,7 @@ pub fn encode(
     for b in joints {
         bones.floats((b.world.inverse() * dequant).to_cols_array());
     }
-    bones.extend((0..256).map(|i| if i < joints.len() { i as u8 } else { 255 }));
+    bones.extend(remap);
     let mut names = vec![];
     for s in material_names {
         let mut name = [0; 128];

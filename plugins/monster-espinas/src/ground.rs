@@ -1,7 +1,15 @@
 //! Ordinary species 80 ground handlers: 81CD3E9A, 81CCE024 and 81CCDA3E.
 use super::hunt::target_position;
-use super::*;
+use super::{
+    byte,
+    package::{Directory, row_id},
+    u16at, u32at,
+};
 use espinas_behavior::Request;
+use mhgu_sdk::{
+    geometry::Angle,
+    monster::{MonsterState, MonsterUpdate},
+};
 
 #[derive(Clone, Copy)]
 struct Leg {
@@ -49,7 +57,6 @@ impl Ground {
         update: MonsterUpdate,
         state: MonsterState,
         request: Request,
-        rng: u16,
         waypoint: Option<(f32, f32)>,
     ) -> Option<Self> {
         let walk = matches!(request, Request(1, 0) | Request(251, 10));
@@ -86,17 +93,20 @@ impl Ground {
                 steer: if walk { 32. } else { 64. },
                 walk,
             };
-            let series = matches!(request, Request(3, 18 | 19)).then(|| Sequence {
-                // 81CCDE30 really selects column 0 again above 60.
-                turn: match ((41..=60).contains(&(rng % 100)), rng & 1) {
-                    (false, 0) => 122,
-                    (true, 0) => 123,
-                    (false, _) => 119,
-                    (true, _) => 120,
-                },
-                count: request.1 - 17,
-                original: leg,
-                start_yaw: Angle::default(),
+            let series = matches!(request, Request(3, 18 | 19)).then(|| {
+                let rng = update.quest().random_u32() as u16;
+                Sequence {
+                    // 81CCDE30 really selects column 0 again above 60.
+                    turn: match ((41..=60).contains(&(rng % 100)), rng & 1) {
+                        (false, 0) => 122,
+                        (true, 0) => 123,
+                        (false, _) => 119,
+                        (true, _) => 120,
+                    },
+                    count: request.1 - 17,
+                    original: leg,
+                    start_yaw: Angle::default(),
+                }
             });
             Stage::Travel {
                 leg,
@@ -126,6 +136,7 @@ impl Ground {
         ended: bool,
         dt: f32,
         ticks: u16,
+        motion_rate: f32,
     ) -> Next {
         unsafe {
             let e = self.entry;
@@ -141,7 +152,9 @@ impl Ground {
                     let len = u32at(e, 16) as f32 - 1.;
                     if step.is_none() && frame >= f32::from(byte(e, 7)) * 2. {
                         let sign = if *clip == 13 { -1. } else { 1. };
-                        *step = Some((sign * 16384. / ((len - frame).max(2.) * 0.5)) as i32);
+                        *step = Some(
+                            (sign * 16384. / ((len - frame).max(2.) * 0.5) * motion_rate) as i32,
+                        );
                     } else if let Some(rate) = *step {
                         let yaw = state.yaw().offset(rate * i32::from(ticks));
                         state.set_yaw(yaw);

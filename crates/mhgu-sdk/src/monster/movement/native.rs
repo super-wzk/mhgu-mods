@@ -11,6 +11,10 @@ const POSTURE: Field<u8> = Field::at(442);
 const AREA: Field<u8> = Field::at(4180);
 const POSITION: Field<[f32; 3]> = Field::at(64);
 const HEIGHT: Field<f32> = Field::at(68);
+// BF828: the extra display height for posture 3, in model units.
+const HOVER_HEIGHT: Field<f32> = Field::at(460);
+const BASE_SCALE: Field<f32> = Field::at(428);
+const SIZE_SCALE: Field<f32> = Field::at(432);
 const GROUND_HEIGHT: Field<f32> = Field::at(1460);
 const YAW: Field<u32> = Field::at(84);
 const SET_POSTURE: u32 = 0xbc8b0;
@@ -21,6 +25,22 @@ impl Monster<'_> {
     }
 }
 impl MonsterUpdate<'_> {
+    /// Move to world-space flight height without dropping the native hover offset.
+    pub fn enter_free_flight(self) {
+        let Some(state) = self.monster().state() else {
+            return;
+        };
+        match state.posture() {
+            Posture::Airborne => return,
+            Posture::Flight => {
+                let scale = state.0.get(BASE_SCALE) * state.0.get(SIZE_SCALE);
+                state.set_height(state.height() + state.0.get(HOVER_HEIGHT) * scale);
+            }
+            _ => {}
+        }
+        self.set_posture(Posture::Airborne);
+    }
+
     /// Change to a supported native posture during an action update.
     pub fn set_posture(self, posture: Posture) {
         if !matches!(

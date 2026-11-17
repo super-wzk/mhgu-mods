@@ -22,6 +22,12 @@ pub struct Body {
     pub volumes: Vec<Volume>,
 }
 impl Body {
+    pub fn new(volumes: Vec<Volume>) -> Self {
+        let mut header = [0; 16];
+        header[..8].copy_from_slice(b"BDD\0\x19\x02\x11\x20");
+        Self { header, volumes }
+    }
+
     pub fn read(bytes: &[u8]) -> Result<Self> {
         let header: [u8; 16] = bytes.get(..16).context("short BDD")?.try_into()?;
         ensure!(header.starts_with(b"BDD\0"), "not a GU BDD");

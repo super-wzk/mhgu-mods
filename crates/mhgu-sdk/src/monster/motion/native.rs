@@ -13,6 +13,21 @@ const MOTION_FRAME: Field<f32> = Field::at(1280);
 const PLAY_MOTION: u32 = 0xaff40;
 
 impl<'a> Monster<'a> {
+    /// Set the monster's base playback rate and reapply its current action modifier.
+    /// GU keeps the primary and secondary animation clocks in sync in B0870.
+    pub fn set_base_motion_rate(self, rate: f32) {
+        let Some(state) = self.state() else { return };
+        let base = Field::<f32>::at(908);
+        if !rate.is_finite() || rate <= 0. || state.0.get(base) == rate {
+            return;
+        }
+        state.0.set(base, rate);
+        let modifier = state.0.get(Field::<f32>::at(920));
+        unsafe {
+            mhgu_sdk_refresh_motion_rate(self.as_raw(), modifier.to_bits(), entry(0xb0870) as u32)
+        };
+    }
+
     /// Borrow a main animation bank from this monster's resource table.
     pub fn motion_list(self, bank: u8) -> Option<MotionList<'a>> {
         if bank >= 16 {
@@ -23,6 +38,10 @@ impl<'a> Monster<'a> {
     }
     pub fn motion(self) -> MotionId {
         MotionId::from_raw(self.0.get(MOTION))
+    }
+    /// Effective primary playback rate, including the engine’s action modifier.
+    pub fn motion_rate(self) -> f32 {
+        self.0.get(Field::at(1292))
     }
     pub fn motion_frame(self) -> f32 {
         self.0.get(MOTION_FRAME)
@@ -36,8 +55,13 @@ impl MonsterUpdate<'_> {
     /// Start a loaded bank/slot at frame zero. Missing resources and invalid blends return false.
     pub fn play_motion(self, id: MotionId, blend: f32) -> bool {
         let actor = self.monster();
+        // AFDA4 will ignore playback when locked; 954640 also requires the model.
+        let Some(state) = actor.state() else {
+            return false;
+        };
         if !blend.is_finite()
-            || actor.state().is_none()
+            || state.0.get(Field::<u8>::at(424)) & 4 != 0
+            || actor.0.get(Field::<u32>::at(240)) == 0
             || !actor
                 .motion_list(id.bank())
                 .is_some_and(|list| list.contains(id.slot()))
@@ -52,7 +76,7 @@ impl MonsterUpdate<'_> {
                 blend.to_bits(),
             );
         }
-        true
+        actor.motion() == id
     }
 }
 
@@ -67,6 +91,12 @@ core::arch::global_asm!(
     ".global mhgu_sdk_play_motion",
     ".hidden mhgu_sdk_play_motion",
     ".type mhgu_sdk_play_motion,%function",
+    ".global mhgu_sdk_refresh_motion_rate",
+    ".hidden mhgu_sdk_refresh_motion_rate",
+    ".type mhgu_sdk_refresh_motion_rate,%function",
+    "mhgu_sdk_refresh_motion_rate:",
+    "vmov s0,r1",
+    "bx r2",
     "mhgu_sdk_play_motion:",
     "vmov s0,r3",
     "mov r12,#0",
@@ -74,5 +104,6 @@ core::arch::global_asm!(
     "bx r2",
 );
 unsafe extern "C" {
+    fn mhgu_sdk_refresh_motion_rate(actor: u32, modifier_bits: u32, function: u32);
     fn mhgu_sdk_play_motion(actor: u32, motion: u32, function: u32, blend_bits: u32);
 }
