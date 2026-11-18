@@ -1,4 +1,5 @@
 //! Bind FZ sound events while allocating GU motion slots, before the ARC is encoded.
+mod gs;
 mod source;
 mod wave;
 use anyhow::{Context, Result, ensure};
@@ -110,97 +111,135 @@ impl Timeline {
             .collect();
         cues.insert(37); // Breath 31 impact: 818DDC94 requests cue 37.
         cues.insert(87); // 81CD8D14: periodic sleeping breath, independent of motion phase.
-        let active: Vec<_> = cues
-            .into_iter()
-            .filter_map(|id| bank.voices.get(&id).map(|v| (id, v)))
-            .collect();
-        let mut assets = vec![];
-        for i in active.iter().map(|(_, v)| v.wave).collect::<BTreeSet<_>>() {
-            assets.push(asset(
-                wave_path(i),
-                WAVE,
-                wave::encode(&bank.waves[i], bank.rate),
-            ));
-        }
-        // SBKR: one note group; an explicit wave range for each active FZ cue.
-        ensure!(active.len() < 128, "too many voices in Espinas bank");
-        let mut sb = b"SBKR\x04\0\0\0".to_vec();
-        for n in [1u32, active.len() as u32, 0] {
-            sb.extend(n.to_le_bytes());
-        }
-        sb.extend(BANK_GROUP.to_le_bytes());
-        sb.extend([(active.len() * 2) as u8, 8]);
-        sb.extend([0; 8]); // first wave and mix index
-        for (i, (_, v)) in active.iter().enumerate() {
-            sb.extend(wave_path(v.wave).bytes());
-            sb.push(0);
-            let mut row = [0u8; 80]; // one spatial mono voice
-            row[..4].copy_from_slice(&WAVE.to_le_bytes());
-            row[5] = 87;
-            row[9] = v.gain;
-            // Neutral GU spatial playback range, also used by common quest waves.
-            row[10..12].fill(127);
-            row[13..15].copy_from_slice(&[0xc1, 0x3f]);
-            row[16..18].copy_from_slice(&v.cents.to_le_bytes());
-            row[25] = 127;
-            row[27] = 127;
-            row[28..32].copy_from_slice(&(1f32 / 3.).to_le_bytes());
-            row[32..36].copy_from_slice(&(2f32 / 3.).to_le_bytes());
-            row[42..44].copy_from_slice(&350u16.to_le_bytes());
-            row[52] = 127;
-            row[64..66].copy_from_slice(&u16::MAX.to_le_bytes());
-            row[67] = 24;
-            row[70..72].copy_from_slice(&2000u16.to_le_bytes());
-            row[75..78].fill((i + 1) as u8);
-            sb.extend(row);
-        }
-        assets.push(asset(PRIVATE, BANK, sb));
+        let mut assets = bank_assets(&bank, cues, PRIVATE, BANK_GROUP, wave_path)?;
+        assets.push(self.motion_asset(&bank)?);
+        Ok(assets)
+    }
+}
+fn bank_assets(
+    bank: &Bank,
+    cues: BTreeSet<u8>,
+    path: &str,
+    group: u16,
+    wave_path: impl Fn(usize) -> String,
+) -> Result<Vec<Asset>> {
+    let active: Vec<_> = cues
+        .into_iter()
+        .filter_map(|id| bank.voices.get(&id).map(|v| (id, v)))
+        .collect();
+    let mut assets = vec![];
+    for i in active.iter().map(|(_, v)| v.wave).collect::<BTreeSet<_>>() {
+        assets.push(asset(
+            wave_path(i),
+            WAVE,
+            wave::encode(&bank.waves[i], bank.rate),
+        ));
+    }
+    // SBKR: one note group; an explicit wave range for each active FZ cue.
+    ensure!(active.len() < 128, "too many voices in Espinas bank");
+    let mut sb = b"SBKR\x04\0\0\0".to_vec();
+    for n in [1u32, active.len() as u32, 0] {
+        sb.extend(n.to_le_bytes());
+    }
+    sb.extend(group.to_le_bytes());
+    sb.extend([(active.len() * 2) as u8, 8]);
+    sb.extend([0; 8]); // first wave and mix index
+    for (i, (_, v)) in active.iter().enumerate() {
+        sb.extend(wave_path(v.wave).bytes());
+        sb.push(0);
+        let mut row = [0u8; 80]; // one spatial mono voice
+        row[..4].copy_from_slice(&WAVE.to_le_bytes());
+        row[5] = 87;
+        row[9] = v.gain;
+        // Neutral GU spatial playback range, also used by common quest waves.
+        row[10..12].fill(127);
+        row[13..15].copy_from_slice(&[0xc1, 0x3f]);
+        row[16..18].copy_from_slice(&v.cents.to_le_bytes());
+        row[25] = 127;
+        row[27] = 127;
+        row[28..32].copy_from_slice(&(1f32 / 3.).to_le_bytes());
+        row[32..36].copy_from_slice(&(2f32 / 3.).to_le_bytes());
+        row[42..44].copy_from_slice(&350u16.to_le_bytes());
+        row[52] = 127;
+        row[64..66].copy_from_slice(&u16::MAX.to_le_bytes());
+        row[67] = 24;
+        row[70..72].copy_from_slice(&2000u16.to_le_bytes());
+        row[75..78].fill((i + 1) as u8);
+        sb.extend(row);
+    }
+    assets.push(asset(path, BANK, sb));
 
-        // SRQR: one private bank, no auxiliary paths. There are no inherited
-        // request IDs; all motion events and the impact cue address FZ waves.
-        let mut sr = vec![0; 52];
-        sr[..8].copy_from_slice(b"SRQR\x05\0\0\0");
-        put(&mut sr, 8, active.len());
-        put(&mut sr, 28, 0x0291df77); // GU request format revision
-        for (i, (cue, _)) in active.iter().enumerate() {
-            let mut row = [0; 132];
-            row[..2].copy_from_slice(&(REQUEST_BASE + u16::from(*cue)).to_le_bytes());
-            row[2] = (i + 1) as u8;
-            row[3] = 127;
-            for (index, value) in [
-                (8, 1),
-                (16, 100),
-                (18, 1),
-                (20, 100),
-                (21, 1),
-                (24, 1),
-                (104, 100),
-            ] {
-                row[index] = value;
-            }
-            row[28..30].fill(255);
-            row[30..32].copy_from_slice(&BANK_GROUP.to_le_bytes());
-            row[32..34].fill(255);
-            row[36..40].copy_from_slice(&(-2.1f32).to_le_bytes());
-            row[40..44].copy_from_slice(&(-2.1f32).to_le_bytes());
-            row[56] = 47;
-            row[60] = 47;
-            row[96..100].copy_from_slice(&(-96f32).to_le_bytes());
-            row[100..104].fill(255);
-            row[124..128].fill(255);
-            sr.extend(row);
+    // SRQR: one private bank, no auxiliary paths. There are no inherited
+    // request IDs; all motion events and the impact cue address FZ waves.
+    let mut sr = vec![0; 52];
+    sr[..8].copy_from_slice(b"SRQR\x05\0\0\0");
+    put(&mut sr, 8, active.len());
+    put(&mut sr, 28, 0x0291df77); // GU request format revision
+    for (i, (cue, _)) in active.iter().enumerate() {
+        let mut row = [0; 132];
+        row[..2].copy_from_slice(&(REQUEST_BASE + u16::from(*cue)).to_le_bytes());
+        row[2] = (i + 1) as u8;
+        row[3] = 127;
+        for (index, value) in [
+            (8, 1),
+            (16, 100),
+            (18, 1),
+            (20, 100),
+            (21, 1),
+            (24, 1),
+            (104, 100),
+        ] {
+            row[index] = value;
         }
-        let table = sr.len();
-        put(&mut sr, 32, table);
-        sr.extend(((table + 4) as u32).to_le_bytes());
-        sr.extend(PRIVATE.bytes());
-        sr.push(0);
-        sr.resize(sr.len().next_multiple_of(4), 0);
-        let end = sr.len();
-        for at in (36..52).step_by(4) {
-            put(&mut sr, at, end);
-        }
-        assets.push(asset(PRIVATE, REQUEST, sr));
+        row[28..30].fill(255);
+        row[30..32].copy_from_slice(&group.to_le_bytes());
+        row[32..34].fill(255);
+        row[36..40].copy_from_slice(&(-2.1f32).to_le_bytes());
+        row[40..44].copy_from_slice(&(-2.1f32).to_le_bytes());
+        row[56] = 47;
+        row[60] = 47;
+        row[96..100].copy_from_slice(&(-96f32).to_le_bytes());
+        row[100..104].fill(255);
+        row[124..128].fill(255);
+        sr.extend(row);
+    }
+    let table = sr.len();
+    put(&mut sr, 32, table);
+    sr.extend(((table + 4) as u32).to_le_bytes());
+    sr.extend(path.bytes());
+    sr.push(0);
+    sr.resize(sr.len().next_multiple_of(4), 0);
+    let end = sr.len();
+    for at in (36..52).step_by(4) {
+        put(&mut sr, at, end);
+    }
+    assets.push(asset(path, REQUEST, sr));
+    Ok(assets)
+}
+pub fn great_sword(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
+    let mut assets = Vec::new();
+    let (timeline, common) = gs::timeline(dat)?;
+    for (name, bank) in [
+        ("blade", Bank::player(&dat.join("sound/we00.snd"), 0..35)?),
+        (
+            "common",
+            Bank::player(&dat.join("sound/common01.snd"), common)?,
+        ),
+        ("iron", gs::iron(dat)?),
+    ] {
+        let path = format!(r"sound\se\pl\frontier_gs\{name}");
+        assets.extend(bank_assets(
+            &bank,
+            bank.voices.keys().copied().collect(),
+            &path,
+            1,
+            |i| format!(r"{path}\w{i:02}"),
+        )?);
+    }
+    Ok((assets, timeline))
+}
+impl Timeline {
+    fn motion_asset(self, bank: &Bank) -> Result<Asset> {
         let mut tracks = BTreeMap::new();
         for (key, (n, events)) in self.tracks {
             let mut frames: BTreeMap<u16, Vec<(u8, u8)>> = BTreeMap::new();
@@ -225,8 +264,7 @@ impl Timeline {
             put(&mut out, 1044 + 8 * i, p);
             out.extend(track);
         }
-        assets.push(asset(r"sound\call\em\em107", MSS, out));
-        Ok(assets)
+        Ok(asset(r"sound\call\em\em107", MSS, out))
     }
 }
 fn encode_track(key: usize, duration: u16, frames: BTreeMap<u16, Vec<(u8, u8)>>) -> Vec<u8> {

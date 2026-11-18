@@ -49,6 +49,13 @@ fn downsample(pixels: &[u8], w: usize, h: usize) -> Vec<u8> {
 }
 
 pub fn rgba8(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
+    encode(width, height, rgba, true)
+}
+/// Sprite atlases cannot share generated mip levels across neighbouring tiles.
+pub fn rgba8_unmipped(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
+    encode(width, height, rgba, false)
+}
+fn encode(width: u32, height: u32, rgba: &[u8], mipmaps: bool) -> Result<Vec<u8>> {
     ensure!(
         (1..=8191).contains(&width) && (1..=8191).contains(&height),
         "dimensions do not fit a 2D TEX"
@@ -61,7 +68,7 @@ pub fn rgba8(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
     loop {
         offsets.push(u32::try_from(data.len())?);
         data.extend(surface(w, h, &pixels));
-        if (w, h) == (1, 1) {
+        if !mipmaps || (w, h) == (1, 1) {
             break;
         }
         pixels = downsample(&pixels, w, h).into();

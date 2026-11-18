@@ -69,6 +69,62 @@ impl Writer {
         self.bytes.align(16);
         self.bytes
     }
+
+    /// Set a single native hunter equipment event while this clip is playing.
+    /// The final sample clears the event, just as in retail w00 slot 1.
+    pub fn equipped_event(&mut self, slot: usize, kind: u16) -> Result<()> {
+        self.equipment_timeline(slot, &[kind], &[(1, 0)])
+    }
+
+    /// Group zero controls the hunter's equipment sockets. Runs give durations;
+    /// the final active run occupies the rest of the clip (except its reset frame).
+    pub fn equipment_timeline(
+        &mut self,
+        slot: usize,
+        kinds: &[u16],
+        runs: &[(u32, u32)],
+    ) -> Result<()> {
+        ensure!(
+            slot < self.slots as usize,
+            "equipment event on nonexistent slot"
+        );
+        let word = |at| u32::from_le_bytes(self.bytes[at..at + 4].try_into().unwrap());
+        let clip = word(8 + 4 * slot) as usize;
+        ensure!(clip != 0, "equipment event on empty clip");
+        let frames = word(clip + 8);
+        let group = word(clip + 52) as usize;
+        ensure!(
+            frames > 1 && word(group + 64) == 1,
+            "expected a baked clip without events"
+        );
+        ensure!(
+            !runs.is_empty() && kinds.len() <= 32,
+            "invalid equipment timeline"
+        );
+        for (i, kind) in kinds.iter().enumerate() {
+            self.bytes[group + 2 * i..group + 2 * i + 2].copy_from_slice(&kind.to_le_bytes());
+        }
+        self.bytes.patch(group + 64, u32::try_from(runs.len() + 1)?);
+        self.bytes.align(4);
+        self.bytes
+            .patch(group + 68, u32::try_from(self.bytes.len())?);
+        let mut remaining = frames - 1;
+        for (i, &(mask, len)) in runs.iter().enumerate() {
+            let len = if i + 1 == runs.len() && len == 0 {
+                remaining
+            } else {
+                len
+            };
+            ensure!(len > 0 && len <= remaining, "invalid equipment duration");
+            self.bytes.u32(mask);
+            self.bytes.u32(len);
+            remaining -= len;
+        }
+        ensure!(remaining == 0, "incomplete equipment timeline");
+        self.bytes.u32(0);
+        self.bytes.u32(1);
+        Ok(())
+    }
 }
 
 fn pack_rotation(q: Vec4, delta: u8) -> u64 {

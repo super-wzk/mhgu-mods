@@ -1,5 +1,7 @@
 mod charge;
 mod emc;
+mod hunter;
+mod hunter_fx;
 mod model;
 mod motion;
 mod package;
@@ -16,10 +18,7 @@ use std::{
 };
 
 #[derive(Parser)]
-#[command(
-    version,
-    about = "Convert Frontier monster assets to MHGU (Switch) resources"
-)]
+#[command(version, about = "Convert Frontier assets to MHGU (Switch) resources")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -44,6 +43,38 @@ impl Monster {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Extract the original great sword emitters, their GU meshes and effect atlases.
+    GreatSwordEffects {
+        dat: PathBuf,
+        /// GU quest/w00.arc, which supplies the native particle material
+        #[arg(long)]
+        gu_weapon: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Convert the original Frontier great sword's private sound resources for GU.
+    GreatSwordSound {
+        dat: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Join Frontier great sword motion layers and map them to GU hunter joints
+    GreatSwordMotions {
+        /// Frontier dat directory (motion/w00.mot and parts/<sex>00/<sex>_editpl.bin)
+        dat: PathBuf,
+        #[arg(long)]
+        female: bool,
+        /// Output independent GU motion ARC; never replaces a native style
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Extract the FZ extreme great sword action program with file-relative offsets
+    GreatSwordActions {
+        /// Frontier dat directory (mhfdat.bin and mhfsdt.bin)
+        dat: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Show the source model, skeleton and motion groups before converting
     Inspect {
         #[command(flatten)]
@@ -197,6 +228,22 @@ fn save(path: &Path, bytes: Vec<u8>) -> Result<()> {
 
 fn main() -> Result<()> {
     match Cli::parse().command {
+        Command::GreatSwordEffects {
+            dat,
+            output,
+            gu_weapon,
+        } => hunter_fx::extract(&dat, &output, &gu_weapon),
+        Command::GreatSwordSound { dat, output } => {
+            let (assets, timeline) = sound::great_sword(&dat)?;
+            save(&output.with_extension("fgse"), timeline)?;
+            save(&output, mhgu_resource::arc::encode(&assets)?)
+        }
+        Command::GreatSwordActions { dat, output } => save(&output, hunter::actions(&dat)?),
+        Command::GreatSwordMotions {
+            dat,
+            female,
+            output,
+        } => save(&output, hunter::great_sword(&dat, female)?),
         Command::Model { monster, output } => {
             let (_, pair, rig) = monster.open()?;
             save(&output, model::convert(&pac::member(&pair, 0)?, &rig)?)

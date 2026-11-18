@@ -1,0 +1,1000 @@
+//! Fight logic for the local hunter. GU owns the actor, collision, interruption
+//! and equipment; the Frontier program advances only while its clip is current.
+use crate::{
+    combat,
+    fx::{self, ChargeEffect},
+    motion,
+    program::{self, Cursor, Step},
+};
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+};
+use mhgu_sdk::style::{Input, PASS, action};
+const DASH: u8 = 200;
+const BRAKE: u8 = 201;
+const IDLE: u8 = 255;
+const GUARD_GROUP: u16 = 32;
+const GUARD_MOTION: u32 = 5005;
+const GUARD_RECOIL_SLOTS: [u32; 4] = [3, 4, 5, 8];
+// FZ 817C0982 starts the emitter at frame 84 of clip 1465.
+const RADIANCE_CLIP: u16 = 1465;
+const RADIANCE_START: f32 = 84.;
+const RADIANCE_INTERVAL: f32 = 12.;
+const fn synthetic(clip: u16, op: u16) -> Step {
+    Step {
+        op,
+        clip,
+        start: 0,
+        blend: 4,
+        until: 0,
+        loops: 1,
+    }
+}
+fn instruction(c: Cursor) -> Option<Step> {
+    match (c.state, c.time.step) {
+        (DASH, 0) => Some(synthetic(1030, 5)),
+        (BRAKE, 0) => Some(synthetic(1031, 3)),
+        _ if c.state < 74 => program::step(c.state, c.time.step),
+        _ => None,
+    }
+}
+fn charge_state(state: u8) -> bool {
+    matches!(state, 19..=28 | 47..=53 | 70 | 71)
+}
+unsafe fn read<T: Copy>(p: u32, n: u32) -> T {
+    unsafe { ((p + n) as *const T).read_unaligned() }
+}
+unsafe fn write<T>(p: u32, n: u32, x: T) {
+    unsafe { ((p + n) as *mut T).write_unaligned(x) }
+}
+macro_rules! native {
+    ($a:expr $(,$x:expr)*)=>{{
+        let f:unsafe extern "C" fn($(native!(@t $x)),*)->u32=core::mem::transmute(forge::mem::text_addr()+$a);
+        f($($x),*)
+    }};
+    (@t $x:expr)=>{u32};
+}
+pub(super) unsafe fn local(p: u32) -> bool {
+    unsafe {
+        if p == 0 || read::<u32>(p, 0) != forge::mem::text_addr() + 0x1749a88 {
+            return false;
+        }
+        let mgr = read::<u32>(forge::mem::text_addr(), 0x1885b58);
+        let eq = read::<u32>(p, 5060);
+        mgr != 0
+            && eq != 0
+            && read::<u8>(eq, 1236) == 0
+            && native!(0x276278, mgr) == p
+            && mhgu_sdk::style::selected(0) == 1
+    }
+}
+core::arch::global_asm!(
+    ".syntax unified",
+    ".arm",
+    ".fpu vfpv3",
+    ".text",
+    ".align 2",
+    ".global extreme_stamina",
+    ".hidden extreme_stamina",
+    ".type extreme_stamina,%function",
+    "extreme_stamina:",
+    "vmov s0,r1",
+    "mov r1,#0",
+    "bx r2"
+);
+unsafe extern "C" {
+    fn extreme_stamina(p: u32, amount: u32, entry: u32);
+}
+unsafe fn drain_stamina(p: u32, rate: f32) {
+    unsafe {
+        extreme_stamina(p, rate.to_bits(), forge::mem::text_addr() + 0x2a5ce4);
+    }
+}
+unsafe fn spend_stamina(p: u32, cost: f32) {
+    unsafe {
+        // Discrete costs use GU's Constitution/evade path, without multiplying
+        // by the frame delta as continuous sprint drain does.
+        extreme_stamina(p, (-cost).to_bits(), forge::mem::text_addr() + 0x2a5ebc);
+    }
+}
+struct Battle {
+    audio: crate::sound::Clock,
+    owner: u32,
+    equip: u32,
+    guard: u8,
+    cursor: Cursor,
+    packed: u16,
+    charge: f32,
+    charge_interval: f32,
+    charging: bool,
+    charge_effect: Option<ChargeEffect>,
+    draw_released: bool,
+    level: u8,
+    hit: bool,
+    radiance_delay: Option<f32>,
+    radiance_yaw: u16,
+    radiance_contact: Option<([f32; 3], u32)>,
+    aura_time: f32,
+    flick: program::Flick,
+    guard_dash: bool,
+    roll_attack: Option<u8>,
+    roll_side: Option<u32>,
+    poise: f32,
+    sustain_poise: bool,
+}
+impl Battle {
+    fn fresh(p: u32, equip: u32) -> Self {
+        Self {
+            audio: Default::default(),
+            owner: p,
+            equip,
+            guard: 0,
+            cursor: Cursor::new(IDLE),
+            packed: 0xffff,
+            charge: 0.,
+            charge_interval: 20.,
+            charging: false,
+            charge_effect: None,
+            draw_released: false,
+            level: 0,
+            hit: false,
+            radiance_delay: None,
+            radiance_yaw: 0,
+            radiance_contact: None,
+            aura_time: 0.,
+            flick: Default::default(),
+            guard_dash: false,
+            roll_attack: None,
+            roll_side: None,
+            poise: 0.,
+            sustain_poise: false,
+        }
+    }
+    fn cancel(&mut self) {
+        // GU's common action transition releases the previous state's stamina
+        // latch. Do not clear it here after a guard/damage state has taken over.
+        self.charge_effect = None;
+        self.radiance_contact = None;
+        self.cursor = Cursor::new(IDLE);
+        self.packed = 0xffff;
+        self.charging = false;
+        self.hit = false;
+        self.roll_side = None;
+    }
+    unsafe fn finish(&mut self, p: u32) {
+        unsafe {
+            self.cancel();
+            write(p, 12325, 0u8);
+            native!(0x2b6e5c, p);
+        }
+    }
+    unsafe fn evade(&mut self, p: u32) -> bool {
+        unsafe {
+            motion::remember_roll(
+                p,
+                self.roll_side
+                    .take()
+                    .unwrap_or_else(|| motion::roll_side(p)),
+            );
+            self.cancel();
+            write(p, 12325, 0u8);
+            // Stock drawn roll: 2CBFCC case 6 -> 2CF8A4, including its stamina,
+            // invulnerability, collision and recovery handling.
+            native!(0x2ab670, p, 1, 6, 0);
+            true
+        }
+    }
+    unsafe fn start_step(&mut self, p: u32, frame: Option<u16>) -> bool {
+        unsafe {
+            let Some(s) = instruction(self.cursor) else {
+                self.finish(p);
+                return true;
+            };
+            match s.op {
+                0 | 1 => {
+                    self.finish(p);
+                    true
+                }
+                2 => self.begin(p, s.clip as u8),
+                3..=5 => {
+                    let start = frame.unwrap_or(s.start);
+                    let blend = if frame.is_some() { 0 } else { s.blend };
+                    let Some(id) = motion::play(p, s.clip, start, blend) else {
+                        self.finish(p);
+                        return true;
+                    };
+                    self.packed = id;
+                    let start = f32::from(start);
+                    self.audio.update(p, Some(s.clip), start, Some(start));
+                    self.cursor.time.cycles = 0;
+                    self.cursor.time.frame = start;
+                    self.cursor.time.blend = f32::from(blend / 2);
+                    if s.clip == RADIANCE_CLIP {
+                        self.radiance_delay = None;
+                    }
+                    self.events(p);
+                    true
+                }
+                _ => {
+                    self.cancel();
+                    false
+                }
+            }
+        }
+    }
+    unsafe fn begin(&mut self, p: u32, state: u8) -> bool {
+        unsafe { self.begin_at(p, state, None) }
+    }
+    unsafe fn begin_at(&mut self, p: u32, state: u8, frame: Option<u16>) -> bool {
+        unsafe {
+            self.charge_effect = None;
+            self.radiance_contact = None;
+            self.cursor = Cursor::new(state);
+            self.roll_side = None;
+            let Some(s) = instruction(self.cursor) else {
+                self.cancel();
+                return false;
+            };
+            if motion::physical(p, s.clip).is_none() {
+                self.cancel();
+                return false;
+            }
+            // An accepted GU request has already run the common transition.
+            let requested = read::<u16>(p, 9478) == action::GROUP
+                && read::<u16>(p, 9482) == action::slot(state)
+                && read::<u8>(p, 5) == 0;
+            if !requested && !action::enter(p, state) {
+                self.cancel();
+                return false;
+            }
+            self.hit = false;
+            self.charging = false;
+            self.draw_released = false;
+            if charge_state(state) {
+                self.level = 0;
+                self.charge = 0.;
+                // GU's own GS charge timer (11681DC) checks these Focus and
+                // Slow Charge equipment skills. FZ changes 40/20 to 32/16 or 48/24.
+                self.charge_interval = if [152, 266, 284, 293]
+                    .iter()
+                    .any(|&id| native!(0x2864c4, p, id) != 0)
+                {
+                    16.
+                } else if native!(0x2864c4, p, 153) != 0 {
+                    24.
+                } else {
+                    20.
+                };
+            }
+            self.poise = 0.;
+            self.sustain_poise = false;
+            write(p, 12325, 0u8);
+            write(p, 12320 + 176, 0u32);
+            write(p, 5, 1u8);
+            native!(0x282fd8, p, 0, 1, 0);
+            native!(0x2a2560, p, 1);
+            if matches!(state, 13 | 20 | 38 | 47) {
+                native!(0x2a264c, p, 1); // GU draw-attack bookkeeping/skills
+            }
+            if state == DASH {
+                native!(0x2a25a8, p, 1);
+            }
+            self.start_step(p, frame)
+        }
+    }
+    unsafe fn events(&mut self, p: u32) {
+        unsafe {
+            if self.cursor.state >= 74 {
+                return;
+            }
+            while let Some((kind, param, late)) = self.cursor.next_event() {
+                match kind {
+                    5 => {
+                        self.sustain_poise = false;
+                        self.poise = (f32::from(param) * 2. - late).max(0.);
+                        write(p, 10288, self.poise.max(read::<f32>(p, 10288)));
+                    }
+                    6 => self.sustain_poise = true,
+                    // The GU evasion initializer (2A6844) writes this clock;
+                    // 2F5780 reads it in the incoming damage decision.
+                    7 | 8 if param != 0 => {
+                        let remaining = (f32::from(param) * 2. - late).max(0.);
+                        write(p, 11072, remaining.max(read::<f32>(p, 11072)));
+                    }
+                    12 => spend_stamina(p, 150.),
+                    4 => {
+                        let dir = read::<u32>(p, 4076).wrapping_add(u32::from(param)) & 0xffff;
+                        write(p, 4076, dir);
+                        write(p, 5280, dir);
+                    }
+                    13 => {
+                        self.charge = 0.;
+                        self.level = 0;
+                    }
+                    14 => self.level = param as u8,
+                    // The draw slash joins clip 1428 at frame 32. Its row
+                    // opens at clip frame 36, four frames after the handoff.
+                    17 if self.cursor.state == 13 => {
+                        combat::emit(p, param, self.cursor.time.frame);
+                    }
+                    16 | 17 => {
+                        combat::emit(p, param, late);
+                    }
+                    18 => {
+                        combat::emit(p, program::charged_row(self.level), late);
+                    }
+                    19 => {
+                        combat::emit(p, 110 + u16::from(self.level.min(5)), late);
+                    }
+                    // Frontier event 29 requests the hunter origin (joint argument 0).
+                    29 => fx::emit(p, param, None),
+                    30 => {
+                        self.charging = true;
+                        self.charge = late * 0.5;
+                    }
+                    31 => {
+                        crate::sound::play(p, false, if self.guard < 2 { 2 } else { 3 });
+                        if self.guard < 3 {
+                            self.guard += 1;
+                            if self.guard == 3 {
+                                fx::radiance_ready(p);
+                                self.aura_time = 0.;
+                            }
+                        }
+                    }
+                    32 => self.guard = 0,
+                    _ => {}
+                }
+            }
+        }
+    }
+    unsafe fn begin_branch(&mut self, p: u32, branch: u16) -> bool {
+        unsafe {
+            let next = match branch {
+                65 => {
+                    self.cancel();
+                    native!(0x2ab670, p, u32::from(GUARD_GROUP), 0, 0);
+                    return true;
+                }
+                74 => return self.evade(p),
+                75 => DASH,
+                76 => 22,
+                77 => 24,
+                78 => 21,
+                79 => 25,
+                80 => 49,
+                81 => 50,
+                82 => 51,
+                83 => 52,
+                84 => 32,
+                85 => match self.cursor.state {
+                    22 => 30,
+                    24 => 31,
+                    _ => 29,
+                },
+                86 => 54 + self.level.min(4),
+                87 => 68,
+                88 | 89 => 69,
+                n if n < 74 => n as u8,
+                _ => return true,
+            };
+            self.begin(p, next)
+        }
+    }
+    unsafe fn advance(&mut self, p: u32, input: &Input, dash_input: bool) -> bool {
+        unsafe {
+            let state = self.cursor.state;
+            let uppercut_charge = matches!(state, 47..=53 | 70);
+            let Some(s) = instruction(self.cursor) else {
+                return false;
+            };
+            let frame = read::<f32>(p, 1280);
+            let end = read::<f32>(p, 1284);
+            let previous = self.cursor.time.frame;
+            let wrapped = frame < previous;
+            let ended = read::<u8>(p, 1206) & 4 != 0;
+            if state == 20 && self.cursor.time.step == 0 {
+                // GU's draw-charge dispatcher latches a release during the
+                // first ten motion frames (1161A14..1161A34). Use its mapped
+                // charge command; a tap continues through FZ's normal draw
+                // at the current frame, never through the charge loop.
+                if previous < 10. && !input.weapon_command(5) {
+                    self.draw_released = true;
+                }
+                if frame >= 10. && self.draw_released {
+                    return self.begin_at(p, 13, Some(frame.min(36.) as u16));
+                }
+            }
+            if wrapped {
+                self.cursor.time.cycles = self.cursor.time.cycles.saturating_add(1)
+            }
+            let delta = if wrapped {
+                read::<f32>(p, 28).max(0.)
+            } else {
+                (frame - previous).max(0.)
+            };
+            write(p, 9472, read::<u32>(p, 9472) & !1);
+            self.cursor.time.frame = frame;
+            self.cursor.time.blend = read(p, 1268);
+            if previous < 50. && frame >= 50. && s.clip == 1449 {
+                fx::emit(p, 3, None);
+                if read::<u8>(p, 11988) == 0 {
+                    fx::emit(p, 5, None);
+                }
+            }
+            if previous < 70. && frame >= 70. && s.clip == 1450 && read::<u8>(p, 11988) == 0 {
+                fx::emit(p, 6, None);
+            }
+            // 169D44 records the actual target and its type in this sword's
+            // volume. Type 1 is a monster, type 0 is a hunter. The allocator
+            // clears the record on each swing. No shared DPS hook is needed.
+            self.hit |= read::<u32>(p, 12320 + 176) != 0 && read::<u8>(p, 12320 + 180) == 1;
+            self.poise = (self.poise - delta).max(0.);
+            let was_charging = self.charging;
+            self.events(p);
+            if self.sustain_poise {
+                self.poise = self.poise.max(8.);
+                write(p, 10288, self.poise.max(read::<f32>(p, 10288)));
+            }
+            // The extra shoulder has no GU combat command; the registry uses
+            // GU's own binding query for Frontier's additional brace action.
+            let brace = self.poise > 0.
+                && state != 3
+                && state < 74
+                && input.auxiliary_pressed != 0
+                && read::<f32>(p, 5088) >= 150.
+                && read::<f32>(p, 10296) <= 0.;
+            if brace {
+                spend_stamina(p, 150.);
+                crate::sound::play(p, false, 1);
+                fx::emit(p, 4, Some(0));
+                let duration = if charge_state(state) { 240. } else { self.poise };
+                write(p, 10296, duration);
+            }
+            if self.charging && delta > 0. {
+                // FZ increments +2852 once per simulation tick (two MOT frames).
+                if was_charging {
+                    self.charge += delta * 0.5;
+                }
+                let cap = if uppercut_charge { 4 } else { 3 };
+                let old = self.level;
+                self.level = ((self.charge / self.charge_interval) as u8)
+                    .saturating_sub(1)
+                    .min(cap);
+                if self.level > old && self.level == 4 {
+                    fx::emit(p, 0, Some(8));
+                    crate::sound::play(p, true, 210);
+                }
+                let timeout = self.charge_interval * f32::from(cap + 1) + 10.;
+                let expired = if uppercut_charge {
+                    self.charge > timeout
+                } else {
+                    self.charge >= timeout
+                };
+                if expired {
+                    let branch = if uppercut_charge { 86 } else { 85 };
+                    motion::aim(p, branch);
+                    if uppercut_charge {
+                        // 811D84FE resets +2856 to level two on overcharge;
+                        // manual release during the fourth tier still uses row 168.
+                        self.level = 2;
+                    }
+                    return self.begin_branch(p, branch);
+                }
+            }
+            if state == DASH {
+                if delta > 0. {
+                    // The native continuous drain already multiplies by GU's
+                    // frame delta. Disable recovery and supply the rate once.
+                    native!(0x2a25a8, p, 1);
+                    drain_stamina(p, -1.);
+                }
+                if frame >= 30. || self.cursor.time.cycles > 0 {
+                    if input.command(13) {
+                        self.cancel();
+                        native!(0x2ab670, p, 1, 2, 0); // shared sheathe and equipment change
+                        return true;
+                    }
+                    if input.command(3) {
+                        return self.evade(p);
+                    }
+                    if input.command(70) {
+                        self.cancel();
+                        native!(0x2ab670, p, u32::from(GUARD_GROUP), 0, 0);
+                        return true;
+                    }
+                    if input.weapon_command(1) {
+                        return self.begin(p, 70);
+                    }
+                    if input.weapon_command(12) {
+                        return self.begin(p, 64);
+                    }
+                    if read::<f32>(p, 5088) <= 0. || native!(0x27e608, p, 0) == 0 {
+                        return self.begin(p, BRAKE);
+                    }
+                }
+                // Use the facing already resolved by GU's stick/camera controller.
+                if native!(0x27e608, p, 0) > 0 {
+                    let dir = native!(0x27f678, p);
+                    write(p, 4076, dir & 0xffff);
+                }
+            } else if state < 74 {
+                let mut cmd = 0u32;
+                let side = if (input.weapon_command(5) || input.weapon_command(22))
+                    && native!(0x27e608, p, 0) > 0
+                {
+                    // GU measures sectors relative to the camera and the actor,
+                    // including the alternate controller setup.
+                    if native!(0x27e638, p, 0, 0x2000, 0x6000, 1) != 0 {
+                        1
+                    } else if native!(0x27e638, p, 0, 0xa000, 0xe000, 1) != 0 {
+                        2
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                if input.command(8) {
+                    cmd |= 1 << 18;
+                } else if input.weapon_command(1) {
+                    cmd |= 1 << 15;
+                    if input.command(0) {
+                        cmd |= 1 << 28 | 1 << (28 + side);
+                    }
+                    if side == 2 {
+                        cmd |= 1 << 16;
+                    }
+                } else if input.weapon_command(5) || input.weapon_command(12) {
+                    cmd |= 1 << 10 | 1 << (10 + side);
+                    if input.weapon_command(12) {
+                        cmd |= 1 << 3 | 1 << (3 + side) | 1 << 23 | 1 << (23 + side);
+                    }
+                } else if input.weapon_command(2) {
+                    cmd |= 1 << 13;
+                    if input.command(0) {
+                        cmd |= 1 << 26;
+                        if side == 1 {
+                            cmd |= 1 << 27;
+                        }
+                    }
+                    if side == 1 {
+                        cmd |= 1 << 14;
+                    }
+                }
+                if !input.weapon_command(5) {
+                    cmd |= 1 << 6
+                }
+                if !(input.weapon_command(5) && input.weapon_command(22)) {
+                    cmd |= 1 << 17
+                }
+                if input.command(70) {
+                    cmd |= 1 << 31
+                }
+                if input.command(3) {
+                    cmd |= 1 << 1
+                }
+                if dash_input {
+                    cmd |= 1 << 2
+                }
+                let hit = self.hit;
+                let guard = self.guard;
+                let branch = self.cursor.branch(cmd, |q| match q {
+                    0 | 4 => true,
+                    2 => hit,
+                    7 => guard >= 3,
+                    _ => false,
+                });
+                if input.command(3) && self.roll_side.is_none() && self.cursor.buffered_roll() {
+                    self.roll_side = Some(motion::roll_side(p));
+                }
+                if let Some(branch) = branch {
+                    motion::aim(p, branch);
+                    return self.begin_branch(p, branch);
+                }
+            }
+            let cycles = self
+                .cursor
+                .time
+                .cycles
+                .saturating_add(u16::from(ended && !wrapped));
+            let next = match s.op {
+                3 => ended || (end > 0. && frame >= end),
+                4 => cycles >= s.loops && (frame >= f32::from(s.until) || ended),
+                _ => false,
+            };
+            if next {
+                self.cursor.time.step += 1;
+                return self.start_step(p, None);
+            }
+            if s.clip == RADIANCE_CLIP {
+                self.radiance(p, previous, frame);
+            }
+            if self.charging {
+                let held_charge =
+                    input.weapon_command(5) && (!uppercut_charge || input.weapon_command(22));
+                // Resolve the release branch before creating the charge proof or
+                // playing its start cue. A tapped draw reaches the charge step
+                // with X already released; it must not flash a new charge effect.
+                if held_charge {
+                    self.charge_effect
+                        .get_or_insert_with(|| ChargeEffect::start(p))
+                        .update(p, self.charge, self.level);
+                } else {
+                    self.charge_effect = None;
+                }
+            }
+            true
+        }
+    }
+    unsafe fn radiance(&mut self, p: u32, previous: f32, frame: f32) {
+        unsafe {
+            let yaw = read(p, 4076);
+            let late = if let Some(delay) = self.radiance_delay {
+                // The emitter outlives motion pauses. Six Frontier ticks are
+                // twelve units of GU game time at either playback rate.
+                let remaining = delay - read::<f32>(p, 28).max(0.);
+                if remaining > 0. {
+                    self.radiance_delay = Some(remaining);
+                    return;
+                }
+                -remaining % RADIANCE_INTERVAL
+            } else if previous < RADIANCE_START && frame >= RADIANCE_START {
+                self.radiance_yaw = yaw;
+                (frame - RADIANCE_START) % RADIANCE_INTERVAL
+            } else {
+                return;
+            };
+            self.radiance_delay = Some(RADIANCE_INTERVAL - late);
+            // FZ uses scene node 0, the unanimated parent of the motion
+            // carrier. Its equivalent here is the GU actor origin.
+            let [x, y, z] = read::<[f32; 3]>(p, 64);
+            let (sin, cos) = mhgu_sdk::geometry::Angle::from_units(yaw).sin_cos();
+            let origin = [x + 200. * sin, y, z + 200. * cos];
+            self.radiance_contact =
+                combat::emit(p, program::RADIANCE, late).map(|shapes| (origin, shapes));
+            fx::radiance(p, origin, self.radiance_yaw);
+        }
+    }
+    unsafe fn tick(&mut self, p: u32, input: &Input) -> bool {
+        unsafe {
+            let group: u16 = read(p, 9478);
+            let act: u16 = read(p, 9482);
+            if (group, act) != (1, 6) {
+                motion::forget_roll(p);
+            }
+            let phase: u8 = read(p, 5);
+            let physical: u16 = read(p, 1204);
+            if self.guard == 3 && native!(0x2a2444, p) != 0 {
+                self.aura_time += read::<f32>(p, 28).max(0.);
+                if self.aura_time >= 24. {
+                    self.aura_time %= 24.;
+                    fx::radiance_ready(p);
+                }
+            } else {
+                self.aura_time = 0.;
+            }
+            self.audio
+                .update(p, motion::source_clip(p, physical), read(p, 1280), None);
+            let dash_input = self.flick.sample(
+                input.stick_strength,
+                input.stick_angle,
+                read::<f32>(p, 28).max(0.) * 0.5,
+            );
+            if self.cursor.state != IDLE {
+                if (group, act) == (action::GROUP, action::slot(self.cursor.state))
+                    && physical == self.packed
+                    && phase != 0
+                    && read::<u8>(p, 9493) & 4 == 0
+                {
+                    return self.advance(p, input, dash_input);
+                }
+                self.cancel(); // damage, sheathing, warp or another GU action took ownership
+            }
+            if group == action::GROUP {
+                if phase == 0 && action::custom(group, act) {
+                    return self.begin(p, (act - action::FIRST) as u8);
+                }
+                // A lost clip or a style switched during a weapon action must
+                // return through the shared lifecycle, never the stock GS table.
+                self.finish(p);
+                return true;
+            }
+            if group == GUARD_GROUP && matches!(act, 0 | 1 | 9 | 12 | 14) {
+                if phase == 0 {
+                    PRECISE_GUARD_OWNER.store(0, Ordering::Release);
+                    self.guard_dash = false;
+                }
+                if phase != 0 && motion::decode(p, u32::from(physical)) == GUARD_MOTION {
+                    let frame = read::<f32>(p, 1280);
+                    self.guard_dash |= frame >= 20. && dash_input;
+                    if frame >= 56. {
+                        if input.command(3) {
+                            return self.evade(p);
+                        }
+                        if self.guard_dash && read::<f32>(p, 5088) > 0. {
+                            return self.begin(p, DASH);
+                        }
+                    }
+                    if read::<u8>(p, 1206) & 4 != 0 || frame >= read::<f32>(p, 1284) {
+                        self.finish(p);
+                    }
+                    write(p, 9472, read::<u32>(p, 9472) & !1);
+                    return true;
+                }
+                return false;
+            }
+            if group == GUARD_GROUP && GUARD_RECOIL_SLOTS.contains(&u32::from(act)) {
+                if phase == 0 && PRECISE_GUARD_OWNER.swap(0, Ordering::AcqRel) == p {
+                    // Snapshot the damage owner before GU initializes recoil.
+                    // Only monster guards charge the finisher.
+                    let monster = read::<u16>(p, 12826) != 0xffff;
+                    native!(0x2c4eec, p);
+                    return self.begin(p, if monster { 66 } else { 72 });
+                }
+                return false;
+            }
+            PRECISE_GUARD_OWNER.store(0, Ordering::Release);
+            if read::<u8>(p, 9493) & 4 != 0 {
+                return false;
+            }
+            if group == 1 && act == 6 && phase != 0 && native!(0x2a2444, p) != 0 {
+                let m = native!(0x53a058, p);
+                if matches!(m, 28 | 5012 | 5013) {
+                    // 811D91FE buffers from frame 30, releases at 44. The
+                    // forward roll stops accepting at 54, either side at 64.
+                    let frame = read::<f32>(p, 1280);
+                    if (30. ..if m == 28 { 54. } else { 64. }).contains(&frame)
+                        && self.roll_attack.is_none()
+                    {
+                        if input.weapon_command(1) {
+                            self.roll_attack = Some(53);
+                        } else if input.weapon_command(5) {
+                            self.roll_attack = Some(if m == 5013 { 27 } else { 26 });
+                        }
+                    }
+                    if frame >= 44.
+                        && let Some(state) = self.roll_attack.take()
+                    {
+                        return self.begin(p, state);
+                    }
+                    return false;
+                }
+            }
+            self.roll_attack = None;
+            // FZ 817E9CB4 / 817EAA30: recover forwards or backwards from a
+            // launch. Wait for GU's own landing test (2BB164), never replace
+            // a lethal hit, an airborne trajectory or a different reaction.
+            if group == 64
+                && matches!(act, 6 | 7)
+                && phase == 2
+                && input.command(3)
+                && read::<u8>(p, 11988) != 0
+                && native!(0x2a2444, p) != 0
+                && read::<i16>(p, 5078) > 0
+                && read::<f32>(p, 5088) >= 150.
+                && native!(0x53a058, p) == 1015
+            {
+                return self.begin(p, if act == 6 { 63 } else { 62 });
+            }
+            if phase != 0 && matches!(group, 1 | 2) {
+                let motion = native!(0x53a058, p);
+                if matches!(motion, 5001 | 5004) {
+                    if input.command(13) {
+                        native!(0x2ab670, p, 1, 2, 0); // shared sheathe, motion 5003
+                        return true;
+                    }
+                    if self.guard >= 3 && input.command(8) {
+                        return self.begin(p, 59);
+                    }
+                    if input.command(70) {
+                        native!(0x2ab670, p, u32::from(GUARD_GROUP), 0, 0);
+                        return true;
+                    }
+                    if input.weapon_command(1) {
+                        return self.begin(p, 48);
+                    }
+                    if input.weapon_command(12) {
+                        return self.begin(p, 19);
+                    }
+                    if input.weapon_command(2) {
+                        return self.begin(p, 0);
+                    }
+                    if dash_input && read::<f32>(p, 5088) > 0. {
+                        return self.begin(p, DASH);
+                    }
+                }
+            }
+            false
+        }
+    }
+}
+
+// The game can re-enter its action dispatcher while changing state. Only the
+// outer call borrows the controller; contact callbacks publish through atomics.
+struct Controller(AtomicBool, UnsafeCell<Option<Battle>>);
+unsafe impl Sync for Controller {}
+static CONTROL: Controller = Controller(AtomicBool::new(false), UnsafeCell::new(None));
+static PRECISE_GUARD_OWNER: AtomicU32 = AtomicU32::new(0);
+
+pub(super) fn radiance_origin(owner: u32, shapes: u32) -> Option<[f32; 3]> {
+    if CONTROL.0.swap(true, Ordering::Acquire) {
+        return None;
+    }
+    let origin = unsafe { &*CONTROL.1.get() }
+        .as_ref()
+        .filter(|battle| battle.owner == owner)
+        .and_then(|battle| battle.radiance_contact)
+        .filter(|&(_, resource)| resource == shapes)
+        .map(|(origin, _)| origin);
+    CONTROL.0.store(false, Ordering::Release);
+    origin
+}
+
+pub(super) unsafe extern "C" fn request(p: u32, slot: u32, _flags: u32) -> u32 {
+    unsafe {
+        // Called only after GU's native movement/interaction controller accepts
+        // a weapon request. In particular sprint and walk share this entry;
+        // no button/state whitelist is needed here.
+        if native!(0x2a2444, p) != 0 || !matches!(slot, 0 | 1 | 3 | 19 | 20) {
+            return PASS;
+        }
+        let commands = read::<u32>(p, 5156);
+        if commands & (1 << 1) != 0 {
+            47
+        } else if commands & (1 << 2) != 0 && commands & (1 << 12) == 0 {
+            38
+        } else if slot == 3 || commands & (1 << 5) == 0 {
+            13
+        } else {
+            20
+        }
+    }
+}
+pub(super) unsafe extern "C" fn dispatch(p: u32, input: *const Input) -> u32 {
+    if CONTROL.0.swap(true, Ordering::Acquire) {
+        return PASS;
+    }
+    let handled = unsafe {
+        let slot = &mut *CONTROL.1.get();
+        if let Some(input) = input.as_ref() {
+            let eq = read::<u32>(p, 5060);
+            if slot.as_ref().is_some_and(|b| b.owner != p || b.equip != eq) {
+                *slot = None;
+            }
+            slot.get_or_insert_with(|| Battle::fresh(p, eq))
+                .tick(p, input)
+        } else {
+            if let Some(mut battle) = slot.take()
+                && p != 0
+                && battle.owner == p
+                && action::custom(read(p, 9478), read(p, 9482))
+            {
+                battle.finish(p);
+            }
+            motion::forget_roll(p);
+            PRECISE_GUARD_OWNER.store(0, Ordering::Release);
+            false
+        }
+    };
+    CONTROL.0.store(false, Ordering::Release);
+    if handled { 0 } else { PASS }
+}
+
+#[forge::hook(offset = 0x115fcf4)]
+unsafe fn draw_route(p: u32, kind: u32) -> u32 {
+    unsafe {
+        // GU has already accepted the draw command here. X+A ordinarily maps
+        // to a shared draw/guard group, so intercepting group 16 afterwards
+        // misses it. Replace the weapon's route, preserving native movement,
+        // interaction checks and the mapped command buffer.
+        // Native routes 2/4 explicitly request draw-guard (group 32). Their
+        // R+X+A combination also sets X+A, so keep those routes intact.
+        if matches!(kind, 0 | 1 | 3)
+            && crate::battle::local(p)
+            && native!(0x2a2444, p) == 0
+            && read::<u32>(p, 5156) & (1 << 1) != 0
+        {
+            static UPPERCUT: [u16; 3] = [16, action::slot(47), 0];
+            return UPPERCUT.as_ptr() as u32;
+        }
+    }
+    original!(p, kind)
+}
+
+// Independent actions use GU's shared lifecycle without stock GS charge state.
+#[forge::hook(offset = 0x1160650)]
+unsafe fn change_action(p: u32, group: u32, slot: u32, flags: u32) -> u32 {
+    unsafe {
+        if crate::battle::local(p) {
+            let result = native!(0x2ab670, p, group, slot, flags);
+            if group == u32::from(GUARD_GROUP)
+                && GUARD_RECOIL_SLOTS.contains(&slot)
+                && PRECISE_GUARD_OWNER.load(Ordering::Acquire) == p
+                && read::<u16>(p, 9478) == GUARD_GROUP
+                && u32::from(read::<u16>(p, 9482)) == slot
+            {
+                // FZ 81744DA0 grants four simulation ticks immediately;
+                // state 66/72 then starts its seven-tick recovery protection.
+                // GU 29CEC4 decrements this clock in 60-Hz motion units.
+                write(p, 11072, 8f32.max(read(p, 11072)));
+            }
+            return result;
+        }
+    }
+    original!(p, group, slot, flags)
+}
+#[forge::hook(offset = 0x2f2ba0)]
+unsafe fn guard_test(p: u32, angle: u32) -> u32 {
+    let accepted = original!(p, angle);
+    unsafe {
+        if accepted == 0 || !local(p) || read::<u16>(p, 9478) != GUARD_GROUP {
+            return accepted;
+        }
+        let packed = read::<u16>(p, 1204);
+        if motion::decode(p, u32::from(packed)) != GUARD_MOTION {
+            return accepted;
+        }
+
+        // FZ state 65 event 10 closes at frame 28, 30 with Guard +1
+        // or 32 with Guard +2.
+        let frame = read::<f32>(p, 1280);
+        if frame >= 32. || (frame >= 28. && !extended_guard(p, frame)) {
+            return 0;
+        }
+        PRECISE_GUARD_OWNER.store(p, Ordering::Release);
+    }
+    accepted
+}
+unsafe fn extended_guard(p: u32, frame: f32) -> bool {
+    unsafe {
+        [168, 279, 297]
+            .iter()
+            .any(|&id| native!(0x2864c4, p, id) != 0)
+            || (frame < 30. && native!(0x2864c4, p, 169) != 0)
+    }
+}
+
+unsafe fn pending_precise_guard(p: u32) -> bool {
+    PRECISE_GUARD_OWNER.load(Ordering::Acquire) == p
+        && unsafe { local(p) && read::<u16>(p, 9478) == GUARD_GROUP }
+}
+
+#[forge::hook(offset = 0x2f4b20)]
+unsafe fn guard_reaction(p: u32, recoil: u32, impact: u32, damage: *mut i32) -> u32 {
+    // GU's light recoil omits chip damage, matching FZ 81744DA0.
+    // The caller still uses the hit for the sharpness check.
+    let recoil = if unsafe { pending_precise_guard(p) } {
+        0
+    } else {
+        recoil
+    };
+    original!(p, recoil, impact, damage)
+}
+
+#[forge::hook(offset = 0x2ad288)]
+unsafe fn sharpness(p: u32, amount: i32, fixed: u32) -> u32 {
+    unsafe {
+        // FZ 81744DA0 charges a precise GS guard only for effective power
+        // >=40 or a Guard-Up attack. GU marks the latter with bit 0x20.
+        // Keep the native cost/skills for those hits; do not refund afterwards.
+        if amount < 0
+            && fixed == 0
+            && pending_precise_guard(p)
+            && read::<u16>(p, 12820) & 0x20 == 0
+            && native!(0x2f4a2c, p) < 40
+        {
+            return 0;
+        }
+    }
+    original!(p, amount, fixed)
+}
+pub(super) fn install() {
+    let base = forge::mem::text_addr();
+    forge::install_hook!(base, guard_test);
+    forge::install_hook!(base, change_action);
+    forge::install_hook!(base, draw_route);
+    forge::install_hook!(base, guard_reaction);
+    forge::install_hook!(base, sharpness);
+}

@@ -296,13 +296,10 @@ pub fn encode_with_ids(
     Ok(out)
 }
 
-/// Native unskinned MOD for a dropped monster part (float XYZ, packed normal,
-/// colour and two half UV pairs, layout 5E7F2030).
+/// Unskinned prop, using the existing 28-byte prop vertex declaration.
 pub fn static_prop(o: &MeshGroup, names: &[String]) -> Result<Vec<u8>> {
-    let mut b = Bounds::default();
     let mut vb = Vec::new();
     for v in &o.vertices {
-        b.add(v.position);
         vb.floats(v.position.to_array());
         for x in v.normal.extend(0.).to_array() {
             vb.push((x.clamp(-1., 1.) * 127.).round() as i8 as u8);
@@ -311,6 +308,72 @@ pub fn static_prop(o: &MeshGroup, names: &[String]) -> Result<Vec<u8>> {
         for x in [v.uv.x, v.uv.y, v.uv.x, v.uv.y] {
             vb.u16(f16::from_f32(x).to_bits());
         }
+    }
+    static_model(o, names, vb, StaticDraw::PROP)
+}
+
+/// GU's model particles with vertex colour use IANonSkinBC, as in cm153_000.
+pub fn static_colored(
+    o: &MeshGroup,
+    names: &[String],
+    colors: Option<&[[f32; 4]]>,
+) -> Result<Vec<u8>> {
+    ensure!(
+        colors.is_none_or(|c| c.len() == o.vertices.len()),
+        "effect vertex color count mismatch"
+    );
+    let mut vb = Vec::with_capacity(24 * o.vertices.len());
+    for (i, v) in o.vertices.iter().enumerate() {
+        vb.floats(v.position.to_array());
+        let [x, y, z] = v
+            .normal
+            .to_array()
+            .map(|n| ((n.clamp(-1., 1.) + 1.) * 511.5).round() as u32);
+        vb.u32(x | y << 10 | z << 20 | 3 << 30);
+        vb.u16(f16::from_f32(v.uv.x).to_bits());
+        vb.u16(f16::from_f32(v.uv.y).to_bits());
+        let [r, g, b, a] = colors.map_or([1.; 4], |c| c[i]);
+        // Retail neutral white is 7f 7f 7f ff. VertexAlpha has its own
+        // UNORM8 input at byte 23, independent of the RGB gain.
+        vb.extend([r, g, b].map(|c| (127. * c.clamp(0., 1.)).round() as u8));
+        vb.push((255. * a.clamp(0., 1.)).round() as u8);
+    }
+    static_model(o, names, vb, StaticDraw::EFFECT)
+}
+
+struct StaticDraw {
+    vertex_layout: u32,
+    draw: u32,
+    mesh_flags: u16,
+    model_flags: u32,
+}
+
+impl StaticDraw {
+    const PROP: Self = Self {
+        vertex_layout: 0x5e7f2030,
+        draw: 0x441c0001,
+        mesh_flags: 0xefff,
+        model_flags: 0x80000001,
+    };
+    // cm153_000 uses these fields together with its EFL material. GU also
+    // reads the draw word's second byte when composing the mesh sort key.
+    const EFFECT: Self = Self {
+        vertex_layout: 0x207d603b,
+        draw: 0x04189a01,
+        mesh_flags: 0xe4c1,
+        model_flags: 1,
+    };
+}
+
+fn static_model(
+    o: &MeshGroup,
+    names: &[String],
+    vb: Vec<u8>,
+    format: StaticDraw,
+) -> Result<Vec<u8>> {
+    let mut b = Bounds::default();
+    for v in &o.vertices {
+        b.add(v.position);
     }
     let mut groups = vec![0; 16];
     groups.floats(b.sphere());
@@ -329,14 +392,14 @@ pub fn static_prop(o: &MeshGroup, names: &[String]) -> Result<Vec<u8>> {
         for i in verts.clone() {
             mb.add(o.vertices[usize::from(i)].position);
         }
-        meshes.u16(0xefff);
+        meshes.u16(format.mesh_flags);
         meshes.u16(o.vertices.len().try_into()?);
         for n in [
             0xff00_0000 | material << 12,
-            0x441c0001,
+            format.draw,
             0,
             0,
-            0x5e7f2030,
+            format.vertex_layout,
             (ib.len() / 2) as u32,
             strip.len() as u32,
             0,
@@ -377,7 +440,7 @@ pub fn static_prop(o: &MeshGroup, names: &[String]) -> Result<Vec<u8>> {
     }
     out.floats(b.sphere());
     b.write(&mut out);
-    for v in [1000, 3000, 0x80000001, 0, o.strips.len() as u32] {
+    for v in [1000, 3000, format.model_flags, 0, o.strips.len() as u32] {
         out.u32(v);
     }
     for data in [groups, materials, meshes, env, vb, ib] {

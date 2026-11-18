@@ -21,6 +21,14 @@ impl Curve {
                     frame,
                     parameters: [a, b],
                 } => (value as f32, frame as f32, a as f32, b as f32),
+                // Frontier player curves also store a per-key interpolation selector.
+                // Selector 2 uses the same two Hermite tangents as a 0x12 channel.
+                Keyframe::Mixed12 {
+                    unknown_00: 0x0002_0000,
+                    value,
+                    frame,
+                    parameters: [a, b],
+                } => (value as f32, frame as f32, a as f32, b as f32),
                 Keyframe::F32Quad {
                     value_bits,
                     frame_bits,

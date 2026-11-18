@@ -5,7 +5,7 @@ use core::{
 };
 use mhgu_sdk::monster::species::{
     SpeciesId,
-    registry::{self, ServiceV2},
+    registry::{self, ServiceV1},
     valid_key,
 };
 
@@ -82,7 +82,7 @@ extern "C" fn counts(raw: u32) -> u32 {
             u32::from(c.slain) | (u32::from(c.captured) << 16)
         })
 }
-static API: ServiceV2 = ServiceV2 {
+static API: ServiceV1 = ServiceV1 {
     register,
     contains,
     counts,

@@ -11,6 +11,14 @@ use mhgu_resource::{
 use std::collections::BTreeMap;
 
 fn extract(o: &Object<'_>, rig: &Rig) -> Result<MeshGroup> {
+    extract_mesh(o, Some(rig))
+}
+
+pub(super) fn static_mesh(o: &Object<'_>) -> Result<MeshGroup> {
+    extract_mesh(o, None)
+}
+
+fn extract_mesh(o: &Object<'_>, rig: Option<&Rig>) -> Result<MeshGroup> {
     o.validate_geometry()?;
     let positions = &o.positions().context("missing FMOD positions")?.values;
     let normals = &o.normals().context("missing FMOD normals")?.values;
@@ -32,6 +40,7 @@ fn extract(o: &Object<'_>, rig: &Rig) -> Result<MeshGroup> {
         }
     }
     let joint = |local: u32| -> Result<u8> {
+        let Some(rig) = rig else { return Ok(0) };
         let id = match palette {
             Some(table) => *table
                 .get(local as usize)
@@ -45,7 +54,7 @@ fn extract(o: &Object<'_>, rig: &Rig) -> Result<MeshGroup> {
         )?)
     };
     let mut vertices = Vec::with_capacity(positions.len());
-    let skin = o.weights();
+    let skin = rig.and_then(|_| o.weights());
     for (i, &p) in positions.iter().enumerate() {
         let mut influences = BTreeMap::<u8, f32>::new();
         if let Some(w) = skin {
@@ -61,7 +70,8 @@ fn extract(o: &Object<'_>, rig: &Rig) -> Result<MeshGroup> {
         }
         if influences.is_empty() {
             ensure!(
-                palette.is_some_and(|table| table.len() == 1) || rig.joints.len() == 1,
+                palette.is_some_and(|table| table.len() == 1)
+                    || rig.is_none_or(|r| r.joints.len() == 1),
                 "vertex {i} has no binding in a multi-bone mesh"
             );
             influences.insert(joint(0)?, 1.);

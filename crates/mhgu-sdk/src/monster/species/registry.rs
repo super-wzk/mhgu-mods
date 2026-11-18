@@ -1,79 +1,31 @@
 //! Optional registry service. GU's own lookup and records work without a provider.
 use super::{HuntCounts, Species, SpeciesId, valid_key};
 use crate::memory::{Field, entry, singleton};
-use core::{
-    ffi::{CStr, c_char},
-    marker::PhantomData,
-};
+use core::{ffi::CStr, marker::PhantomData};
 
 // A named MT type provides a process-wide rendezvous, including on MHGURecomp,
 // whose loader resolves NRO imports before other plugins may be initialized.
-const NAME: &CStr = c"mhgu::MonsterRegistryV2";
-const MAGIC: u32 = u32::from_le_bytes(*b"MRG2");
+const NAME: &CStr = c"mhgu::MonsterRegistryV1";
+const MAGIC: u32 = u32::from_le_bytes(*b"MRG1");
 
 /// Versioned plugin ABI. No Rust strings, references or allocator ownership cross NROs.
 #[doc(hidden)]
 #[repr(C)]
-pub struct ServiceV2 {
+pub struct ServiceV1 {
     pub register: unsafe extern "C" fn(u32, *const u8, usize, u32) -> u32,
     pub contains: extern "C" fn(u32) -> u32,
     pub counts: extern "C" fn(u32) -> u32,
 }
 
-#[repr(C)]
-struct Published {
-    dti: [u32; 8], // GU 7AEDCC initializes all eight fields in caller-owned storage.
-    magic: u32,
-    api: &'static ServiceV2,
-}
-
-fn descriptor() -> *const u32 {
-    unsafe {
-        let crc: unsafe extern "C" fn(*const c_char, i32) -> u32 =
-            core::mem::transmute(entry(0x7cbdb4));
-        let find: unsafe extern "C" fn(u32) -> *const u32 = core::mem::transmute(entry(0x7aef68));
-        find(crc(NAME.as_ptr(), -1) & 0x7fff_ffff)
-    }
-}
-
-/// Provider only. The published DTI is never unloaded.
-///
 /// # Safety
-/// Call on the serialized Forge init thread. The API and its NRO must stay
-/// loaded for the process lifetime.
+/// Publish once on the serialized Forge init thread with a process-lifetime API.
 #[doc(hidden)]
-pub unsafe fn publish(api: &'static ServiceV2) -> bool {
-    use alloc::boxed::Box;
-    if !descriptor().is_null() {
-        return false;
-    }
-    let storage = Box::leak(Box::new(Published {
-        dti: [0; 8],
-        magic: MAGIC,
-        api,
-    }));
-    let init: unsafe extern "C" fn(*mut u32, *const c_char, u32, u32, u32, u32, u32) -> *mut u32 =
-        unsafe { core::mem::transmute(entry(0x7aedcc)) };
-    unsafe { init(storage.dti.as_mut_ptr(), NAME.as_ptr(), 0, 0, 0, 0, 0) };
-    true
+pub unsafe fn publish(api: &'static ServiceV1) -> bool {
+    unsafe { crate::service::publish(NAME, MAGIC, api) }
 }
 
-fn provider() -> Option<&'static ServiceV2> {
-    let ptr = descriptor();
-    if ptr.is_null() {
-        return None;
-    }
-    unsafe {
-        // A CRC collision with a different native type is not our descriptor.
-        if CStr::from_ptr(ptr.add(1).read() as *const c_char) != NAME {
-            return None;
-        }
-        let p = ptr.cast::<Published>();
-        if (*p).magic != MAGIC {
-            return None;
-        }
-        Some((*p).api)
-    }
+fn provider() -> Option<&'static ServiceV1> {
+    crate::service::find(NAME, MAGIC)
 }
 
 /// Access on the initialized game thread. Do not send across threads.
@@ -82,18 +34,7 @@ impl MonsterRegistry {
     /// Obtain access only on GU's startup thread; returns None before MT initialization
     /// or from another thread. The handle cannot be sent to a worker thread.
     pub fn current() -> Option<Self> {
-        // GU 1.4: the main module's initializer 7AF404 constructs the process-lifetime
-        // default MT allocator at 18A6190. Its constructor 7AAF00 records the startup
-        // thread at +56, using this same nn::os::GetCurrentThread import.
-        const STARTUP_THREAD: u32 = 0x18a6190 + 56;
-        unsafe {
-            let owner = (entry(STARTUP_THREAD) as *const u32).read();
-            if owner == 0 {
-                return None;
-            }
-            let current: unsafe extern "C" fn() -> u32 = core::mem::transmute(entry(0x13effd4));
-            (current() == owner).then_some(Self(PhantomData))
-        }
+        crate::service::on_game_thread().then_some(Self(PhantomData))
     }
 
     pub fn resolve(&self, id: SpeciesId) -> Option<Species> {

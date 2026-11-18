@@ -44,17 +44,32 @@ fn member(file: &[u8], i: usize) -> Result<Vec<u8>> {
 impl Bank {
     pub fn read(path: &Path) -> Result<Self> {
         let file = fs::read(path.join("em080.snp"))?;
-        let h = member(&file, 0)?;
         let seq = member(&fs::read(path.join("em999.snd"))?, 2)?;
+        Self::parse(&file, &seq, 0..100, Some(80))
+    }
+    pub fn player(path: &Path, cues: impl IntoIterator<Item = u8>) -> Result<Self> {
+        let file = fs::read(path)?;
+        Self::player_bytes(&file, cues)
+    }
+    pub fn player_bytes(file: &[u8], cues: impl IntoIterator<Item = u8>) -> Result<Self> {
+        Self::parse(file, &member(file, 2)?, cues, None)
+    }
+    fn parse(
+        file: &[u8],
+        seq: &[u8],
+        cues: impl IntoIterator<Item = u8>,
+        fixed: Option<u8>,
+    ) -> Result<Self> {
+        let h = member(file, 0)?;
         ensure!(
             h.starts_with(b"Head") && seq.starts_with(b"dbsT"),
             "unexpected FZ sound bank"
         );
-        let mut ogg = OggStreamReader::new(Cursor::new(member(&file, 1)?))?;
+        let mut ogg = OggStreamReader::new(Cursor::new(member(file, 1)?))?;
         let rate = ogg.ident_hdr.audio_sample_rate;
         ensure!(
             ogg.ident_hdr.audio_channels == 1,
-            "expected mono Espinas audio"
+            "expected mono Frontier audio"
         );
         let mut pcm = vec![];
         while let Some(packet) = ogg.read_dec_packet_itl()? {
@@ -69,8 +84,6 @@ impl Bank {
                 && h.get(vagi..vagi + 4) == Some(b"Vagi"),
             "missing FZ instrument tables"
         );
-        let inst = prog + word(&h, prog + 16 + 4 * 80)?;
-        let instrument = h.get(inst..inst + 8).context("missing Espinas program")?;
         let mut waves = Vec::new();
         for i in 0..=word(&h, vagi + 8)? {
             let p = vagi + 16 + 20 * i;
@@ -87,10 +100,23 @@ impl Bank {
             );
         }
         let mut voices = BTreeMap::new();
-        for cue in 0u8..100 {
+        for cue in cues {
             let p = 16 + 32 * usize::from(cue);
             let r = seq.get(p..p + 32).context("missing FZ sound request")?;
-            ensure!(r[0] == 1 && r[6] == 0, "unsupported FZ request {cue}");
+            if fixed.is_none() && r[0] == 2 {
+                continue;
+            } // disabled weapon cue
+            ensure!(
+                r[0] == 1 && (fixed.is_none() || r[6] == 0),
+                "unsupported FZ request {cue}"
+            );
+            let program = usize::from(fixed.unwrap_or(r[6]));
+            ensure!(
+                program <= word(&h, prog + 8)?,
+                "invalid instrument {program}"
+            );
+            let inst = prog + word(&h, prog + 16 + 4 * program)?;
+            let instrument = h.get(inst..inst + 8).context("missing Frontier program")?;
             let note = r[7];
             for i in 0..usize::from(instrument[0]) {
                 let p = inst + 8 + 14 * i;

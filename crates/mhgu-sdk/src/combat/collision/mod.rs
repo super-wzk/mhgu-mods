@@ -70,18 +70,37 @@ impl<'a> Contact<'a> {
     /// # Safety
     /// Call in the native shape expansion pass for this contact.
     pub unsafe fn submit_world_sphere(self, center: [f32; 3], radius: f32) -> bool {
+        unsafe { self.submit_world_shape(1, center, [0.; 3], radius) }
+    }
+
+    /// Submit a capsule whose two endpoints are fixed in world space.
+    ///
+    /// # Safety
+    /// Call in the native shape expansion pass for this contact.
+    pub unsafe fn submit_world_capsule(self, ends: [[f32; 3]; 2], radius: f32) -> bool {
+        unsafe { self.submit_world_shape(2, ends[0], ends[1], radius) }
+    }
+
+    unsafe fn submit_world_shape(
+        self,
+        kind: u32,
+        start: [f32; 3],
+        end: [f32; 3],
+        radius: f32,
+    ) -> bool {
         unsafe {
             let Some(manager) = singleton(0x1857830) else {
                 return false;
             };
             let mut shape = [0f32; 9];
-            shape[..3].copy_from_slice(&center);
+            shape[..3].copy_from_slice(&start);
+            shape[4..7].copy_from_slice(&end);
             shape[8] = radius;
             self.0
                 .set(Field::at(28), manager.get(Field::<u32>::at(10288)));
             let submit: unsafe extern "C" fn(u32, u32, *const f32) -> u32 =
                 core::mem::transmute(entry(0x1706a8));
-            submit(manager.addr(), 1, shape.as_ptr());
+            submit(manager.addr(), kind, shape.as_ptr());
             true
         }
     }

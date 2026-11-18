@@ -20,6 +20,8 @@ QUEST, PLAYER, MANAGER = 0x7010000, 0x7020000, 0x7030000
 
 
 class Game:
+    # Tests may add GU entries whose first ARM instruction is PC-independent.
+    inline_hooks = {0x50B64, 0x152960, 0x4A858, 0x3D7E90, 0x3A75C8, 0x3A3178, 0x56EF50}
     def __init__(self, elf):
         self.cpu = c = Uc(UC_ARCH_ARM, UC_MODE_ARM)
         c.ctl_set_cpu_model(arm.UC_CPU_ARM_MAX)
@@ -113,7 +115,7 @@ class Game:
 
     def hook(self, ret, addr, detour, saved):
         self.hooks[addr] = detour
-        if addr in (0x50B64, 0x152960, 0x4A858, 0x3D7E90, 0x3A75C8, 0x3A3178, 0x56EF50):
+        if addr in self.inline_hooks:
             # Each starts with a PC-independent instruction in GU 1.4.
             trampoline = self.alloc(12)
             self.cpu.mem_write(
@@ -279,9 +281,9 @@ class Game:
 
 def service(g):
     p = g.alloc(64)
-    g.cpu.mem_write(p, b"mhgu::MonsterRegistryV2\0")
+    g.cpu.mem_write(p, b"mhgu::MonsterRegistryV1\0")
     dt = g.run(0x7AEF68, g.run(0x7CBDB4, p, 0xFFFFFFFF) & 0x7FFFFFFF)
-    assert dt and g.get(dt + 32) == int.from_bytes(b"MRG2", "little")
+    assert dt and g.get(dt + 32) == int.from_bytes(b"MRG1", "little")
     api = g.get(dt + 36)
     return [g.get(api + 4 * i) for i in range(3)]
 

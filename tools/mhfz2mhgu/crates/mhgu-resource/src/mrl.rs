@@ -14,6 +14,41 @@ pub struct Material {
     pub albedo: usize,
     pub cutout: bool,
 }
+/// Retarget a stock GU model-particle material to a Frontier atlas.
+pub fn effect(template: &[u8], name: &str, atlas: &str, wrap: bool) -> Result<Vec<u8>> {
+    ensure!(
+        template.starts_with(b"MRL\0\x22\0\0\0")
+            && word(template, 8)? == 1
+            && word(template, 12)? == 1,
+        "expected single-atlas effect material"
+    );
+    let texture = word(template, 20)? as usize;
+    let material = word(template, 24)? as usize;
+    ensure!(
+        word(template, texture)? == TEXTURE && atlas.len() < 64,
+        "invalid effect texture"
+    );
+    let mut out = template.to_vec();
+    let path = out
+        .get_mut(texture + 12..texture + 76)
+        .context("short effect material path")?;
+    path.fill(0);
+    path[..atlas.len()].copy_from_slice(atlas.as_bytes());
+    out.get_mut(material + 4..material + 8)
+        .context("short material hash")?
+        .copy_from_slice(&(!crc32fast::hash(name.as_bytes())).to_le_bytes());
+    let block = word(template, material + 52)? as usize;
+    for i in 0..(word(template, material + 24)? & 0xfff) as usize {
+        let p = block + 12 * i;
+        // Preserve the precompiled cm153_000 shader permutation. It reads
+        // CBPrimEflEmu when paired with the stock IANonSkinBC vertex format.
+        if word(template, p)? & 15 == 2 && word(template, p + 8)? == 0xcaa79222 {
+            // AppShaderPackage's SSWrapLinear and SSClampLinear descriptors.
+            out.patch(p + 4, if wrap { 0x7100317eu32 } else { 0x11dae184 });
+        }
+    }
+    Ok(out)
+}
 struct Template<'a> {
     row: &'a [u8],
     block: &'a [u8],
