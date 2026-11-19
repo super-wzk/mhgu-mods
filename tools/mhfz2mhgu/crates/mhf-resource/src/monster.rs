@@ -40,6 +40,7 @@ pub struct Fireball<'a> {
 pub struct MotionBinding {
     pub clip: usize,
     pub blend_steps: usize,
+    pub next_blend: u8,
 }
 
 impl<'a> Tables<'a> {
@@ -175,6 +176,7 @@ impl<'a> Tables<'a> {
         Ok(MotionBinding {
             clip: usize::from(row[0]),
             blend_steps: if n == 0 { 0 } else { n as usize + 1 },
+            next_blend: ((row[7] as i8) / 2).max(0) as u8,
         })
     }
 }

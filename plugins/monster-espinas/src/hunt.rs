@@ -29,6 +29,7 @@ struct Hunter {
     missing: Option<Request>,
     previous_frame: f32,
     fractional_ticks: f32,
+    followup: Option<Request>,
     selection_roll: u16,
     is_attack: bool,
     roar_after_landing: bool,
@@ -214,9 +215,15 @@ impl Dispatch {
                 attack,
                 is_attack,
             } => {
-                if !update.play_motion(motion, f32::from(blend)) {
+                let blend_frames = if blend == 0 {
+                    0.
+                } else {
+                    2. * (f32::from(blend) + 1.)
+                };
+                if !update.play_motion(motion, blend_frames) {
                     return false;
                 }
+                super::motion::begin(update.monster());
                 update
                     .monster()
                     .set_base_motion_rate(motion_rate(state, directory, is_attack));
@@ -250,6 +257,7 @@ impl Hunter {
             missing: None,
             previous_frame: 0.,
             fractional_ticks: 0.,
+            followup: None,
             selection_roll: 0,
             is_attack: false,
             roar_after_landing: false,
@@ -337,7 +345,9 @@ impl Hunter {
                 let remaining = state.yaw().delta_to(goal).unsigned_abs();
                 let frame = update.monster().motion_frame();
                 if motion_running {
-                    if (0.0..turn.window).contains(&frame) {
+                    if super::motion::advance(update.monster()) > 0.
+                        && (0.0..turn.window).contains(&frame)
+                    {
                         state.turn_toward(goal, (f32::from(per_tick) * dt * 0.5) as u16);
                     }
                     return None;
@@ -448,6 +458,7 @@ impl Hunter {
     }
 
     fn cancel_route(&mut self) {
+        self.followup = None;
         self.pending.clear();
         self.turn = None;
         self.waypoint = None;
@@ -535,6 +546,9 @@ impl Hunter {
                 {
                     return self.play_request(update, state, hp, d, r);
                 }
+                if finished && let Some(next) = self.followup.take() {
+                    return self.play_request(update, state, hp, d, next);
+                }
                 let phase = if let Some(a) = &mut self.air {
                     match unsafe { a.tick(d, update, state, frame, ended, dt) } {
                         air::Next::Wait => return None,
@@ -547,7 +561,16 @@ impl Hunter {
                     }
                 } else if let Some(g) = &mut self.ground {
                     match unsafe {
-                        g.update(d, state, frame, ended, dt, ticks, monster.motion_rate())
+                        g.update(
+                            d,
+                            state,
+                            frame,
+                            ended,
+                            dt,
+                            ticks,
+                            monster.motion_rate(),
+                            monster.motion_blend_remaining() > 0.,
+                        )
                     } {
                         ground::Next::Wait => return None,
                         ground::Next::Rearm(id) => return Some(Dispatch::Rearm(id)),
@@ -661,7 +684,12 @@ impl Hunter {
         if let Some(a) = &mut self.air {
             a.bind(e, request);
         }
-        let (motion, blend) = unsafe { Directory::playback(e) };
+        let (motion, _) = unsafe { Directory::playback(e) };
+        let blend = unsafe { d.blend(e, monster.motion()) };
+        self.followup = unsafe {
+            let group = byte(e, 30);
+            (group != 0).then(|| Request(group, byte(e, 31)))
+        };
         forge::log::prelude::info!(
             "Espinas: phase={:?} request={}:{} hp={} pos={:?} yaw={}",
             self.spawn.phase,
@@ -677,7 +705,7 @@ impl Hunter {
             blend,
             is_attack: matches!(
                 request,
-                Request(3 | 250, _) | Request(252, 57 | 108 | 115 | 116 | 118)
+                Request(3 | 248 | 250, _) | Request(252, 57 | 108 | 115 | 116 | 118)
             ),
             attack: (n != 0).then(|| row_id(u32::from(unsafe { u16at(e, 4) }))),
         })

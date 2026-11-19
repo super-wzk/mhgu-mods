@@ -115,11 +115,26 @@ impl<'a> Directory<'a> {
     pub(super) unsafe fn playback(entry: u32) -> (MotionId, u8) {
         unsafe { (Self::motion(entry), byte(entry, 7)) }
     }
+    pub(super) unsafe fn blend(&self, entry: u32, previous: MotionId) -> u8 {
+        unsafe {
+            let blend = byte(entry, 7);
+            if blend != 0 {
+                blend
+            } else {
+                self.entries()
+                    .find(|&e| Self::motion(e) == previous)
+                    .map_or(0, |e| byte(e, 29))
+            }
+        }
+    }
     pub(super) unsafe fn lookup(&self, req: Request) -> Option<u32> {
         unsafe {
             self.entries()
                 .find(|&e| byte(e, 0) == req.0 && byte(e, 1) == req.1)
         }
+    }
+    pub(super) unsafe fn contains_motion(&self, motion: MotionId) -> bool {
+        unsafe { self.entries().any(|entry| Self::motion(entry) == motion) }
     }
     unsafe fn batch(&self, motion: MotionId, id: u32) -> Option<Batch> {
         unsafe {

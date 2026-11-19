@@ -113,9 +113,21 @@ unsafe fn arm(actor: u32, slot: u32, id: i32, flags: u32) -> i32 {
                 center: None,
             });
             // A loop may rearm after frame zero; align extra windows to the native primary clock.
-            let shift = anchor.delay() + anchor.duration()
-                - f32::from(first_row.start())
-                - f32::from(first_row.duration());
+            let shift = if crate::package::Directory::read(monster).is_some() {
+                // GU adds the remaining blend to its native delay. Our clock
+                // already holds during that blend; measure only source frames.
+                let shift = -monster.motion_frame();
+                let start = f32::from(first_row.start()) + shift;
+                anchor.set_window(
+                    start.max(0.),
+                    (f32::from(first_row.duration()) + start.min(0.)).max(0.),
+                );
+                shift
+            } else {
+                anchor.delay() + anchor.duration()
+                    - f32::from(first_row.start())
+                    - f32::from(first_row.duration())
+            };
             for hit in boxes.contacts.iter().skip(boxes.active) {
                 hit.disable();
             }
@@ -142,6 +154,12 @@ unsafe fn arm(actor: u32, slot: u32, id: i32, flags: u32) -> i32 {
 
 #[forge::hook(offset = 0x1696e4)]
 unsafe fn submit(hit: u32) -> u32 {
+    if let Some(contact) = unsafe { Contact::from_raw(hit) }
+        && let Some(monster) = clock_owner(contact)
+        && crate::motion::advance(monster) == 0.
+    {
+        return 0;
+    }
     let r = original!(hit);
     // Object identity, rather than just its actor pointer, prevents double submission
     // when the native secondary slot or a projectile from the same owner is visited.
@@ -206,7 +224,16 @@ unsafe fn submit(hit: u32) -> u32 {
 // unit. FZ replay windows end at the authored boundary (also at a phase cut).
 #[forge::hook(offset = 0x16919c)]
 unsafe fn advance(hit: u32) -> u32 {
-    let result = original!(hit);
+    let owner = unsafe { Contact::from_raw(hit) }.and_then(clock_owner);
+    let result = if let Some(monster) = owner {
+        let fraction = crate::motion::advance(monster);
+        if fraction == 0. {
+            return 0;
+        }
+        monster.with_motion_clock_rate(monster.motion_rate() * fraction, || original!(hit))
+    } else {
+        original!(hit)
+    };
     let Some(contact) = (unsafe { Contact::from_raw(hit) }) else {
         return result;
     };
@@ -237,6 +264,24 @@ unsafe fn advance(hit: u32) -> u32 {
         });
     }
     result
+}
+
+fn clock_owner(contact: Contact<'_>) -> Option<Monster<'_>> {
+    CONTACTS.with(|actors| {
+        let hits = actors.get(&contact.owner_address())?;
+        // Only the contacts installed for a known monster participate. Its
+        // projectiles, native secondary slot and interrupted clips keep GU time.
+        let monster = unsafe { Monster::from_raw(contact.owner_address()) }?;
+        if hits.motion != Some(monster.motion()) {
+            return None;
+        }
+        let primary = monster.state()?.primary_contact().as_raw();
+        (contact.as_raw() == primary
+            || hits
+                .active_contacts()
+                .any(|extra| extra.as_raw() == contact.as_raw()))
+        .then_some(monster)
+    })
 }
 
 // 1696FC expands HTS into manager world volumes. Joint 127 in FZ effect 54

@@ -57,7 +57,7 @@ fn replacement_program(monster: Monster) -> Option<u32> {
         let program = if state.action_stage() == 0 {
             let (part, count) = state.flinch_part_and_count();
             let program = programs.entry(actor).or_default();
-            replace_flinch(program, &directory, part, count)?;
+            replace_flinch(program, &directory, part, count, monster.motion())?;
             program
         } else {
             programs.get(&actor)?
@@ -71,14 +71,21 @@ fn replace_flinch(
     directory: &Directory,
     part: u8,
     count: u8,
+    mut previous: mhgu_sdk::monster::motion::MotionId,
 ) -> Option<()> {
     use DamageMotionEnd::{MotionFinished, TimerExpired};
-    let play = |clip, until| {
+    let mut play = |clip, until| {
         let entry = unsafe { directory.lookup(Request(249, clip)) }?;
-        let (motion, blend) = unsafe { Directory::playback(entry) };
+        let (motion, _) = unsafe { Directory::playback(entry) };
+        let blend = unsafe { directory.blend(entry, previous) };
+        previous = motion;
         Some(DamageStep::Play {
             motion,
-            blend: f32::from(blend),
+            blend: if blend == 0 {
+                0.
+            } else {
+                2. * (f32::from(blend) + 1.)
+            },
             until,
         })
     };

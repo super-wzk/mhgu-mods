@@ -204,11 +204,11 @@ def verify(mod):
 
     def hook(retbuf, target, detour, original):
         hooks[target] = detour
-        if combined and target in (0x7DC2C, 0xBCC04, 0xBCE6C):
+        if combined and target in (0x7DC2C, 0xBCC04, 0xBCE6C, 0x951A80):
             # Forge interposes calls from the NRO into the game as well. The
             # saved original executes the PC-independent first instruction then
             # rejoins GU immediately after it.
-            trampoline = stop + 0x800 + 16 * (0x7DC2C, 0xBCC04, 0xBCE6C).index(target)
+            trampoline = stop + 0x800 + 16 * (0x7DC2C, 0xBCC04, 0xBCE6C, 0x951A80).index(target)
             cpu.mem_write(
                 trampoline,
                 bytes(cpu.mem_read(target, 4)) + s.pack("<II", 0xE51FF004, target + 4),
@@ -241,7 +241,9 @@ def verify(mod):
                 p = stop + 4 * (1 + i)
                 put(base + where, p)
                 stub(p, services.get(names[i], lambda *_: 0))
-    actor = base + 0x20000
+    # Keep the actor outside the NRO image as its code/data grow.
+    actor = base + 0x200000
+    cpu.mem_map(actor, 0x10000)
     status = base + 0x40000
     manager = base + 0x60000
     hts = base + 0x70000
@@ -249,14 +251,14 @@ def verify(mod):
     anchor = status + 2456
     if independent:
         # The separate quest test runs the actual provider. Here a minimal
-        # published V2 service makes the combat replay independent of save/quest I/O.
+        # published V1 service makes the combat replay independent of save/quest I/O.
         owner = base + 0xe0800
         put(0x18a6190 + 56, owner)
         stub(0x13effd4, lambda *_: owner)
         descriptor, api, name, register = (owner + n for n in (64, 128, 160, 200))
-        cpu.mem_write(name, b"mhgu::MonsterRegistryV2\0")
+        cpu.mem_write(name, b"mhgu::MonsterRegistryV1\0")
         put(descriptor + 4, name)
-        put(descriptor + 32, int.from_bytes(b"MRG2", "little"))
+        put(descriptor + 32, int.from_bytes(b"MRG1", "little"))
         put(descriptor + 36, api)
         put(api, register)
         stub(0x7aef68, lambda *_: descriptor)
@@ -269,7 +271,7 @@ def verify(mod):
     required = {0x7DC2C, 0x1696E4, 0x16919C, 0x6ED40}
     assert hooks.keys() in (
         required,
-        required | {0xCF5F64, 0x1696FC, 0xBA874, 0xBCC04, 0xBCE6C, 0xA134C} | ({0x4A858, 0x152960, 0x39BB30, 0x3D7E90, 0x560CA4, 0x3A3178, 0x192340, 0x56EF50, 0x55BDA4, 0xB84114} if independent else set()),
+        required | {0xCF5F64, 0x1696FC, 0xBA874, 0xBCC04, 0xBCE6C, 0xA134C, 0x951A80} | ({0x4A858, 0x152960, 0x39BB30, 0x3D7E90, 0x560CA4, 0x3A3178, 0x192340, 0x56EF50, 0x55BDA4, 0xB84114} if independent else set()),
     )
     if combined:
         assert 0xCF5F64 in hooks
@@ -325,6 +327,7 @@ def verify(mod):
     if combined:
         # Test one actor through the actual compiled handler, not a fresh actor
         # per choice. Only GU animation playback, scene and random inputs are fixtures.
+        put(actor + 1188, 1)
         cpu.mem_write(actor + 28, s.pack("<f", 1.0))
         put(status + 880, 5000)
         put(status + 884, 5000)
@@ -363,6 +366,10 @@ def verify(mod):
             s.unpack_from("<H", rows, e + 2)[0]: rows[e + 7]
             for e in range(entries, entries + 32 * count, 32)
         }
+        blend_hints = {
+            s.unpack_from("<H", rows, e + 2)[0]: rows[e + 29]
+            for e in range(entries, entries + 32 * count, 32)
+        }
         bank = resource(r"enemy\em001\em001_00\mot\em001_00_1", 0x76820D81)
         # Install a relocated GU LMT slot table; the SDK probes it using native B49E54.
         lmt_resource, lmt_header = base + 0xD8000, base + 0xD8100
@@ -373,13 +380,17 @@ def verify(mod):
             if s.unpack_from("<I", bank, 8 + 4 * i)[0]:
                 put(lmt_header + 8 + 4 * i, base + 0xD8800)
         put(actor + 3844 + 4, lmt_resource)
+        # Retain both the full motion timeline and the battle-action sequence.
+        timeline = []
         played = []
 
         def play(p, m, *_):
             assert p == actor and m >> 8 == 1
             # Verify GU's VFP call boundary independently of the Rust soft-float target.
+            half_blend = blends[m] or blend_hints.get(get(actor + 1204) & 65535, 0)
+            blend = 2 * (half_blend + 1) if half_blend else 0
             assert cpu.reg_read(arm.UC_ARM_REG_S0) == int.from_bytes(
-                s.pack("<f", blends[m]), "little"
+                s.pack("<f", blend), "little"
             )
             assert cpu.reg_read(arm.UC_ARM_REG_S1) == 0
             pos = s.unpack_from("<I", bank, 8 + 4 * (m & 255))[0]
@@ -388,11 +399,16 @@ def verify(mod):
                 assert s.unpack_from("<I", bank, pos + 12)[0] == 24
             if motions[m] == (255, 34):
                 assert s.unpack_from("<I", bank, pos + 12)[0] == 0
-            cpu.mem_write(actor + 1204, s.pack("<H", m) + b"\0")
+            cpu.mem_write(actor + 1204, s.pack("<HH", m, 0x100 if blend else 0))
+            for off in (1264, 1268):
+                cpu.mem_write(actor + off, s.pack("<f", blend))
+            cpu.mem_write(actor + 1296, s.pack("<f", float(bool(blend))))
             length, loop = s.unpack_from("<II", bank, pos + 8)
             cpu.mem_write(actor + 1276, s.pack("<4f", 0, 0, length - 1, 0 if loop == 0xffffffff else loop))
             put(actor + 1212, 4 if loop == 0xffffffff else 0)
-            played.append(motions[m])
+            timeline.append(motions[m])
+            if motions[m][0] != 248:
+                played.append(motions[m])
 
         stub(0xAFF40, play)
 
@@ -499,10 +515,31 @@ def verify(mod):
         assert delegated == [(actor, 3)] * 4 and not played
         delegated.clear()
 
-        def tick(done=False):
+        def update(done=False):
             cpu.mem_write(actor + 1206, bytes([4 if done else 0]))
             cpu.reg_write(arm.UC_ARM_REG_S1, 0x42F60000)
             assert run(dispatcher if independent else hooks[0xCF5F64], actor, 0) == 0 and not delegated
+
+
+        def finish_blend():
+            # Motion-specific tests work in authored frames, after the native
+            # blend. Dedicated checks below measure the transition itself.
+            for _ in range(160):
+                if s.unpack("<f", cpu.mem_read(actor + 1268, 4))[0] <= 0.:
+                    return
+                run(0x951A80, actor)
+                update()
+            raise AssertionError(("blend never completed", get(actor+1188), s.unpack("<f", cpu.mem_read(actor+28,4)), s.unpack("<f", cpu.mem_read(actor+1268,4)), timeline[-3:]))
+
+        def tick(done=False, *, blend=True):
+            update(done)
+            # These tests fast-forward a complete action, including its baked
+            # replacement's explicit native follow-up motion.
+            if done and timeline[-1][0] == 248:
+                finish_blend()
+                update(True)
+            if blend:
+                finish_blend()
 
         # A monster selects the bank; the LMT independently decides whether the clip exists.
         spawn_motion = next(m for m, request in motions.items() if request == (255, 39))
@@ -661,7 +698,7 @@ def verify(mod):
                 run(dispatcher, actor, 0)
                 if len(played) != before:
                     break
-            assert played[before:] == [(3, 1)] and abs(16384 - get(status + 84)) < 744
+            assert played[before:] == [(3, 1)] and abs(16384 - get(status + 84)) < 744, (played[before:], get(status+84), timeline[-5:])
             assert tuple(s.unpack("<3f", cpu.mem_read(status + 464, 12))) == goal
             assert any("Espinas think:" in msg and "hunter=Some(0)" in msg for msg in messages)
             def bind_root_track():
@@ -753,6 +790,7 @@ def verify(mod):
         assert played[-1] == (3, 2)
 
         def run_charge(expected, frames):
+            finish_blend()
             assert len(submit()) == 2
             for i, frame in enumerate(frames):
                 cpu.mem_write(actor + 1280, s.pack("<f", frame))
@@ -767,14 +805,15 @@ def verify(mod):
             raise AssertionError((expected, played))
 
         def charge_frames():
-            yield from range(1, 75)
+            start = int(s.unpack("<f", cpu.mem_read(actor + 1280, 4))[0]) + 1
+            yield from range(start, 75)
             while True:
                 yield from range(24, 75)
 
         import itertools
 
         near = run_charge((252, 118), itertools.islice(charge_frames(), 150))
-        assert 26 < near < 75 and len(submit()) == 3
+        assert 26 < near < 75 and len(submit()) == 3, (near, len(submit()), timeline[-4:])
         cpu.mem_write(pl + 64, s.pack("<f", 451.0))
         put(pl + 72, 0)
         tick(True)
@@ -815,7 +854,7 @@ def verify(mod):
         cpu.mem_write(pl + 72, s.pack("<f", 450.0))
         rng[0] = 7
         tick(True)
-        assert played[-1] == (3, 4) and len(submit()) == 12
+        assert played[-1] == (3, 4) and len(submit()) == 7
         cpu.mem_write(pl + 72, s.pack("<f", 1000.0))
         rng[0] = 24
         tick(True)
@@ -853,7 +892,7 @@ def verify(mod):
             cpu.mem_write(actor + 1280, s.pack("<f", t))
             tick(end)
 
-        def choose(distance, roll, rage, expected, posture=0, dispatch_roll=None):
+        def choose(distance, roll, rage, expected, posture=0, dispatch_roll=None, *, blend=True):
             cpu.mem_write(status + 64, bytes(12))
             cpu.mem_write(pl + 64, s.pack("<3f", 0, 0, distance))
             put(status + 84, 0)
@@ -862,7 +901,7 @@ def verify(mod):
             # GU +704 is alert/target state: a ground monster can see a hunter.
             cpu.mem_write(status + 704, bytes([1]))
             rng[:] = [roll] if dispatch_roll is None else [roll, dispatch_roll]
-            tick(True)
+            tick(True, blend=blend)
             assert played[-1] == expected, (distance, roll, expected, played[-3:])
 
         for roll, move in [(27, (3, 8)), (28, (3, 10))]:
@@ -897,9 +936,11 @@ def verify(mod):
                     frame(105, True)
                     assert played[-2:] == [move, move] and len(rolls) == draw_count
         choose(1001, 31, False, (3, 0))
-        choose(100, 0, False, (1, 0))
-        frame(1)
+        choose(100, 0, False, (1, 0), blend=False)
+        cpu.mem_write(actor + 1280, s.pack("<f", 1.))
+        update()
         assert played[-1] == (252, 1)
+        finish_blend()
         frame(2)
         assert played[-1] == (3, 11)
         area = base + 0xC8000
@@ -929,7 +970,7 @@ def verify(mod):
         before = len(played)
         tick(True)
         assert len(played) == before, ("unmapped species patrol moved", played[before:])
-        assert messages[-1] == "Espinas patrol: area=4 skipped"
+        assert "Espinas patrol: area=4 skipped" in messages[-4:]
         rng[0] = 5  # next roll chooses a hunter-directed walk
         tick()
         assert played[before:] == [(1, 0)], played[before:]
@@ -963,10 +1004,10 @@ def verify(mod):
         rng[0] = 8
         before = len(played)
         frame(2)
-        assert len(played) == before and messages[-1] == "Espinas patrol: area=4 skipped"
+        assert len(played) == before and "Espinas patrol: area=4 skipped" in messages[-4:]
         rng[0] = 9  # same patrol choice, far point (slot 1)
         tick()
-        assert played[-1] == (1, 1) and "point=(0, 550)" in messages[-2]
+        assert played[-1] == (1, 1) and any("point=(0, 550)" in m for m in messages[-5:])
         tick(True)
         assert played[-1] == (1, 0)
 
@@ -976,7 +1017,7 @@ def verify(mod):
 
         def until(move, limit=1800):
             n, loop = clip()
-            f = 0
+            f = int(s.unpack("<f", cpu.mem_read(actor + 1280, 4))[0]) + 1
             for i in range(limit):
                 frame(f, f + 1 >= n and loop == 0xFFFFFFFF)
                 if played[-1] == move:
@@ -1235,7 +1276,7 @@ def verify(mod):
             until((252, 11))
             until((252, 19))
         for posture in (3, 1):
-            choose(451, 0, False, (2, 1), posture=posture)
+            choose(451, 0, False, (2, 1), posture=posture, blend=False)
             if independent:
                 # Posture 3 has real Y at floor and a scaled display offset.
                 # Higher free flight starts at physical Y. Apply GU's retail floor
@@ -1391,11 +1432,11 @@ def verify(mod):
         cpu.mem_write(status + 68, s.pack("<f", 400.))
         run(detour, actor, 1)
         started, draws = len(played), len(rolls)
-        tick()
+        tick(blend=False)
         assert played[started:] == [(2, 7)]
         rate_is(1.3)  # airborne group 2 retains the normal rage rate at low HP
         for _ in range(2):
-            tick()
+            tick(blend=False)
         assert played[-1] == (2, 1)
         until((252, 11))
         until((252, 19))
@@ -1435,6 +1476,96 @@ def verify(mod):
         run(hooks[0xBA874], actor, 0)
         hitzones(calm, [15, 20, 40])
         assert cpu.mem_read(status + 1304, 1) == b"\0" and get(status + 1300) == 0
+        # Compare real GU clock output against the native FZ blend regression.
+        # Fireball 47 blends for six FZ ticks. Its incoming frame is held for
+        # the first five, then the final tick advances by 2*1.3 = 2.6.
+        put(status + 880, 2000)
+        for delta in (0.5, 1., 2., 3.):
+            choose(1001, 14, True, (253, 2))
+            tick(True, blend=False)
+            assert played[-1] == (3, 5)
+            assert s.unpack("<f", cpu.mem_read(actor + 1268, 4))[0] == 12.
+            put(actor + 28, bits(delta))
+            before = len(emitted)
+            elapsed = 0.
+            for _ in range(int(12 / delta)):
+                run(0x951A80, actor)
+                run(dispatcher, actor, 0)
+                elapsed += delta
+                current = s.unpack("<f", cpu.mem_read(actor + 1276, 4))[0]
+                assert abs(current - max(0., elapsed - 10.) * 1.3) < 0.0001, (delta, elapsed, current)
+                assert len(emitted) == before
+                rate_is(1.3)
+            assert abs(current - 2.6) < .0001
+            for _ in range(200):
+                run(0x951A80, actor)
+                run(dispatcher, actor, 0)
+                if len(emitted) > before:
+                    source_frame = s.unpack("<f", cpu.mem_read(actor + 1280, 4))[0]
+                    assert 80 <= source_frame < 80 + 1.3 * delta + .001
+                    break
+            assert len(emitted) == before + 1
+            for _ in range(2):
+                run(0x951A80, actor)
+                run(dispatcher, actor, 0)
+            assert len(emitted) == before + 1
+            put(actor + 28, bits(1.))
+
+            choose(451, 0, True, (3, 2), blend=False)
+            # Contacts exist in native storage but must not be submitted while
+            # the incoming motion is held. All their clocks advance together.
+            contacts = [anchor]
+            # submit is empty until the clock releases; locate the active extras
+            # from the already-installed list after the first active update.
+            put(actor + 28, bits(delta))
+            put(manager + 0x8000 + 104, bits(delta))
+            elapsed = 0.
+            for _ in range(int(12 / delta)):
+                run(0x951A80, actor)
+                run(dispatcher, actor, 0)
+                elapsed += delta
+                visible = submit()
+                if elapsed <= 4.:
+                    assert not visible
+                else:
+                    assert len(visible) == 2
+                    contacts = visible
+                for hit in contacts:
+                    run(hooks[0x16919C], hit)
+                expected = 26. - max(0., elapsed - 4.) * 1.3
+                assert abs(s.unpack("<f", cpu.mem_read(anchor + 92, 4))[0] - expected) < .001
+                rate_is(1.3)
+            put(actor + 28, bits(1.))
+            put(manager + 0x8000 + 104, bits(1.))
+            until((252, 118))
+        print("GU/FZ blend: fireball frame 2.6 at twelve GU frames; 0.5/1/2/3 updates, single shot and synchronized melee clocks passed.")
+
+        # Both parts are complete actions in the source. Their native incoming
+        # blends must execute, while the battle script must not think between them.
+        for roll, request, followup, count in [(7, (3, 4), (248, 4), 5), (28, (3, 10), (248, 10), 1)]:
+            choose(450 if request == (3, 4) else 5001, roll, request == (3, 4), request)
+            start, draws = len(timeline), len(rolls)
+            update(True)
+            assert timeline[start:] == [followup] and len(rolls) == draws
+            finish_blend()
+            assert timeline[start:] == [followup] and len(submit()) == count
+        print("Native follow-ups 125 -> 111 and 103 -> 104 keep their blends without an idle or RNG draw.")
+
+        # The shared engine clock also accepts small non-monster actors. An
+        # unmatched vtable must delegate before reading monster-only offsets.
+        foreign = base + 0x300000
+        cpu.mem_map(foreign, 0x2000)
+        put(foreign, hunter_vt)
+        put(foreign + 1188, 1)
+        cpu.mem_write(foreign + 1204, s.pack("<HH", 1, 0x100))
+        put(foreign + 1212, 4)
+        for off, value in [(28, 1.), (1264, 12.), (1268, 12.), (1292, 1.), (1296, 1.), (1284, 100.)]:
+            put(foreign + off, bits(value))
+        run(0x951A80, foreign)
+        assert s.unpack("<f", cpu.mem_read(foreign + 1276, 4))[0] == 1.
+        assert s.unpack("<f", cpu.mem_read(foreign + 1268, 4))[0] == 11.
+        cpu.mem_unmap(foreign, 0x2000)
+
         tail_name = r"enemy\em001\em001_00\mod\em001_00_tail".replace("em001", namespace)
         tail = archive[tail_name, 0x58A15856]
         assert s.unpack_from("<3H", tail, 6) == (0, 3, 22)
@@ -1487,6 +1618,7 @@ def verify(mod):
             saved_program = program
             ops = [0, 3, 0, 0, 255] if len(want) == 3 else [0, 255]
             stage = []
+            previous = get(actor + 1204) & 65535
             for i, expected_op in enumerate(ops):
                 op, operand = s.unpack("<2I", cpu.mem_read(program + 8 * i, 8))
                 assert op == expected_op
@@ -1496,7 +1628,9 @@ def verify(mod):
                     assert operand == 240
                 else:
                     m, blend, start, flags, until, params = s.unpack("<If4I", cpu.mem_read(operand, 24))
-                    assert m >> 8 == 4 and blend == blends[m]
+                    half_blend = blends[m] or blend_hints.get(previous, 0)
+                    assert m >> 8 == 4 and blend == (2 * (half_blend + 1) if half_blend else 0)
+                    previous = m
                     assert (start, flags, until, params) == (0, 0, 4 if i == 2 else 1, 0)
                     entry = s.unpack_from("<I", rx, 8 + 4 * (m & 255))[0]
                     assert entry and s.unpack_from("<I", rx, entry + 8)[0] > 1

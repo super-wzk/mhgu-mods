@@ -577,6 +577,7 @@ fn build_mode(
                     row[20 + 2 * i..22 + 2 * i].copy_from_slice(&x.to_le_bytes());
                 }
             }
+            row[29] = phases[0].next_blend;
             for &(phase, marker, effect) in action.events {
                 if effect == 54 {
                     let attack = tables.melee(effect)?;
@@ -718,7 +719,7 @@ fn build_mode(
             3,
             4,
             Action {
-                motions: &[125, 111],
+                motions: &[125],
                 events: &[
                     (0, 66, 88),
                     (0, 66, 91),
@@ -727,11 +728,21 @@ fn build_mode(
                     (0, 122, 91),
                     (0, 200, 102),
                     (0, 210, 91),
-                    (1, 2, 66),
-                    (1, 20, 67),
-                    (1, 100, 66),
-                    (1, 120, 68),
-                    (1, 180, 68),
+                ],
+            },
+            false,
+        )?;
+        bind(
+            248,
+            4,
+            Action {
+                motions: &[111],
+                events: &[
+                    (0, 2, 66),
+                    (0, 20, 67),
+                    (0, 100, 66),
+                    (0, 120, 68),
+                    (0, 180, 68),
                 ],
             },
             false,
@@ -862,8 +873,17 @@ fn build_mode(
             3,
             10,
             Action {
-                motions: &[103, 104],
-                events: &[(0, 2, 53), (0, 70, 54), (1, 10, 69)],
+                motions: &[103],
+                events: &[(0, 2, 53), (0, 70, 54)],
+            },
+            false,
+        )?;
+        bind(
+            248,
+            10,
+            Action {
+                motions: &[104],
+                events: &[(0, 10, 69)],
             },
             false,
         )?;
@@ -981,6 +1001,14 @@ fn build_mode(
             },
             false,
         )?;
+        // Complete these native multi-motion actions through the runtime
+        // clock, so each transition holds its own start frame and event clocks.
+        for row in &mut entries {
+            if row[0] == 3 && matches!(row[1], 4 | 10) {
+                row[30] = 248;
+                row[31] = row[1];
+            }
+        }
         // GU 9B2BC -> CF43D8 -> A134C: grounded death 11:0 ends on
         // bank 3 slot 17. Keep its native completion/quest command.
         let reaction_bank = MOT.strip_suffix("_0").unwrap().to_owned() + "_3";
@@ -1031,6 +1059,7 @@ fn build_mode(
             row[1] = source;
             row[2..4].copy_from_slice(&(1024 + slot as u16).to_le_bytes());
             row[7] = binding.blend_steps.saturating_sub(1) as u8;
+            row[29] = binding.next_blend;
             row[16..20].copy_from_slice(&frames.to_le_bytes());
             entries.push(row);
         }
@@ -1411,6 +1440,7 @@ pub fn motion_bank(pac_path: &Path, donor_path: &Path) -> Result<Vec<u8>> {
         let phase = MotionBinding {
             clip,
             blend_steps: 0,
+            next_blend: 0,
         };
         let (frames, tracks, _) = bake_phases(&archive, &rig, &ids, &[phase])
             .with_context(|| format!("Espinas PAC clip {clip}"))?;

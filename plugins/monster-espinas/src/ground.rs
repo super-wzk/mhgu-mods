@@ -137,6 +137,7 @@ impl Ground {
         dt: f32,
         ticks: u16,
         motion_rate: f32,
+        blending: bool,
     ) -> Next {
         unsafe {
             let e = self.entry;
@@ -150,7 +151,7 @@ impl Ground {
                 }
                 Stage::Tail { clip, second, step } => {
                     let len = u32at(e, 16) as f32 - 1.;
-                    if step.is_none() && frame >= f32::from(byte(e, 7)) * 2. {
+                    if step.is_none() && !blending {
                         let sign = if *clip == 13 { -1. } else { 1. };
                         *step = Some(
                             (sign * 16384. / ((len - frame).max(2.) * 0.5) * motion_rate) as i32,
@@ -171,7 +172,7 @@ impl Ground {
                 Stage::Pivot(seq) => {
                     let a = f32::from(u16at(e, 20));
                     let b = f32::from(u16at(e, 22));
-                    let degrees = i32::from(u16at(e, 24)) * if u16at(e, 28) != 0 { -1 } else { 1 };
+                    let degrees = i32::from(u16at(e, 24)) * if byte(e, 28) != 0 { -1 } else { 1 };
                     let portion = (frame - a).clamp(0., b - a);
                     let yaw = seq
                         .start_yaw

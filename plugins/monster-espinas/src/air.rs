@@ -209,7 +209,7 @@ impl Air {
                     let mut left = dt;
                     while left > 0. {
                         if self.step_left == 0. {
-                            let hover = if frame < f32::from(byte(self.entry, 7)) * 2. {
+                            let hover = if update.monster().motion_blend_remaining() > 0. {
                                 None
                             } else if frame <= 1. {
                                 Some(0.)

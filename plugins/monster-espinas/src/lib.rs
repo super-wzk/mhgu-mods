@@ -56,6 +56,7 @@ mod hunt;
 mod icon;
 mod materials;
 mod melee;
+mod motion;
 mod package;
 mod physiology;
 mod quest;
@@ -66,7 +67,8 @@ const SPECIES: SpeciesId = SpeciesId::new(107).unwrap();
 // The GU factory allocates a flying wyvern with this layout. Instance
 // identity and asset resolution never use the layout's species ID.
 const FACTORY_LAYOUT: SpeciesId = SpeciesId::new(1).unwrap();
-const ACTOR_CLASS: MonsterClass = MonsterClass::at_vtable(0x179acf8);
+const ACTOR_VTABLE_OFFSET: u32 = 0x179acf8;
+const ACTOR_CLASS: MonsterClass = MonsterClass::at_vtable(ACTOR_VTABLE_OFFSET);
 fn is_espinas(monster: Monster) -> bool {
     monster.species() == Some(SPECIES) && ACTOR_CLASS.matches(monster)
 }
@@ -87,6 +89,7 @@ unsafe fn release(actor: u32) -> u32 {
     physiology::forget(actor);
     reaction::forget(actor);
     melee::forget(actor);
+    motion::forget(actor);
     original!(actor)
 }
 // Forge 1.5 generates a safe extern handler that dereferences its ABI argument.
@@ -112,6 +115,7 @@ mod entry {
         materials::install(base);
         use super::physiology::{add_anger, mode, reset_anger};
         use super::reaction::damage_program;
+        motion::install(base);
         forge::install_hook!(base, tick);
         melee::install(base);
         forge::install_hook!(base, release);

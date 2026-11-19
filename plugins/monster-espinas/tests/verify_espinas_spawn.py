@@ -314,6 +314,39 @@ def verify(path):
     print("Vita 3:12: motion 106, unchanged facing until return to idle.")
 
 
+
+
+    # Real FZ animation clock, with rendering services isolated. The pending
+    # frame remains fixed throughout blending; the last tick transfers it to
+    # the primary clock and advances by the source animation step.
+    cpu.mem_write(actor, bytes(4176))
+    model, rig, first, second, ref = (actor + n for n in (0x20000, 0x21000, 0x22000, 0x23000, 0x24000))
+    def word(p, value):
+        cpu.mem_write(p, s.pack("<I", value))
+    setat(1656, "I", model)
+    for offset, p in [(36, rig), (68, first), (84, second)]:
+        word(model + offset, p)
+    setat(528, "I", ref)
+    word(ref, ref + 16)
+    setat(834, "H", 1)
+    motion_table = u32(0x8257DDF4 + 40 * 80 + 20)
+    blend = cpu.mem_read(motion_table + 12 * 47 + 6, 1)[0] // 2
+    assert blend == 5
+    service(0x8182D384, lambda _, flags, *__: int(flags == 0x4000000))
+    for address in (0x81008020, 0x81007BCE, 0x81002782, 0x81007D54, 0x810062A2, 0x8182D39E, 0x81007FA2):
+        service(address, lambda *_: 0)
+    for rate in (1., 1.3, 1.5):
+        for off, value in [(476, 100.), (488, 100.), (480, 2*rate), (496, 0.), (508, 294.), (500, 1/(blend+1)), (524, 1/(blend+1))]:
+            setat(off, "f", value)
+        setat(516, "I", 1)
+        setat(520, "I", blend + 1)
+        for left in range(blend, -1, -1):
+            run(0x8173208A, actor)
+            assert getat(520, "I") == left and getat(496, "f") == 0.
+            assert abs(getat(476, "f") - (100. if left else 2*rate)) < .0001
+    print("Vita fireball: six blend ticks hold the incoming frame; final frames 2.0 / 2.6 / 3.0 at rates 1.0 / 1.3 / 1.5.")
+
+
 if __name__ == "__main__":
     a = argparse.ArgumentParser(description=__doc__)
     a.add_argument("--elf", type=Path, default=VITA_ELF)

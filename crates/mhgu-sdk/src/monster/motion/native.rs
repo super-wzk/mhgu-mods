@@ -46,6 +46,27 @@ impl<'a> Monster<'a> {
     pub fn motion_frame(self) -> f32 {
         self.0.get(MOTION_FRAME)
     }
+    /// Remaining native blend time, measured in actor update frames.
+    pub fn motion_blend_remaining(self) -> f32 {
+        self.0.get(Field::at(1268))
+    }
+    /// Temporarily override the primary animation clock rate for a native pass.
+    /// Zero holds its frame while GU's independent blend clock keeps advancing.
+    /// The base rate and the other animation layers are unchanged.
+    pub fn with_motion_clock_rate<R>(self, rate: f32, pass: impl FnOnce() -> R) -> R {
+        struct Restore<'a>(Monster<'a>, f32);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                self.0.0.set(Field::at(1292), self.1);
+            }
+        }
+        if !rate.is_finite() || rate < 0. {
+            return pass();
+        }
+        let _restore = Restore(self, self.motion_rate());
+        self.0.set(Field::at(1292), rate);
+        pass()
+    }
     pub fn motion_finished(self) -> bool {
         self.0.get(MOTION_FLAGS) & 4 != 0
     }
