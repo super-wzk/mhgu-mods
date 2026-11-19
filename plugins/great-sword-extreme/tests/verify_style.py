@@ -1,5 +1,6 @@
 """Exercise both packaged NROs, Forge INI selection and the original GU motion path."""
 
+import math
 import os
 import struct
 import sys
@@ -40,6 +41,11 @@ COMMAND_UPDATE = 0x2E9D54
 SHARPNESS = 0x2AD288
 HIT_EXPAND, MODEL_DEPTH = 0x1696FC, 0xA957CC
 GUARD_REACTION, DRAW_MODEL = 0x2F4B20, 0xA956D8
+
+
+def effect_routes():
+    data = (ROOT / "target/assets/effects/routes.bin").read_bytes()
+    return [range(first, first + count) for first, count in struct.iter_unpack("<HH", data)]
 
 
 def api_for(g, identifier, magic):
@@ -305,7 +311,8 @@ def verify_great_sword(g):
             resources[rel] = obj
             return obj
         if kind == 0x1857810:
-            assert rel == r"player\hit\frontier_gs\radiance" and flags == 1
+            assert rel in (r"player\hit\frontier_gs\radiance", r"player\hit\frontier_gs\guard_counter") and flags == 1
+            counter = rel.endswith("guard_counter")
             data = (nx / (rel.replace("\\", "/") + ".hts")).read_bytes()
             assert struct.unpack_from("<4s5I", data) == (
                 b"HTS\0",
@@ -323,16 +330,28 @@ def verify_great_sword(g):
                 0.0,
                 200.0,
                 0.0,
-                150.0,
-                0.0,
+                250.0 if counter else 150.0,
+                200.0 if counter else 0.0,
                 0.0,
                 0.0,
                 50.0,
-                0.0,
+                200.0 if counter else 0.0,
                 0.0,
             )
             if rel not in resources:
                 resources[rel] = g.alloc(112)
+                # The real native expander reads this rHitSize group and the
+                # packed capsule. Only the resource-manager lookup is mocked.
+                shape = g.alloc(len(data))
+                g.cpu.mem_write(shape, data)
+                group, entries = g.alloc(12), g.alloc(4)
+                g.put(group + 4, 1)
+                g.put(group + 8, entries)
+                g.put(entries, shape + 24)
+                vt, get_group = g.alloc(72), g.alloc(4)
+                g.put(resources[rel], vt)
+                g.put(vt + 68, get_group)
+                g.stub(get_group, lambda _, index, *args: group if index == 0 else 0)
             g.put(resources[rel] + 80, 1)
             return resources[rel]
         assert kind == 0x2125210 and flags == 1
@@ -407,7 +426,9 @@ def load_hit_data(g, actor, remote, encode):
     g.put(vt + 68, 0x270D98)
     g.put(obj + 100, data)
     g.put(obj + 104, data + 16)
+    g.stub(0x13EFDC4, lambda dest, n, *_: g.cpu.mem_write(dest, bytes(n)))
     for a in (actor, remote):
+        g.run(0x1687A8, a + 12320)  # Includes GU's unit collision scale.
         g.put(a + 12696, obj)
         g.put(a + 12700, shapes)
     g.stub(0x16B920, lambda *_: 1)  # engine-wide collision serial
@@ -512,6 +533,8 @@ def verify_weapon_arts(g, p):
 
 
 def verify_battle(g, p, remote, resources):
+    routes = effect_routes()
+
     def h(off, n):
         g.cpu.mem_write(p + off, struct.pack("<H", n))
 
@@ -564,6 +587,23 @@ def verify_battle(g, p, remote, resources):
 
     def value():
         return g.half(p + 12320 + 56)
+
+    def hitstop_rates():
+        # Run GU's contact feedback and read the actual hunter motion rate
+        # for both slowdown and full stop. Preserve the surrounding scene.
+        result = p + 12320 + 6
+        timers = p + 10156
+        old_result = bytes(g.cpu.mem_read(result, 1))
+        old_timers = bytes(g.cpu.mem_read(timers, 8))
+        rates = []
+        for kind in (3, 4):
+            g.cpu.mem_write(result, bytes([kind]))
+            g.run(0x16DB68, 0, p + 12320)
+            g.run(0x2A80F8, p)
+            rates.append(g.cpu.reg_read(arm.UC_ARM_REG_S0))
+        g.cpu.mem_write(result, old_result)
+        g.cpu.mem_write(timers, old_timers)
+        return tuple(rates)
 
     def whiff():
         return bytes(g.cpu.mem_read(p + 12325, 1)) == b"\0"
@@ -689,7 +729,14 @@ def verify_battle(g, p, remote, resources):
         g.put(manager + off, g.alloc(size))
     g.put(g.get(manager + 108) + 4, 0xFFFFFFFF)
     units = []
-    g.stub(0x3288C4, g.alloc)
+    failed_allocations = []
+
+    def allocate_proof(size, *_):
+        if failed_allocations and failed_allocations.pop(0):
+            return 0
+        return g.alloc(size)
+
+    g.stub(0x3288C4, allocate_proof)
     g.stub(0x328900, lambda unit, *_: g.put(unit, 0x17529CC))
     g.stub(0xC067EC, lambda scene, layer, unit, _: units.append(unit))
     tick(10, pressed=0x1000)
@@ -854,15 +901,24 @@ def verify_battle(g, p, remote, resources):
         tick(60)
         assert g.get(p + 4076) == expected  # no repeated rotation during swing
     h(5136, 0)
+    joints, lookup = g.alloc(13 * 160), g.alloc(256)
+    g.cpu.mem_write(lookup, bytes(range(13)) + bytes([255]) * 243)
+    g.put(p + 1172, joints)
+    g.put(p + 1176, lookup)
     g.put(0x188A0D4, manager)
     for key, end_charge in ((32, "release"), (0x120, "release"), (32, "hit"), (0x120, "unequip")):
         units.clear()
+        failed_allocations[:] = [False, True, False, True]
         neutral()
         tick(0, pressed=key, held=key)
         for frame in range(2, 80, 2):
             tick(frame, held=key)
             if units:
                 break
+        assert len(units) == 2
+        frame += 2
+        tick(frame, held=key)
+        assert sorted(g.get(u + 68) for u in units) == list(routes[9])
         proofs = units.copy()
         assert len(proofs) == 4
         # Three EFL children are already drawing. The fourth proof is
@@ -957,8 +1013,7 @@ def verify_battle(g, p, remote, resources):
             assert not units
             tick(29)  # Cross Frontier event 29 at motion frame 28.
             tick(30)
-            first, count = struct.unpack_from("<HH", (ROOT / "target/assets/effects/routes.bin").read_bytes(), 4)
-            assert [g.get(u + 68) for u in units] == list(range(first, first + count))
+            assert [g.get(u + 68) for u in units] == list(routes[1])
             assert all(bytes(g.cpu.mem_read(u + 304, 12)) == origin for u in units)
             g.put(0x188A0D4, 0)
             # Charged uppercut -> A joins the sweep at frame 44. SDT row 2
@@ -1142,6 +1197,47 @@ def verify_battle(g, p, remote, resources):
     h(5136, 0)
     g.put(p + 4076, 0)
     g.put(p + 5280, 0)
+    # X counter. The contact is active before the shockwave appears.
+    assert guard(8, 1, False) == 1
+    tick(20, held=32, pressed=32)
+    assert clip() == 76
+    g.put(0x188A0D4, manager)
+    f(64, 100.)
+    f(68, 20.)
+    f(72, 300.)
+    g.put(p + 4076, 0x4000)
+    units.clear()
+    tick(85)
+    assert whiff() and not units
+    tick(86)
+    hit = p + 12320
+    assert value() == 200 and not whiff() and not units
+    assert hitstop_rates() == (0x3E4CCCCD, 0)  # Blade contact: 0.2x or stopped.
+    shape = resources[r"player\hit\frontier_gs\guard_counter"]
+    assert g.get(hit + 132) == shape and g.get(hit + 136) == 0
+    assert not g.get(hit + 48) & 0x08000000
+    assert struct.unpack("<2f", g.cpu.mem_read(hit + 92, 8)) == (0., 20.)
+    collision = g.alloc(10304)
+    g.put(0x1857830, collision)
+    def host_float(fn):
+        reg = arm.UC_ARM_REG_S0
+        arg, = struct.unpack("<f", struct.pack("<I", g.cpu.reg_read(reg)))
+        g.cpu.reg_write(reg, int.from_bytes(struct.pack("<f", fn(arg)), "little"))
+    g.stub(0x13EFDE8, lambda *_: host_float(math.sin))
+    g.stub(0x13EFDF4, lambda *_: host_float(math.cos))
+    assert g.run(HIT_EXPAND, hit) == 1 and g.get(collision + 10288) == 1
+    kind, *capsule = struct.unpack("<B3x7f", g.cpu.mem_read(collision + 8240, 32))
+    assert kind == 2 and all(abs(a-b) < 0.01 for a,b in zip(capsule, [200,300,270,300,300,70,300])), capsule
+    for frame, expected in [(89, ()), (90, (19, 20)), (90, ()), (92, (21,)), (99, ()), (108, (7, 7))]:
+        units.clear()
+        tick(frame)
+        layers = [layer for route in expected for layer in routes[route]]
+        assert [g.get(u + 68) for u in units] == layers, frame
+        assert all(struct.unpack("<3f", g.cpu.mem_read(u + 304, 12)) == (300.,20.,300.) for u in units)
+    g.put(0x188A0D4, 0)
+    for offset in (64, 68, 72):
+        f(offset, 0.)
+    g.put(p + 4076, 0)
     assert guard(8, 1, False) == 1
     tick(10, held=0x100, pressed=0x100)
     assert clip() == 74
@@ -1152,12 +1248,12 @@ def verify_battle(g, p, remote, resources):
     tick(36)
     assert value() == 125 and not whiff()
     g.put(0x188A0D4, manager)
-    ready, count = struct.unpack_from("<HH", (ROOT / "target/assets/effects/routes.bin").read_bytes(), 32)
+    ready = routes[8]
     for block in range(1, 4):
         units.clear()
         assert guard(8, 1) == 1 and clip() == 74
-        aura = [u for u in units if ready <= g.get(u + 68) < ready + count]
-        assert len(aura) == (count if block == 3 else 0)
+        aura = [u for u in units if g.get(u + 68) in ready]
+        assert len(aura) == (len(ready) if block == 3 else 0)
         assert all(g.get(u + 132) == 0x28 and g.half(u + 194) == 12 for u in aura)
     g.put(0x188A0D4, 0)
     tick(20, pressed=0x1000)
@@ -1167,15 +1263,13 @@ def verify_battle(g, p, remote, resources):
     f(68, 20.)
     f(72, 300.)
     g.put(p + 4076, 0x4000)
-    release, layers = struct.unpack_from("<HH", (ROOT / "target/assets/effects/routes.bin").read_bytes(), 28)
+    release = routes[7]
     def release_origins():
         return [struct.unpack("<3f", g.cpu.mem_read(u + 304, 12))
-                for u in units if release <= g.get(u + 68) < release + layers]
+                for u in units if g.get(u + 68) in release]
     units.clear()
     tick(82)
     assert clip() == 65 and whiff() and not release_origins()
-    collision = g.alloc(10304)
-    g.put(0x1857830, collision)
     f(28, 1.)
     # Simulate four game-time units of hit stop at motion frame 88 on GU 60 Hz.
     pulses = range(84, 280, 12)
@@ -1188,15 +1282,16 @@ def verify_battle(g, p, remote, resources):
         tick(frame)
         hit = elapsed in pulses
         origin = (300., 20., 300.) if elapsed == 84 else (100., 20., 500.)
-        assert release_origins() == ([origin] * layers if hit and elapsed != 108 else []), elapsed
+        assert release_origins() == ([origin] * len(release) if hit and elapsed != 108 else []), elapsed
         if hit and elapsed != 108:
             assert all(struct.unpack("<f", g.cpu.mem_read(u + 164, 4))[0] == 90.
-                       for u in units if release <= g.get(u + 68) < release + layers)
+                       for u in units if g.get(u + 68) in release)
         if elapsed == 84:
             g.put(p + 4076, 0)
         assert whiff() == (not hit), elapsed
         if hit:
             assert value() == 27 and g.get(p + 12320 + 136) == 0
+            assert hitstop_rates() == (0x3F800000, 0x3F800000), "wave slowed its owner"
             assert g.get(p + 12320 + 48) & 0x08000000
             assert struct.unpack("<f", g.cpu.mem_read(p + 12320 + 96, 4))[0] == 12.0
             g.put(collision + 10288, 0)
@@ -1447,10 +1542,11 @@ def verify_jump_slash(g, p, tick, neutral):
     print("GU jump slash: both native motions, grounded command window, Frontier finisher and sweep continuation passed")
 
 
-def verify_sdk_registration(elf, on):
+def verify_sdk_registration(elf):
     # Exercise the actual SDK caller in the great-sword NRO, not only the raw ABI.
+    config = b"[Weapons]\r\n0 = 1\r\n1 = 1\r\n"
     for case in ("ready", "conflict", "worker"):
-        g = boot(elf, on, ("registry",))
+        g = boot(elf, config, ("registry",))
         register, selected = service(g)
         original_thread = g.thread
         if case == "conflict":
@@ -1474,7 +1570,7 @@ def verify():
     elf = (REPO / "mhgu/main.elf").read_bytes()
     on = b"[Weapons]\r\n0 = 1\r\n"
     verify_action_lifecycle(elf, on)
-    verify_sdk_registration(elf, on)
+    verify_sdk_registration(elf)
     verify_valor(elf, on)
     g = boot(elf, on)
     verify_great_sword(g)

@@ -55,6 +55,11 @@ pub(super) unsafe extern "C" fn submit(actor: u32, attack: *const Attack) -> u32
         // Feed power to the constructor before GU applies weapon modifiers.
         data.row[0] = 1 << 16;
         data.row[1] = (data.row[1] & 0xffff0000) | u32::from(attack.power);
+        if attack.flags & Attack::NO_ATTACKER_HITSTOP != 0 {
+            // GU 168960 copies HDP byte 37 to contact +108. 16DB68
+            // uses it for both the attacker's slow and full-stop timers.
+            data.row[9] &= !(0xff << 8);
+        }
         if attack.flags & Attack::NO_MOUNT != 0 {
             // HDP offsets 8, 12 and 51 feed the hit type, flags and buildup.
             if matches!(data.row[2] as u8, 34..=36 | 73) {
@@ -69,7 +74,8 @@ pub(super) unsafe extern "C" fn submit(actor: u32, attack: *const Attack) -> u32
         }
         let previous = HIT_DATA.swap(ptr::from_mut(&mut data), Ordering::AcqRel);
         let hit = actor + 12320 + 184 * u32::from(attack.flags & Attack::SECONDARY != 0);
-        let mut flags = attack.flags & !(Attack::SECONDARY | Attack::NO_MOUNT);
+        let mut flags =
+            attack.flags & !(Attack::SECONDARY | Attack::NO_MOUNT | Attack::NO_ATTACKER_HITSTOP);
         if ((actor + 10057) as *const u8).read() & 8 != 0 {
             flags |= 0x10;
         }

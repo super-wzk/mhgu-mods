@@ -27,7 +27,7 @@ python3 plugins/dual-blades-extreme/package.py "${MHFZ_DAT:?}" "${MHGU_ROMFS:?}"
 
 把两个插件的 `dist` 内对应目录装到 MHGURecomp 的 mods 目录。初始化顺序为 Forge、style-registry、极之型插件。如果同时装有极之型大剑，也要更新大剑插件，两个风格共用注册器里的粒子绘制钩子。
 
-男女动作、挥刀音效、磨刀粒子、鬼人刀身光效和极鬼人闪避粒子由本地 Frontier 数据生成，使用独立的 `frontier_db` 资源路径。空舞沿用极鬼人的刀身光效。GU 用原生粒子播放转换后的刀光，Frontier 的历史姿态蒙皮拖尾目前以短寿命模型粒子表现。
+男女动作、挥刀音效、磨刀粒子、鬼人刀身光效和极鬼人闪避粒子由本地 Frontier 数据生成，使用独立的 `frontier_db` 资源路径。空舞沿用极鬼人的刀身光效。磨刀与鬼人刀轨使用 Frontier 刀带模型及其图集。插件以 30 Hz 采样左右手挂点，按原版曲线计算每条刀带的 24 对顶点，交给 GU 模型粒子绘制。极鬼人回避的残影发射点随猎人朝向前移 130 单位。
 
 选中风格后由注册器写入 `savedata:/style_registry.ini`。可分别选择双剑和大剑风格。
 

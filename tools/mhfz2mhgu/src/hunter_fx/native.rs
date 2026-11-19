@@ -377,31 +377,44 @@ impl Compiler {
         let mut movement = vec![0; 128];
         put(&mut movement, 0, 4);
         if moving {
-            // These source banks use vertical, piecewise-linear travel.
-            // Emit the exact per-tick velocity into GU's native speed curve.
-            ensure!(
-                layer
-                    .movement
-                    .iter()
-                    .all(|&(_, v)| v[0] == 0. && v[2] == 0.),
-                "unsupported nonvertical effect travel"
-            );
-            // A59268 reads the axis from bits 8..11 of the second word.
-            // A64DD8 needs a direction curve to restart from a zero speed.
-            put(&mut movement, 4, 2 << 8); // positive Y
-            let direction = vector_keys(&mut movement, &[(0, [0.; 3])], [0.; 3], false, false)?;
-            short(&mut movement, 56, direction);
-            let offset: u16 = movement.len().try_into()?;
             ensure!(duration < 255, "effect travel curve too long");
-            movement.extend((duration + 1).to_le_bytes());
+            let vertical = layer
+                .movement
+                .iter()
+                .all(|&(_, v)| v[0] == 0. && v[2] == 0.);
+            let mut directions = vec![(0, [0.; 3])];
+            let mut speeds = Vec::new();
+            // GU 9BD8E0 rotates the chosen axis, then A64DD8 applies speed.
+            put(&mut movement, 4, if vertical { 2 << 8 } else { 0 });
             for t in 0..=duration {
                 let age = t.saturating_sub(delay);
-                let speed = if t < delay {
-                    0.
+                let delta = if t < delay {
+                    glam::Vec3::ZERO
                 } else {
-                    sample(&layer.movement, age + 1)[1] - sample(&layer.movement, age)[1]
+                    glam::Vec3::from(sample(&layer.movement, age + 1))
+                        - glam::Vec3::from(sample(&layer.movement, age))
                 };
-                movement.extend(t.to_le_bytes());
+                let speed = if vertical { delta.y } else { delta.length() };
+                if !vertical && speed > 0. {
+                    let angles = [
+                        0.,
+                        (-delta.z / speed).clamp(-1., 1.).asin(),
+                        delta.y.atan2(delta.x),
+                    ];
+                    if t == 0 {
+                        directions[0].1 = angles;
+                    } else {
+                        directions.push((t, angles));
+                    }
+                }
+                speeds.push(speed);
+            }
+            let direction = vector_keys(&mut movement, &directions, [0.; 3], false, false)?;
+            short(&mut movement, 56, direction);
+            let offset: u16 = movement.len().try_into()?;
+            movement.extend((duration + 1).to_le_bytes());
+            for (t, speed) in speeds.into_iter().enumerate() {
+                movement.extend((t as u32).to_le_bytes());
                 movement.extend(speed.to_le_bytes());
                 movement.extend(0f32.to_le_bytes());
             }
@@ -705,6 +718,143 @@ impl Compiler {
         Ok(())
     }
 
+    // FZ 81FC9E0A type 4: the first three layers track node 10.
+    // The fourth starts at that node's X/Z but stays on the floor.
+    pub fn charged_slash(&mut self) -> Result<()> {
+        let first = self.count;
+        let white = [255; 4];
+        let red = [255, 0, 0, 16];
+        for (mesh, delay, life, scales, colors) in [
+            (
+                81,
+                0,
+                6,
+                &[(0, 1.), (6, 5.)][..],
+                &[(0, white), (6, [255, 255, 255, 0])][..],
+            ),
+            (
+                81,
+                2,
+                12,
+                &[(0, 2.), (12, 0.5)][..],
+                &[(0, white), (4, red), (12, [0; 4])][..],
+            ),
+            (
+                66,
+                4,
+                10,
+                &[(0, 10.), (4, 4.), (10, 1.)][..],
+                &[(0, white), (6, red), (10, [0; 4])][..],
+            ),
+        ] {
+            let mut flash = Layer::legacy(mesh, life);
+            flash.delay = delay;
+            flash.facing = Facing::Camera;
+            flash.scale = scales.iter().map(|&(t, s)| (t, [s, s, 1.])).collect();
+            flash.color = colors.to_vec();
+            if mesh == 66 {
+                flash.rotation_range[2] = core::f32::consts::PI;
+            }
+            self.layer(flash, None)?;
+        }
+        self.route(first);
+        let first = self.count;
+        let mut ring = Layer::legacy(42, 4);
+        ring.delay = 2;
+        ring.scale = vec![(0, [4., 1., 4.]), (4, [12., 1., 12.])];
+        ring.color = vec![(0, [255, 255, 255, 128]), (4, [255, 255, 255, 0])];
+        self.layer(ring, None)?;
+        self.route(first);
+        Ok(())
+    }
+
+    pub fn ground_impacts(&mut self) -> Result<()> {
+        let white = [255; 4];
+        // 81F90ADA type 5: six surface sprites, alternating a four-tick delay.
+        let first = self.count;
+        for i in 0..6 {
+            let mut surface = Layer::legacy(26, 20);
+            surface.facing = Facing::Camera;
+            surface.blend = 1;
+            surface.delay = 4 * (i % 2);
+            surface.spread = [10.24 * f32::from(i), 0., 10.24 * f32::from(i)];
+            surface.scale = [
+                (0, 1.3, 0.7),
+                (1, 1.3, 0.7),
+                (4, 2.28, 2.28),
+                (9, 2.88, 2.8),
+                (13, 3.46, 2.9),
+                (20, 3.9, 2.75),
+            ]
+            .map(|(t, x, y)| (t, [2. * x, 2. * y, 2.]))
+            .to_vec();
+            surface.color = vec![(0, white), (9, white), (20, [255, 255, 255, 25])];
+            self.layer(surface, None)?;
+        }
+        self.route(first);
+        // The dry branch of 81F82A3C throws nine pieces of mesh 43. Use
+        // samples from its velocity ranges and its per-tick gravity.
+        let first = self.count;
+        for i in 0..9 {
+            let mut piece = Layer::legacy(43, 30);
+            piece.blend = 1;
+            let vx = (6. + 0.6 * ((3 * i + 2) % 10) as f32)
+                * if matches!(i % 4, 1 | 2) { -1. } else { 1. };
+            let vz = (6. + 0.6 * ((7 * i + 1) % 10) as f32)
+                * if matches!(i % 4, 1 | 3) { -1. } else { 1. };
+            let vy = 10. + 0.8 * ((7 * i) % 10) as f32;
+            piece.movement = (0..=30)
+                .map(|t| {
+                    let n = t as f32;
+                    (t, [vx * n, vy * n * (1. - (n - 1.) / 15.), vz * n])
+                })
+                .collect();
+            let turn = core::f32::consts::TAU * 30. / 65536.;
+            piece.rotation = vec![(0, [0.; 3]), (30, [512. * turn, 576. * turn, 768. * turn])];
+            piece.rotation_range = [core::f32::consts::PI; 3];
+            self.layer(piece, None)?;
+        }
+        self.route(first);
+        // Type 10 starts three flashes along the strike, with rising clouds
+        // and a second debris pass once each flash finishes.
+        let first = self.count;
+        for (index, (distance, delay)) in [(0., 0), (50., 1), (100., 2)].into_iter().enumerate() {
+            let mut flash = Layer::legacy(0, 4);
+            flash.position[2] = distance;
+            flash.delay = delay;
+            flash.facing = Facing::Camera;
+            flash.rotation[0].1[2] = core::f32::consts::FRAC_PI_2;
+            flash.scale = vec![(0, [0.1, 1.5, 1.]), (2, [5., 3., 1.]), (4, [3., 5., 1.])];
+            flash.color = vec![(0, [255, 255, 255, 128]), (4, [255, 255, 255, 16])];
+            self.layer(flash, None)?;
+            let mut cloud = Layer::legacy([72, 74, 72][index], 30);
+            cloud.blend = 1;
+            cloud.delay = [2, 4, 6][index];
+            cloud.position[2] = distance;
+            cloud.facing = Facing::Camera;
+            cloud.scale = vec![(0, [1.; 3]), (5, [6., 6., 1.]), (30, [10., 10., 1.])];
+            cloud.color = vec![(0, white), (15, white), (30, [255, 255, 255, 0])];
+            cloud.movement.push((30, [0., 15., 0.]));
+            cloud.rotation_range[2] = core::f32::consts::PI;
+            self.layer(cloud, None)?;
+            let mut debris = Layer::legacy(141, 30);
+            debris.blend = 1;
+            debris.position[2] = distance;
+            debris.delay = 5 + delay + [0, 1, 2][index];
+            debris.rotation_range[2] = core::f32::consts::PI;
+            debris.scale = vec![(0, [0.1; 3]), (5, [0.4; 3]), (30, [0.7; 3])];
+            debris.movement = (0..=30)
+                .map(|t| {
+                    let n = t as f32;
+                    (t, [0., 15. * n - 1.5 * n * (n - 1.), 0.])
+                })
+                .collect();
+            self.layer(debris, None)?;
+        }
+        self.route(first);
+        Ok(())
+    }
+
     pub fn dual_blades(&mut self, params: &[u8]) -> Result<()> {
         // After 4021:1, keep the common routes in the order used by fx.rs.
         // 81F867C0 selects one of three sparks and draws 76 at the blade.
@@ -738,9 +888,7 @@ impl Compiler {
 
         // 81F89FAC type 1: the timed white trail at the sharpening slash.
         let first = self.count;
-        let mut slash = Layer::legacy(1, 8);
-        slash.scale = vec![(0, [0.25; 3]), (8, [0.1; 3])];
-        slash.color.push((8, [255, 255, 255, 0]));
+        let slash = Layer::legacy(501, 8);
         self.layer(slash, None)?;
         self.route(first);
 
@@ -750,11 +898,12 @@ impl Compiler {
             let [alpha, red, green, blue] = word(params, offset).to_be_bytes();
             [red, green, blue, alpha]
         };
-        for (glow_color, trail_color) in [
+        let modes = [
             ([255, 51, 51, 51], [255, 51, 51, 255]),
             ([255, 100, 20, 51], [255, 100, 20, 255]),
             (rgba(172), rgba(176)),
-        ] {
+        ];
+        for (glow_color, _) in modes {
             let first = self.count;
             let mut glow = Layer::legacy(59, 8);
             // Both blades refresh before the previous pair fades. Composite their
@@ -762,12 +911,17 @@ impl Compiler {
             glow.blend = 1;
             glow.color = vec![(0, glow_color), (6, glow_color), (8, [0; 4])];
             self.layer(glow, None)?;
-            let mut trail = Layer::legacy(2, 8);
-            trail.blend = 1;
-            trail.scale = vec![(0, [0.18; 3]), (8, [0.08; 3])];
-            trail.color = vec![(0, trail_color), (8, [0; 4])];
-            self.layer(trail, None)?;
             self.route(first);
+        }
+        for hand in [502, 503] {
+            for (_, color) in modes {
+                let first = self.count;
+                let mut trail = Layer::legacy(hand, 6);
+                trail.blend = 1;
+                trail.color = vec![(0, color)];
+                self.layer(trail, None)?;
+                self.route(first);
+            }
         }
         Ok(())
     }

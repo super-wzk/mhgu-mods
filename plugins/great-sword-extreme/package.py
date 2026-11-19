@@ -55,35 +55,19 @@ def package(dat):
                 old.unlink()
     path = nx / "player/mot/frontier_gs"
     path.mkdir(parents=True, exist_ok=True)
-    # rHitSize v20131015, one root-relative capsule. A separate resource
-    # avoids enlarging the shared equipped blade or another player's hits.
-    footer = (assets / "great_sword.fgsa").read_bytes()[-84:]
-    assert footer[:4] == b"FX08"
-    radius, *ends = struct.unpack_from("<7f", footer, 44 + 12)
-    assert radius > 0
+    footer = (assets / "great_sword.fgsa").read_bytes()[-128:]
+    assert footer[:4] == b"CTR0" and footer[44:48] == b"FX08"
     hit = nx / "player/hit/frontier_gs"
     hit.mkdir(parents=True, exist_ok=True)
-    (hit / "radiance.hts").write_bytes(
-        struct.pack(
-            "<4s5I4H10f",
-            b"HTS\0",
-            0x20131015,
-            1,
-            0,
-            1,
-            24,
-            255,
-            0,
-            1,
-            0,
-            0.0,
-            radius,
-            *ends[:3],
-            0.0,
-            *ends[3:],
-            0.0,
+    for name, offset in (("guard_counter", 4), ("radiance", 88)):
+        radius, *ends = struct.unpack_from("<7f", footer, offset + 12)
+        assert radius > 0
+        (hit / f"{name}.hts").write_bytes(
+            struct.pack(
+                "<4s5I4H10f", b"HTS\0", 0x20131015, 1, 0, 1, 24,
+                255, 0, 1, 0, 0.0, radius, *ends[:3], 0.0, *ends[3:], 0.0,
+            )
         )
-    )
     for sex in "mf":
         arc = (assets / f"frontier_gs_{sex}.arc").read_bytes()
         assert arc[:8] == b"ARC\0\x11\0\x03\0"

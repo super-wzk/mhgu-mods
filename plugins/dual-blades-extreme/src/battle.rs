@@ -487,7 +487,7 @@ impl Battle {
                         sound::sharpen(actor);
                         self.polish.activate(2. * f32::from(parameter));
                     }
-                    18 => fx::sharpen_slash(actor),
+                    18 => self.effects.sharpen_slash(actor, parameter),
                     19 if phase(actor) == 3 => fx::evade(actor),
                     _ => {}
                 }

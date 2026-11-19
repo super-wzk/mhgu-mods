@@ -287,6 +287,23 @@ fn action_program(dat: &Path, dual_blades: bool) -> Result<Vec<u8>> {
         out.extend(dual_blades_parameters(data)?);
         return Ok(out);
     }
+    // 816D815C resolves hunter contacts through mhfdat's shape directory.
+    // GU's weapons use the standard reach (column zero). The counter's
+    // capsule follows FZ node 0, independent of the hand and sword model.
+    let counter = rows
+        .get(247 * 40..248 * 40)
+        .context("missing guard counter contact")?;
+    let selector = u16::from_le_bytes(counter[16..18].try_into()?);
+    let shape = word(data, word(data, 216)? + 32 * usize::from(selector))?;
+    let capsule = data
+        .get(shape..shape + 42)
+        .context("missing guard counter shape")?;
+    ensure!(
+        selector == 39 && capsule[..4] == [0, 0, 1, 0] && capsule[40..42] == [255, 255],
+        "unsupported guard counter shape"
+    );
+    out.extend(b"CTR0");
+    out.extend(&capsule[..40]);
     // 81159BD8 spawns effect family 108; 8115BA10 uses 81898B02
     // to fetch slot 8, then the row's shape selector. This is a separate
     // world-space hit volume, not a row in the hunter's blade bank.

@@ -23,7 +23,12 @@ pub(super) unsafe fn emit(player: u32, source: u16, late: f32) -> Option<u32> {
         }
         let base = forge::mem::text_addr();
         let release: unsafe extern "C" fn(u32) = core::mem::transmute(base + 0x887660);
-        let extra = if source == crate::program::RADIANCE {
+        let shape_path = match source {
+            247 => Some(c"player\\hit\\frontier_gs\\guard_counter"),
+            crate::program::RADIANCE => Some(c"player\\hit\\frontier_gs\\radiance"),
+            _ => None,
+        };
+        let shape_override = if let Some(path) = shape_path {
             let mgr = *((base + 0x2126a64) as *const u32);
             if mgr == 0 {
                 return None;
@@ -31,20 +36,15 @@ pub(super) unsafe fn emit(player: u32, source: u16, late: f32) -> Option<u32> {
             let vt = *(mgr as *const u32);
             let load: unsafe extern "C" fn(u32, u32, *const core::ffi::c_char, u32) -> u32 =
                 core::mem::transmute(*((vt + 48) as *const u32));
-            let r = load(
-                mgr,
-                base + 0x1857810,
-                c"player\\hit\\frontier_gs\\radiance".as_ptr(),
-                1,
-            );
-            if r == 0 {
+            let shape = load(mgr, base + 0x1857810, path.as_ptr(), 1);
+            if shape == 0 {
                 return None;
             }
-            if *((r + 80) as *const u32) & 1 == 0 {
-                release(r);
+            if *((shape + 80) as *const u32) & 1 == 0 {
+                release(shape);
                 return None;
             }
-            Some(r)
+            Some(shape)
         } else {
             None
         };
@@ -54,20 +54,25 @@ pub(super) unsafe fn emit(player: u32, source: u16, late: f32) -> Option<u32> {
             _ => 1,
         };
         let delay = until_start.max(0.);
+        let radiance = source == crate::program::RADIANCE;
         let registered = Attack {
             template,
             power,
             delay,
             duration: left - delay,
-            flags: 0x7,
-            shape: extra.unwrap_or(0),
-            no_sharpness_cost: u32::from(extra.is_some()),
+            flags: if radiance {
+                0x7 | Attack::NO_ATTACKER_HITSTOP
+            } else {
+                0x7
+            },
+            shape: shape_override.unwrap_or(0),
+            no_sharpness_cost: u32::from(radiance),
         }
         .submit(player);
-        if let Some(shape) = extra {
+        if let Some(shape) = shape_override {
             release(shape);
         }
-        extra.filter(|_| registered)
+        shape_override.filter(|_| registered)
     }
 }
 

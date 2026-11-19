@@ -415,6 +415,8 @@ impl Battle {
                     19 => {
                         combat::emit(p, 110 + u16::from(self.level.min(5)), late);
                     }
+                    24..=26 if !self.hit => fx::ground_strike(p, kind, self.level),
+                    28 if param == 4 && self.level >= 2 => fx::charged_slash(p),
                     // Frontier event 29 requests the hunter origin (joint argument 0).
                     29 => fx::emit(p, param, None),
                     30 => {
@@ -525,15 +527,7 @@ impl Battle {
             write(p, 9472, read::<u32>(p, 9472) & !1);
             self.cursor.time.frame = frame;
             self.cursor.time.blend = read(p, 1268);
-            if previous < 50. && frame >= 50. && s.clip == 1449 {
-                fx::emit(p, 3, None);
-                if read::<u8>(p, 11988) == 0 {
-                    fx::emit(p, 5, None);
-                }
-            }
-            if previous < 70. && frame >= 70. && s.clip == 1450 && read::<u8>(p, 11988) == 0 {
-                fx::emit(p, 6, None);
-            }
+            fx::motion_events(p, s.clip, previous, frame);
             // 169D44 records the actual target and its type in this sword's
             // volume. Type 1 is a monster, type 0 is a hunter. The allocator
             // clears the record on each swing. No shared DPS hook is needed.
@@ -774,11 +768,7 @@ impl Battle {
                 return;
             };
             self.radiance_delay = Some(RADIANCE_INTERVAL - late);
-            // FZ uses scene node 0, the unanimated parent of the motion
-            // carrier. Its equivalent here is the GU actor origin.
-            let [x, y, z] = read::<[f32; 3]>(p, 64);
-            let (sin, cos) = mhgu_sdk::geometry::Angle::from_units(yaw).sin_cos();
-            let origin = [x + 200. * sin, y, z + 200. * cos];
+            let origin = fx::shockwave_origin(p, yaw);
             self.radiance_contact =
                 combat::emit(p, program::RADIANCE, late).map(|shapes| (origin, shapes));
             fx::radiance(p, origin, self.radiance_yaw);

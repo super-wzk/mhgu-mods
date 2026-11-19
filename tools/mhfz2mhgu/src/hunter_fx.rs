@@ -116,15 +116,20 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
             .with_context(|| format!("missing effect bank {id}"))?;
         let data = pac::member(&banks, slot + 1)?;
         playback.bank(&data, id, selectors)?;
+        if id == 4022 {
+            playback.charge()?;
+            playback.charged_slash()?;
+            playback.ground_impacts()?;
+            // 817C08AA: clip 1476 also uses selector 5 from the initial bank routes.
+            playback.bank(&data, id, &[10, 16, 6])?;
+        }
         save(&out.join(format!("{id}.bank")), data)?;
     }
-    match weapon_effect {
-        WeaponEffect::GreatSword => playback.charge()?,
-        WeaponEffect::DualBlades => {
-            let mhfdat = pac::decode(read(&dat.join("mhfdat.bin"))?)?;
-            let params = crate::hunter::dual_blades_parameters(&mhfdat)?;
-            playback.dual_blades(params)?;
-        }
+    let dual_blades = matches!(weapon_effect, WeaponEffect::DualBlades);
+    if dual_blades {
+        let mhfdat = pac::decode(read(&dat.join("mhfdat.bin"))?)?;
+        let params = crate::hunter::dual_blades_parameters(&mhfdat)?;
+        playback.dual_blades(params)?;
     }
     let pair = pac::member(&bundle, 0)?;
     let bytes = pac::member(&pair, 0)?;
@@ -141,6 +146,12 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
         .context("missing GU effect material")?
         .unpack()?;
     let mut bindings = String::from("mesh\tmaterial\ttexture_slot\tatlas\n");
+    if dual_blades {
+        blade_trails(&bundle, &mrl, &mut assets)?;
+        for strip in 501..=503 {
+            playback.meshes.remove(&strip);
+        }
+    }
     for &id in &playback.meshes {
         let obj = *objects.get(id).context("missing effect mesh")?;
         let mut mesh = model::static_mesh(obj).with_context(|| format!("effect mesh {id}"))?;
@@ -246,4 +257,93 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
     save(&out.join("routes.bin"), routes)?;
     fs::write(out.join("bindings.tsv"), bindings)?;
     save(&out.join("geometry.arc"), arc::encode(&assets)?)
+}
+
+// FZ 81F8B4F8 uses model bank 4 (effect.bin members 8/9). Each
+// successive pair of vertices is rigidly bound to one historical pose.
+fn blade_trails(bundle: &[u8], mrl: &[u8], assets: &mut Vec<Asset>) -> Result<()> {
+    let pair = pac::member(bundle, 8)?;
+    let bytes = pac::member(&pair, 0)?;
+    let model = Fmod::parse(&bytes)?;
+    let images = pac::member(bundle, 9)?;
+    // The two demon trails bind separate runtime buffers backed by the same strip.
+    for (object, ids) in [(1, &[501][..]), (2, &[502, 503][..])] {
+        let obj = model
+            .objects()
+            .nth(object)
+            .context("missing FZ blade trail")?;
+        let mut mesh = model::static_mesh(obj)?;
+        let skin = &obj
+            .weights()
+            .context("missing blade history weights")?
+            .vertices;
+        ensure!(
+            mesh.vertices.len() == 48 && skin.len() == 48,
+            "unexpected blade strip size"
+        );
+        let uv = &obj.uvs().context("missing blade UVs")?.values;
+        for (i, vert) in mesh.vertices.iter_mut().enumerate() {
+            let [weight] = skin[i].influences.as_slice() else {
+                anyhow::bail!("unexpected blade skin")
+            };
+            ensure!(
+                weight.weight == 100. && weight.bone_index as usize == 25 - i / 2,
+                "unexpected blade pose order"
+            );
+            // Remove the bind-pose spacing between adjacent bones. The
+            // runtime places each vertex pair using that bone's sampled pose.
+            vert.position.x = 0.;
+            vert.uv = glam::Vec2::from_array(uv[i]);
+        }
+        let (mat, strip) = mesh.strips.pop_first().context("missing blade strip")?;
+        ensure!(mesh.strips.is_empty(), "unexpected blade materials");
+        mesh.strips.insert(0, strip);
+        let mat = model
+            .materials()
+            .nth(mat as usize)
+            .context("missing blade material")?;
+        let [slot] = mat.texture_indices.as_slice() else {
+            anyhow::bail!("unexpected blade textures")
+        };
+        let tex_id = model
+            .textures()
+            .nth(*slot as usize)
+            .context("missing blade atlas")?
+            .image_id;
+        let atlas = format!(r"effect\frontier_db\blade_atlas{tex_id}");
+        if !assets
+            .iter()
+            .any(|a| a.kind == arc::TEXTURE && a.name == atlas)
+        {
+            let png = image::decode(&pac::member(&images, tex_id as usize)?)?;
+            assets.push(Asset {
+                name: atlas.clone(),
+                kind: arc::TEXTURE,
+                data: tex::rgba8_unmipped(png.width, png.height, &png.rgba)?,
+            });
+        }
+        let colors = obj.colors().map(|c| {
+            c.values
+                .iter()
+                .map(|v| v.map(|x| x / 255.))
+                .collect::<Vec<_>>()
+        });
+        let material = mhgu_resource::mrl::effect(mrl, "blade", &atlas, false)?;
+        let strip =
+            mhgu_resource::model::static_colored(&mesh, &["blade".into()], colors.as_deref())?;
+        for id in ids {
+            let name = format!(r"effect\frontier_db\m{id}");
+            assets.push(Asset {
+                name: name.clone(),
+                kind: arc::MATERIAL,
+                data: material.clone(),
+            });
+            assets.push(Asset {
+                name,
+                kind: arc::MODEL,
+                data: strip.clone(),
+            });
+        }
+    }
+    Ok(())
 }

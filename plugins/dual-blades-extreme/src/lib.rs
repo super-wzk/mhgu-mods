@@ -96,6 +96,7 @@ mod entry {
             return;
         }
         battle::install();
+        super::fx::install();
         super::hud::install();
     }
 }

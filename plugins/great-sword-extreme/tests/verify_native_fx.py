@@ -2,16 +2,16 @@
 import math
 import struct
 from unicorn import arm_const as arm
-from verify_style import Game, REPO, ROOT, NX, boot, hunters, DRAW_ROUTE
+from verify_style import Game, REPO, NX, boot, effect_routes, hunters, DRAW_ROUTE
 
 
 def resources(g):
-    routes = (ROOT / "target/assets/effects/routes.bin").read_bytes()
-    first, count = struct.unpack_from("<HH", routes, 9 * 4)
-    assert count == 4
+    routes = effect_routes()
+    aura = routes[9]
+    assert len(aura) == 4
     output, random = g.alloc(16), g.alloc(16)
     g.cpu.mem_write(random, struct.pack("<4f", 0.5, 0.5, 0.5, 0))
-    for layer in range(first, first + count):
+    for index, layer in enumerate(aura):
         efl = (NX / f"effect/frontier_gs/e{layer}.efl").read_bytes()
         assert efl[:8] == b"EFL\0\x06\x03\x12\x20"
         data = efl[48:]
@@ -27,7 +27,7 @@ def resources(g):
             g.run(0xAFB2BC, output, model + scale, frame, random, 0)
             x, y, z = struct.unpack("<3f", g.cpu.mem_read(output, 12))
             assert x == y and z == 1
-            if layer - first < 2:
+            if index < 2:
                 assert 2 <= x <= 3
             else:
                 assert abs(x - (2 + min(frame, 90) / 30)) < 0.001
@@ -37,13 +37,13 @@ def resources(g):
             if frame == 0:
                 assert rgba >> 24 == 0
             if frame >= 90:
-                assert rgba == (0x6040C0FF if layer - first < 2 else 0x602020E0)
+                assert rgba == (0x6040C0FF if index < 2 else 0x602020E0)
     # Three ordinary-charge tiers and the uppercut's fourth tier each have
     # their own native flash, with no dormant opaque models in the idle aura.
     for level in range(1, 5):
-        first, count = struct.unpack_from("<HH", routes, (9 + level) * 4)
-        assert count == 2
-        efl = (NX / f"effect/frontier_gs/e{first}.efl").read_bytes()[48:]
+        flash = routes[9 + level]
+        assert len(flash) == 2
+        efl = (NX / f"effect/frontier_gs/e{flash[0]}.efl").read_bytes()[48:]
         model = struct.unpack_from("<I", efl, 4)[0] >> 8
         assert efl[model + 3] == 1
         scale = struct.unpack_from("<H", efl, model + 306)[0]
@@ -52,6 +52,37 @@ def resources(g):
         g.run(0xAFB2BC, output, ptr + model + scale, 0, random, 0)
         assert struct.unpack("<f", g.cpu.mem_read(output, 4))[0] == 6 * (0.5 + level / 4)
     print("GU native EFL curves: charge alpha, colour, pulse and all four tier flashes passed")
+
+
+def binding_stack(g):
+    draw = 0xA956D8
+    ctx, gen, params = g.alloc(0x308E8), g.alloc(192), g.alloc(320)
+    g.cpu.mem_write(gen + 70, b"\x05")
+    g.put(gen + 52, params)
+    g.put(ctx + 4, 4096)
+    size = 344 + 4096 * 8
+    bindings = bytes(range(251)) * (size // 251) + bytes(range(size % 251))
+    g.cpu.mem_write(ctx + 0xAC, bindings)
+    for addr in (0x13EFE30, 0x13EFDD0):
+        g.stub(addr, lambda dest, src, n, _: g.cpu.mem_write(dest, bytes(g.cpu.mem_read(src, n))) or dest)
+
+    def packet(*_):
+        g.put(ctx + 0xAC, 55)
+        g.put(ctx + 0xAC + size - 4, 66)
+        g.put(ctx + 64, g.get(ctx + 64) + 4)
+        return 9
+
+    g.stub(g.originals[draw], packet)
+    for depth, namespace in [(4, "frontier_gs"), (5, "frontier_db")]:
+        g.cpu.mem_write(params + 80, f"effect\\{namespace}\\m2\0".encode())
+        g.put(ctx + 0x308E4, depth)
+        active = bytes(g.cpu.mem_read(ctx + 0xAC + size, depth * size))
+        cursor = g.get(ctx + 64)
+        assert g.run(draw, gen, ctx, 256) == 9
+        assert g.get(ctx + 0x308E4) == depth and g.get(ctx + 64) == cursor + 4
+        assert bytes(g.cpu.mem_read(ctx + 0xAC, size)) == bindings
+        assert bytes(g.cpu.mem_read(ctx + 0xAC + size, depth * size)) == active
+    print("GU draw at binding stack depths 4 and 5 preserves live and outer bindings")
 
 
 def emission(g):
@@ -101,7 +132,8 @@ def emission(g):
     g.put(model + 80, 1)
     g.put(model + 116, g.alloc(48))
     g.put(model + 120, 1)
-    context, cache, camera = g.alloc(24000), g.alloc(640), g.alloc(64)
+    # The shared draw hook uses GU's five binding snapshots and depth word.
+    context, cache, camera = g.alloc(0x308E8), g.alloc(640), g.alloc(64)
     g.put(cache + 112, model)
     g.put(cache + 140, 1)
     g.stub(0xBAE520, lambda *_: cache)
@@ -134,18 +166,20 @@ def emission(g):
     data = b""
     slot(stream, 76, lambda *_: len(data))
     slot(stream, 52, lambda owner, dest, n, _: g.cpu.mem_write(dest, data[:n]) or n)
-    routes = (ROOT / "target/assets/effects/routes.bin").read_bytes()
-    charge, count = struct.unpack_from("<HH", routes, 36)
-    flash, _ = struct.unpack_from("<HH", routes, 12 * 4)
-    fourth, fourth_count = struct.unpack_from("<HH", routes, 4)
-    third, _ = struct.unpack_from("<HH", routes, 8)
-    release, _ = struct.unpack_from("<HH", routes, 28)
-    ready, ready_count = struct.unpack_from("<HH", routes, 32)
+    routes = effect_routes()
+    fourth, third = routes[1], routes[2]
+    release, ready, charge = routes[7:10]
+    depth_layers = {release[2], release[5]}
+    impact_layers = {routes[i][0] for i in range(14, 19)}
+    counter_layers = set().union(routes[19], routes[20], routes[21])
+    debris = routes[17][0]
     # 4006:1 alternates an upright streak with two rising mist layers, five times.
     offsets = [(-50, -100), (-150, 0), (-100, 140), (-50, 210), (0, 280)]
-    assert fourth_count == 3 * len(offsets)
-    uppercut_mesh = {fourth+i: (0, 77, 35)[i % 3] for i in range(fourth_count)}
-    uppercut_mesh.update({third: 77, third + 1: 35})
+    assert len(fourth) == 3 * len(offsets)
+    uppercut_mesh = {layer: (0, 77, 35)[i % 3] for i, layer in enumerate(fourth)}
+    uppercut_mesh.update({third[0]: 77, third[1]: 35})
+    sampled = {0, charge[0], charge[2], routes[12][0]}
+    sampled.update(ready, depth_layers, impact_layers, counter_layers, uppercut_mesh)
     for path in sorted((NX / "effect/frontier_gs").glob("e*.efl")):
         data = path.read_bytes()
         lists, joints = struct.unpack_from("<HH", data, 16)
@@ -156,10 +190,9 @@ def emission(g):
         joint = struct.unpack_from("<I", data, 48 + lists * 16)[0]
         assert 16 * lists + 4 * joints <= joint <= len(data) - 48 - 112, path
         layer = int(path.stem[1:])
-        following = ready <= layer < ready + ready_count
-        depth = layer in (release + 2, release + 5)
-        if not following and not depth and layer not in (0, charge, charge + 2, flash) and layer not in uppercut_mesh:
+        if layer not in sampled:
             continue
+        following = layer in ready
         resource = g.alloc(160)
         assert g.run(0xB5C5CC, resource, stream) == 1
         unit = g.alloc(528)
@@ -172,14 +205,15 @@ def emission(g):
         assert g.get(native_joint + 260) == g.get(resource + 104) + joint
         assert struct.unpack("<3f", g.cpu.mem_read(native_joint + 240, 12)) == (1, 1, 1)
         g.put(unit + 272, 1)
-        fourth_wave = fourth <= layer < fourth + fourth_count
-        delay = ((layer - fourth) // 3) * 4 if fourth_wave else 0
+        fourth_wave = layer in fourth
+        delay = (fourth.index(layer) // 3) * 4 if fourth_wave else 0
         if fourth_wave:
             # GU's root matrix at a quarter turn in a non-origin area.
             g.cpu.mem_write(unit + 288, struct.pack(
                 "<16f", 0,0,-1,0, 0,1,0,0, 1,0,0,0, 1200,85,-700,1))
         visible = False
-        for frame in range(91 if charge <= layer < charge + count else 30):
+        debris_positions = []
+        for frame in range(91 if layer in charge else 30):
             g.run(0x9B9668, unit)
             if following:
                 # Move the GU joint after the native particle has already been born.
@@ -188,8 +222,13 @@ def emission(g):
             g.run(0xA5A48C, gen)
             g.run(0x9B975C, unit)
             g.run(0xA94C10, gen)
-            depth_age = frame + 1 - (6 if layer == release + 5 else 0)
-            if depth and depth_age in (6, 7, 8):
+            if layer == debris and frame in (2, 3):
+                submissions.clear()
+                g.run(0xA956D8, gen, context, 256)
+                (position, _), = submissions
+                debris_positions.append(position)
+            depth_age = frame + 1 - (6 if layer == release[5] else 0)
+            if layer in depth_layers and depth_age in (6, 7, 8):
                 g.cpu.mem_write(camera, struct.pack(
                     "<16f", 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,1000,1))
                 submissions.clear()
@@ -197,7 +236,7 @@ def emission(g):
                 (position, _), = submissions
                 assert math.dist(position, (0, 0, 62. * (depth_age - 6))) < 0.01, (
                     layer, depth_age, position)
-            if (following and frame in (6, 9)) or (layer == release + 2 and frame in (3, 5)):
+            if (following and frame in (6, 9)) or (layer == release[2] and frame in (3, 5)):
                 x = 180 if following and frame >= 8 else 0
                 g.cpu.mem_write(camera, struct.pack("<16f", 1,0,0,0, 0,1,0,0, 0,0,1,0, x,0,1000,1))
                 submissions.clear()
@@ -225,7 +264,7 @@ def emission(g):
                     g.run(0xA956D8, gen, context, 256)
                     normal, = normals
                     if fourth_wave:
-                        local_x, local_z = offsets[(layer - fourth) // 3]
+                        local_x, local_z = offsets[fourth.index(layer) // 3]
                         rise = 0 if mesh == 0 else 5 * 200 / 32
                         (world, _), = submissions
                         assert math.dist(world, (1200 + local_z, 85 + rise, -700 - local_x)) < 0.01, (layer, world)
@@ -238,11 +277,26 @@ def emission(g):
                 alpha = g.get(node + 260) >> 24
                 size = struct.unpack("<3f", g.cpu.mem_read(node + 224, 12))
                 assert all(math.isfinite(v) for v in size)
-                visible |= alpha > 0 and all(v > 0 for v in size)
-                if charge <= layer < charge + count:
+                # Some source shockwaves mirror the mesh with negative X scale.
+                scaled = all(v != 0 for v in size) if layer in counter_layers else all(v > 0 for v in size)
+                if alpha > 0 and scaled and not visible:
+                    if layer in counter_layers:
+                        submissions.clear()
+                        g.run(0xA956D8, gen, context, 256)
+                        assert submissions, path
+                        mesh = NX / g.string(g.get(gen + 52) + 80).replace("\\", "/")
+                        material = mesh.with_suffix(".mrl").read_bytes()
+                        tex_slot = struct.unpack_from("<I", material, 20)[0] + 12
+                        tex = material[tex_slot:tex_slot+64].split(b"\0")[0].decode().replace("\\", "/")
+                        assert (NX / (tex + ".tex")).is_file()
+                    visible = True
+                if layer in charge:
                     assert alpha <= 96
                 node = g.get(node + 4)
         assert visible, path
+        if layer == debris:
+            a, b = debris_positions
+            assert abs(b[0] - a[0] - 7.2) < 0.02 and abs(b[2] - a[2] - 6.6) < 0.02 and b[1] > a[1], (a, b)
     print("GU native EFL loading, emission and uppercut camera-facing transforms passed")
 
 
@@ -274,5 +328,6 @@ def draw(g):
 if __name__ == "__main__":
     elf = (REPO / "mhgu/main.elf").read_bytes()
     resources(Game(elf))
+    binding_stack(boot(elf, None, order=("registry",)))
     emission(boot(elf, b"[Weapons]\n0=1\n"))
     draw(boot(elf, b"[Weapons]\n0=1\n"))

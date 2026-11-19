@@ -23,6 +23,9 @@ impl Attack {
     /// Disable mounting properties inherited from the HDP row.
     pub const NO_MOUNT: u32 = 1 << 30;
 
+    /// Give this strike zero attacker hitstop when GU resolves its contact.
+    pub const NO_ATTACKER_HITSTOP: u32 = 1 << 29;
+
     /// Submit a style strike through the same collision and weapon adjustment
     /// path as GU's weapon action descriptors.
     ///
