@@ -55,13 +55,21 @@ pub(super) unsafe extern "C" fn submit(actor: u32, attack: *const Attack) -> u32
         // Feed power to the constructor before GU applies weapon modifiers.
         data.row[0] = 1 << 16;
         data.row[1] = (data.row[1] & 0xffff0000) | u32::from(attack.power);
+        if attack.flags & Attack::NO_MOUNT != 0 {
+            // HDP offsets 8, 12 and 51 feed the hit type, flags and buildup.
+            if matches!(data.row[2] as u8, 34..=36 | 73) {
+                data.row[2] = (data.row[2] & !0xff) | 1;
+            }
+            data.row[3] &= 0x7fff_ffff;
+            data.row[12] &= 0x00ff_ffff;
+        }
         if attack.shape != 0 {
             data.row[8] &= !0xff;
             hit_shape.write(attack.shape);
         }
         let previous = HIT_DATA.swap(ptr::from_mut(&mut data), Ordering::AcqRel);
-        let hit = actor + 12320;
-        let mut flags = attack.flags;
+        let hit = actor + 12320 + 184 * u32::from(attack.flags & Attack::SECONDARY != 0);
+        let mut flags = attack.flags & !(Attack::SECONDARY | Attack::NO_MOUNT);
         if ((actor + 10057) as *const u8).read() & 8 != 0 {
             flags |= 0x10;
         }
@@ -81,9 +89,12 @@ pub(super) unsafe extern "C" fn submit(actor: u32, attack: *const Attack) -> u32
                 hit_flags.write(hit_flags.read() | 0x08000000);
             }
             let vtable = (actor as *const *const u32).read();
-            let adjust: unsafe extern "C" fn(u32, u32, u32, u32, u32) -> u32 =
-                core::mem::transmute(vtable.add(1992 / 4).read());
-            adjust(actor, hit, 1, index, flags);
+            let adjust = vtable.add(1992 / 4).read();
+            if adjust != 0 {
+                let adjust: unsafe extern "C" fn(u32, u32, u32, u32, u32) -> u32 =
+                    core::mem::transmute(adjust);
+                adjust(actor, hit, 1, index, flags);
+            }
         });
         1
     }

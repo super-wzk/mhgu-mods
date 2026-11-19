@@ -274,5 +274,5 @@ def draw(g):
 if __name__ == "__main__":
     elf = (REPO / "mhgu/main.elf").read_bytes()
     resources(Game(elf))
-    emission(boot(elf, b"[General]\nstyle=1\n"))
-    draw(boot(elf, b"[General]\nstyle=1\n"))
+    emission(boot(elf, b"[Weapons]\n0=1\n"))
+    draw(boot(elf, b"[Weapons]\n0=1\n"))

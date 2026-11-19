@@ -47,8 +47,8 @@ impl Sheet {
         IVec2::new(cols, (n + cols - 1) / cols)
     }
 
-    pub fn path(&self) -> String {
-        format!(r"effect\frontier_gs\r{}", self.id)
+    pub fn path(&self, namespace: &str) -> String {
+        format!(r"effect\{namespace}\r{}", self.id)
     }
 
     pub fn uv_offsets(&self) -> impl ExactSizeIterator<Item = Vec2> {

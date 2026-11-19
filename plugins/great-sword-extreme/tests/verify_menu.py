@@ -36,7 +36,7 @@ def verify_status(g):
 
 def verify():
     elf = (REPO / "mhgu/main.elf").read_bytes()
-    g = boot(elf, b"[General]\nstyle = 0\n")
+    g = boot(elf, b"[Weapons]\n0 = 0\n11 = 2\n")
     _, eq, _ = hunters(g)
     ui, panel, info, widgets = [g.alloc(256) for _ in range(4)]
     pad = g.alloc(28000)
@@ -118,7 +118,7 @@ def verify():
     press(0x20)  # highlight No
     assert press(0x2000) == 1 and row() == 6 and g.run(selected, 0) == 0
     assert press(0x2000) == 2 and press(0x2000) == 5
-    assert g.run(selected, 0) == 1 and g.files[CONFIG].endswith(b"= 1\n")
+    assert g.run(selected, 0) == 1 and g.files[CONFIG] == b"[Weapons]\n0 = 1\n11 = 2\n"
     assert g.cpu.mem_read(eq + 1241, 1) == b"\x05"  # custom selection preserves Valor
     g.cpu.mem_write(eq + 576, struct.pack("<3H", 4, 5, 0))
     g.run(0x557D90, ui + 12, 2)
@@ -134,7 +134,7 @@ def verify():
     assert row() == 0 and press(0x2000) == 2
     assert press(0x2000) == 3 and press(0) == 4
     assert g.run(selected, 0) == 0 and g.cpu.mem_read(eq + 1241, 1) == b"\0"
-    assert g.files[CONFIG].endswith(b"= 0\n")
+    assert g.files[CONFIG] == b"[Weapons]\n11 = 2\n"
     # GU accepts reselecting its currently equipped native style without opening a dialog.
     open_box()
     press(0x10)  # up from Guild wraps to the custom row
@@ -146,7 +146,7 @@ def verify():
     open_box()
     press(0x40)
     assert row() == 0 and press(0x2000) == 5
-    assert g.run(selected, 0) == 0 and g.files[CONFIG].endswith(b"= 0\n")
+    assert g.run(selected, 0) == 0 and g.files[CONFIG] == b"[Weapons]\n11 = 2\n"
     # More than two extra styles: the next native page uses the same eight widgets.
     for id_ in (40, 41):
         assert g.run(register, style_descriptor(g, id_, 0), 0, 0) == 0

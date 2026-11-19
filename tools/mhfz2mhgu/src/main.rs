@@ -1,6 +1,7 @@
 mod charge;
 mod emc;
 mod hunter;
+mod hunter_hud;
 mod hunter_fx;
 mod model;
 mod motion;
@@ -72,6 +73,39 @@ enum Command {
     GreatSwordActions {
         /// Frontier dat directory (mhfdat.bin and mhfsdt.bin)
         dat: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Convert the paired Frontier dual-blade motion directories.
+    DualBladesMotions {
+        dat: PathBuf,
+        #[arg(long)]
+        female: bool,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Extract Frontier dual-blade moves, contacts and weapon parameters.
+    DualBladesActions {
+        dat: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Convert the Frontier dual-blade motion sound timeline and request banks.
+    DualBladesSound {
+        dat: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Build the private flame gauge and blade-polish sprite atlas for GU.
+    DualBladesHud {
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Convert the Frontier dual-blade evade particle bank.
+    DualBladesEffects {
+        dat: PathBuf,
+        #[arg(long)]
+        gu_weapon: PathBuf,
         #[arg(short, long)]
         output: PathBuf,
     },
@@ -244,6 +278,25 @@ fn main() -> Result<()> {
             female,
             output,
         } => save(&output, hunter::great_sword(&dat, female)?),
+        Command::DualBladesMotions {
+            dat,
+            female,
+            output,
+        } => save(&output, hunter::dual_blades(&dat, female)?),
+        Command::DualBladesActions { dat, output } => {
+            save(&output, hunter::dual_blades_actions(&dat)?)
+        }
+        Command::DualBladesSound { dat, output } => {
+            let (assets, timeline) = sound::dual_blades(&dat)?;
+            save(&output.with_extension("fdse"), timeline)?;
+            save(&output, mhgu_resource::arc::encode(&assets)?)
+        }
+        Command::DualBladesHud { output } => save(&output, hunter_hud::dual_blades()?),
+        Command::DualBladesEffects {
+            dat,
+            output,
+            gu_weapon,
+        } => hunter_fx::dual_blades(&dat, &output, &gu_weapon),
         Command::Model { monster, output } => {
             let (_, pair, rig) = monster.open()?;
             save(&output, model::convert(&pac::member(&pair, 0)?, &rig)?)

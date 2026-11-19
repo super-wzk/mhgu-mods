@@ -5,16 +5,19 @@
 从仓库根目录运行 `python3 plugins/style-registry/package.py`，把生成的 `dist/style-registry` 和需要的武器风格插件分别安装到 mods 目录。装备箱的选择立即生效并保存到 Forge 的 `savedata:/style_registry.ini`（MHGURecomp 通常为 `save/save_0/style_registry.ini`）。该设置在角色之间共享；自定义编号不会写入 GU 的装备数据。也可关闭游戏后直接编辑：
 
 ```ini
-[General]
-style = 1
+[Weapons]
+0 = 1
+11 = 2
 ```
 
 | 配置值 | 实际效果 |
 | --- | --- |
 | `0`（默认） | 按 GU 装备的原版风格游玩。 |
-| `1` | 安装极型大剑且装备大剑时启用它已实现的动作。 |
-| 其他已注册编号 | 装备该插件声明的武器时启用。 |
-| 未注册、格式错误或武器不匹配 | 本次按 `0` 处理；不覆盖配置，切回匹配的武器会重新生效。 |
+| `1` | 极之型大剑，对应武器编号 `0`。 |
+| `2` | 极之型双剑，对应武器编号 `11`。 |
+| 缺项、未注册、格式错误或武器不匹配 | 当前武器按 `0` 处理。 |
+
+每种武器分别保存。只有旧 `[General]` 段的配置按空配置处理，确认一次风格选择后写入新格式。
 
 通过 [SDK 风格注册表](../../crates/mhgu-sdk/src/style/registry.rs) 声明常驻 `static Style`，填入独占编号（1–65535）、GU 武器类型、动作及回调。注册器先初始化，内容插件像[极型大剑](../great-sword-extreme/src/lib.rs)一样，在 Forge 初始化入口使用 `registry.register(&STYLE, name, description)` 登记一次。编号冲突返回 `Conflict`，保留先注册的声明。用 `registry.selected(weapon)` 查询实际启用的编号。
 

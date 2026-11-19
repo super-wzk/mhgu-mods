@@ -21,6 +21,12 @@ use std::{
 const BANKS: &[(u16, &[u16])] = &[(4006, &[0, 1, 2, 3, 4, 5, 6]), (4022, &[5, 21])];
 const CHARGE_AURA_MESH: u16 = 66;
 
+#[derive(Clone, Copy)]
+enum WeaponEffect {
+    GreatSword,
+    DualBlades,
+}
+
 fn half(data: &[u8], at: usize) -> Result<u16> {
     Ok(u16::from_le_bytes(
         data.get(at..at + 2)
@@ -81,14 +87,26 @@ fn charge_aura_texture(source: &image::Image) -> Result<Vec<u8>> {
 }
 
 pub fn extract(dat: &Path, out: &Path, gu_weapon: &Path) -> Result<()> {
+    convert(dat, out, gu_weapon, WeaponEffect::GreatSword)
+}
+
+pub fn dual_blades(dat: &Path, out: &Path, gu_weapon: &Path) -> Result<()> {
+    convert(dat, out, gu_weapon, WeaponEffect::DualBlades)
+}
+
+fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect) -> Result<()> {
+    let (namespace, effects): (_, &[(u16, &[u16])]) = match weapon_effect {
+        WeaponEffect::GreatSword => ("frontier_gs", BANKS),
+        WeaponEffect::DualBlades => ("frontier_db", &[(4021, &[1])]),
+    };
     let bundle = pac::decode(read(&dat.join("effect.bin"))?)?;
     let banks = pac::member(&bundle, 18)?;
     let directory = pac::member(&banks, 0)?;
     let gu = read(gu_weapon)?;
     let weapon = arc::entries(&gu)?;
-    let mut playback = native::Compiler::new(&weapon, particle_proof(&weapon)?)?;
+    let mut playback = native::Compiler::new(&weapon, particle_proof(&weapon)?, namespace)?;
     fs::create_dir_all(out)?;
-    for &(id, selectors) in BANKS {
+    for &(id, selectors) in effects {
         let slot = directory
             .get(4..)
             .context("short effect index")?
@@ -100,7 +118,14 @@ pub fn extract(dat: &Path, out: &Path, gu_weapon: &Path) -> Result<()> {
         playback.bank(&data, id, selectors)?;
         save(&out.join(format!("{id}.bank")), data)?;
     }
-    playback.charge()?;
+    match weapon_effect {
+        WeaponEffect::GreatSword => playback.charge()?,
+        WeaponEffect::DualBlades => {
+            let mhfdat = pac::decode(read(&dat.join("mhfdat.bin"))?)?;
+            let params = crate::hunter::dual_blades_parameters(&mhfdat)?;
+            playback.dual_blades(params)?;
+        }
+    }
     let pair = pac::member(&bundle, 0)?;
     let bytes = pac::member(&pair, 0)?;
     let model = Fmod::parse(&bytes)?;
@@ -152,8 +177,8 @@ pub fn extract(dat: &Path, out: &Path, gu_weapon: &Path) -> Result<()> {
             .get(*ordinal as usize)
             .context("missing FX texture binding")?
             .image_id;
-        let path = format!(r"effect\frontier_gs\m{id}");
-        let atlas = format!(r"effect\frontier_gs\t{img}");
+        let path = format!(r"effect\{namespace}\m{id}");
+        let atlas = format!(r"effect\{namespace}\t{img}");
         let png = match atlases.entry(img) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
@@ -198,7 +223,7 @@ pub fn extract(dat: &Path, out: &Path, gu_weapon: &Path) -> Result<()> {
             data: mhgu_resource::model::static_colored(&mesh, &names, colors.as_deref())?,
         });
         for sheet in playback.sheets.iter().filter(|s| usize::from(s.mesh) == id) {
-            let path = sheet.path();
+            let path = sheet.path(namespace);
             assets.push(Asset {
                 name: path.clone(),
                 kind: arc::TEXTURE,

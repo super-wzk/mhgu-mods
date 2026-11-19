@@ -1,7 +1,7 @@
 //! Frontier curves compiled to GU EFL model particles. No playback code is
 //! embedded in the plugin: A9958C/A9A280 animate model particles, AFB2BC and
 //! AF938C evaluate their vector/colour keys, and AEDE08 owns their lifetime.
-use super::{BANKS, CHARGE_AURA_MESH, half, sheet::Sheet};
+use super::{CHARGE_AURA_MESH, half, sheet::Sheet};
 use anyhow::{Context, Result, ensure};
 use mhgu_resource::arc::{self, Asset};
 use std::collections::BTreeSet;
@@ -168,6 +168,32 @@ struct Layer {
     camera_depth: Keys,
 }
 
+impl Layer {
+    // The legacy common effects use the hunter's 30 Hz clock.
+    fn legacy(mesh: u16, life: u16) -> Self {
+        Self {
+            mesh,
+            frames_per_second: 30.,
+            blend: 0,
+            delay: 0,
+            life,
+            count: 1,
+            position: [0.; 3],
+            spread: [0.; 3],
+            rotation: vec![(0, [0.; 3])],
+            rotation_range: [0.; 3],
+            scale: vec![(0, [1.; 3])],
+            scale_range: [0.; 3],
+            movement: vec![(0, [0.; 3])],
+            color: vec![(0, [255; 4])],
+            uv_speed: [0.; 2],
+            pulse: false,
+            facing: Facing::World,
+            camera_depth: Vec::new(),
+        }
+    }
+}
+
 pub(super) struct Compiler {
     common: Vec<u8>,
     model_flags: u32,
@@ -179,9 +205,14 @@ pub(super) struct Compiler {
     assets: Vec<Asset>,
     pub(super) meshes: BTreeSet<usize>,
     pub(super) sheets: Vec<Sheet>,
+    namespace: &'static str,
 }
 impl Compiler {
-    pub fn new(weapon: &[arc::Entry<'_>], mut proof: [u8; 160]) -> Result<Self> {
+    pub fn new(
+        weapon: &[arc::Entry<'_>],
+        mut proof: [u8; 160],
+        namespace: &'static str,
+    ) -> Result<Self> {
         let efl = weapon
             .iter()
             .find(|e| e.kind == EFL && e.name == r"effect\pl\w00\w00_000")
@@ -229,6 +260,7 @@ impl Compiler {
             assets: vec![],
             meshes: BTreeSet::new(),
             sheets: Vec::new(),
+            namespace,
         })
     }
     fn layer(&mut self, mut layer: Layer, sheet: Option<Sheet>) -> Result<()> {
@@ -238,7 +270,7 @@ impl Compiler {
             .count
             .checked_add(1)
             .context("too many effect layers")?;
-        let path = format!(r"effect\frontier_gs\e{id}");
+        let path = format!(r"effect\{}\e{id}", self.namespace);
         // One particle directory entry, followed by one joint offset.
         let mut data = vec![0; 20];
         let mut common = self.common.clone();
@@ -268,8 +300,8 @@ impl Compiler {
         float(&mut model, 32, 1.);
         float(&mut model, 40, 1.);
         let mesh = match &sheet {
-            Some(sheet) => sheet.path(),
-            None => format!(r"effect\frontier_gs\m{}", layer.mesh),
+            Some(sheet) => sheet.path(self.namespace),
+            None => format!(r"effect\{}\m{}", self.namespace, layer.mesh),
         };
         model[80..80 + mesh.len()].copy_from_slice(mesh.as_bytes());
         // A949F8 reads Euler order 4 and travel axis 6 (disabled).
@@ -672,6 +704,74 @@ impl Compiler {
         }
         Ok(())
     }
+
+    pub fn dual_blades(&mut self, params: &[u8]) -> Result<()> {
+        // After 4021:1, keep the common routes in the order used by fx.rs.
+        // 81F867C0 selects one of three sparks and draws 76 at the blade.
+        for mesh in 32..=34 {
+            let first = self.count;
+            let mut spark = Layer::legacy(mesh, 4);
+            spark.position = [0., 0., 50.];
+            spark.facing = Facing::Camera;
+            spark.scale = vec![
+                (0, [0.5, 0.5, 1.]),
+                (1, [0.5, 0.5, 1.]),
+                (2, [1.; 3]),
+                (4, [0.2, 0.2, 1.]),
+            ];
+            self.layer(spark, None)?;
+            let mut rays = Layer::legacy(76, 12);
+            rays.color.push((12, [255, 255, 255, 0]));
+            self.layer(rays, None)?;
+            self.route(first);
+        }
+
+        // 81F8BF88 type 18 requests four simultaneous flashes at node 14.
+        let first = self.count;
+        let mut flash = Layer::legacy(CHARGE_AURA_MESH, 14);
+        flash.count = 4;
+        flash.blend = 1;
+        flash.facing = Facing::Camera;
+        flash.color = vec![(0, [255, 255, 255, 96]), (14, [255, 255, 255, 0])];
+        self.layer(flash, None)?;
+        self.route(first);
+
+        // 81F89FAC type 1: the timed white trail at the sharpening slash.
+        let first = self.count;
+        let mut slash = Layer::legacy(1, 8);
+        slash.scale = vec![(0, [0.25; 3]), (8, [0.1; 3])];
+        slash.color.push((8, [255, 255, 255, 0]));
+        self.layer(slash, None)?;
+        self.route(first);
+
+        // The original shader colours are ARGB. The extreme variants come
+        // from the dual-blades parameter block at offsets 172 and 176.
+        let rgba = |offset| {
+            let [alpha, red, green, blue] = word(params, offset).to_be_bytes();
+            [red, green, blue, alpha]
+        };
+        for (glow_color, trail_color) in [
+            ([255, 51, 51, 51], [255, 51, 51, 255]),
+            ([255, 100, 20, 51], [255, 100, 20, 255]),
+            (rgba(172), rgba(176)),
+        ] {
+            let first = self.count;
+            let mut glow = Layer::legacy(59, 8);
+            // Both blades refresh before the previous pair fades. Composite their
+            // coverage before GU's bloom pass, as for the sustained charge aura.
+            glow.blend = 1;
+            glow.color = vec![(0, glow_color), (6, glow_color), (8, [0; 4])];
+            self.layer(glow, None)?;
+            let mut trail = Layer::legacy(2, 8);
+            trail.blend = 1;
+            trail.scale = vec![(0, [0.18; 3]), (8, [0.08; 3])];
+            trail.color = vec![(0, trail_color), (8, [0; 4])];
+            self.layer(trail, None)?;
+            self.route(first);
+        }
+        Ok(())
+    }
+
     pub fn finish(mut self) -> (Vec<Asset>, Vec<u8>) {
         let mut pel = b"PEL\0".to_vec();
         for n in [15u32, 0, u32::from(self.count)] {
@@ -680,14 +780,10 @@ impl Compiler {
         pel.extend(self.rows);
         pel.extend(0u32.to_le_bytes());
         self.assets.push(Asset {
-            name: r"effect\frontier_gs\particles".into(),
+            name: format!(r"effect\{}\particles", self.namespace),
             kind: PEL,
             data: pel,
         });
-        debug_assert_eq!(
-            self.routes.len(),
-            (BANKS.iter().map(|(_, v)| v.len()).sum::<usize>() + 5) * 4
-        );
         (self.assets, self.routes)
     }
 }

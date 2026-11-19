@@ -7,6 +7,15 @@ fn great_sword_art(slot: u16) -> bool {
     matches!(slot, 51..=57 | 62..=65 | 90 | 91)
 }
 
+fn weapon_art(weapon: u32, slot: u16) -> bool {
+    match weapon {
+        0 => great_sword_art(slot),
+        // w11_m's four art groups and the continuations in 11BB0F8.
+        11 => matches!(slot, 39..=43 | 45..=56 | 76..=83 | 86..=93),
+        _ => false,
+    }
+}
+
 pub(super) unsafe fn allows_native_art(actor: u32, style: &Style, slot: u16, flags: u16) -> bool {
     if style.art_slots == 0 {
         return false;
@@ -14,33 +23,46 @@ pub(super) unsafe fn allows_native_art(actor: u32, style: &Style, slot: u16, fla
     if flags & 0x40 != 0 {
         return true;
     }
-    if style.weapon != 0 || !great_sword_art(slot) {
+    if !weapon_art(style.weapon, slot) {
         return false;
     }
     let (group, current) = unsafe { action::current(actor) };
-    group == action::GROUP && great_sword_art(current)
+    group == action::GROUP && weapon_art(style.weapon, current)
+}
+
+pub(super) unsafe fn resolve_stock_slot(
+    actor: u32,
+    style: &Style,
+    slot: u16,
+    flags: u16,
+) -> Option<u16> {
+    // The shared weapon dispatcher (2B81A0) owns these mounted knife attacks.
+    if matches!(slot, 803..=805 | 810) {
+        return Some(slot);
+    }
+    unsafe {
+        resolve_request(
+            actor,
+            style,
+            ActionRequest {
+                group: action::GROUP,
+                slot,
+                flags,
+                draw_route: false,
+            },
+        )
+    }
 }
 
 unsafe fn keeps_native_slot(actor: u32, style: &Style, slot: u16, flags: u16) -> bool {
-    slot < action::FIRST
-        && unsafe {
-            resolve_request(
-                actor,
-                style,
-                ActionRequest {
-                    group: action::GROUP,
-                    slot,
-                    flags,
-                    draw_route: false,
-                },
-            )
-        } == Some(slot)
+    slot < action::FIRST && unsafe { resolve_stock_slot(actor, style, slot, flags) } == Some(slot)
 }
 
 #[forge::hook(offset = 0x1160650)]
 unsafe fn great_sword_change(actor: u32, group: u32, slot: u32, flags: u32) -> u32 {
     unsafe {
-        if let Some(style) = local_style(actor).filter(|s| s.independent && s.controller.is_some())
+        if let Some(style) =
+            local_style(actor).filter(|s| s.weapon == 0 && s.independent && s.controller.is_some())
         {
             let (group_id, slot_id, flag_bits) = (group as u16, slot as u16, flags as u16);
             let entering_native = group_id == action::GROUP
@@ -79,14 +101,10 @@ static DRAW_ACTIONS: [[u16; 3]; 256] = {
     routes
 };
 
-#[forge::hook(offset = 0x115fcf4)]
-unsafe fn great_sword_draw_route(actor: u32, kind: u32) -> u32 {
-    let native = original!(actor, kind);
+unsafe fn draw_route(actor: u32, native: u32, weapon: u32) -> u32 {
     unsafe {
-        // Routes 2 and 4 explicitly request draw-guard. Both can carry X+A
-        // in the resolved weapon commands.
-        if matches!(kind, 0 | 1 | 3)
-            && let Some(style) = local_style(actor).filter(|s| s.controller.is_some())
+        if let Some(style) =
+            local_style(actor).filter(|s| s.weapon == weapon && s.controller.is_some())
             && let Some(&[group, slot, flags]) = (native as *const [u16; 3]).as_ref()
             && let Some(resolved) = resolve_request(
                 actor,
@@ -103,6 +121,22 @@ unsafe fn great_sword_draw_route(actor: u32, kind: u32) -> u32 {
         }
     }
     native
+}
+
+#[forge::hook(offset = 0x115fcf4)]
+unsafe fn great_sword_draw_route(actor: u32, kind: u32) -> u32 {
+    let native = original!(actor, kind);
+    // Routes 2 and 4 explicitly request draw-guard.
+    if matches!(kind, 0 | 1 | 3) {
+        return unsafe { draw_route(actor, native, 0) };
+    }
+    native
+}
+
+#[forge::hook(offset = 0x11ba2a0)]
+unsafe fn dual_blades_draw_route(actor: u32, kind: u32) -> u32 {
+    let native = original!(actor, kind);
+    unsafe { draw_route(actor, native, 11) }
 }
 
 /// Arm and consume GS's next-strike state around the native hit constructor
@@ -125,4 +159,5 @@ pub(super) unsafe fn strike(actor: u32, style: &Style, flags: u32, submit: impl 
 pub(super) fn install(base: u32) {
     forge::install_hook!(base, great_sword_change);
     forge::install_hook!(base, great_sword_draw_route);
+    forge::install_hook!(base, dual_blades_draw_route);
 }

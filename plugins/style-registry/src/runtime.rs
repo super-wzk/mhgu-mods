@@ -7,6 +7,7 @@ use core::{
 };
 mod attack;
 mod commands;
+mod effect;
 mod guard;
 mod menu;
 mod weapon;
@@ -22,22 +23,10 @@ struct Entry {
     next: *mut Entry,
 }
 
-impl Entry {
-    // Caller has already resolved the local hunter.
-    unsafe fn matches_weapon(&self, actor: u32) -> bool {
-        unsafe {
-            let equipment = ((actor + 5060) as *const u32).read();
-            equipment != 0
-                && u32::from(((equipment + 1236) as *const u8).read()) == self.style.weapon
-        }
-    }
-}
-
-// Published entries live until exit. The equipment box can enumerate the list;
-// motion dispatch reads one cached pointer, with no allocation or lock.
+// Published entries live until exit. Zero selections skip the list entirely.
 static HEAD: AtomicPtr<Entry> = AtomicPtr::new(ptr::null_mut());
-static REQUESTED: AtomicU32 = AtomicU32::new(0);
-static ACTIVE: AtomicPtr<Entry> = AtomicPtr::new(ptr::null_mut());
+static REQUESTED: [AtomicU32; crate::config::WEAPONS] =
+    [const { AtomicU32::new(0) }; crate::config::WEAPONS];
 
 unsafe extern "C" fn register(
     raw: *const Style,
@@ -47,7 +36,10 @@ unsafe extern "C" fn register(
     let Some(style) = (unsafe { raw.as_ref() }) else {
         return 1;
     };
-    if !(1..=65535).contains(&style.id) || style.weapon > 14 || style.art_slots > 3 {
+    if !(1..=65535).contains(&style.id)
+        || style.weapon as usize >= REQUESTED.len()
+        || style.art_slots > 3
+    {
         return 1;
     }
     let mut head = HEAD.load(Ordering::Acquire);
@@ -76,12 +68,7 @@ unsafe extern "C" fn register(
             next: head,
         }));
         match HEAD.compare_exchange(head, node, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => {
-                if REQUESTED.load(Ordering::Acquire) == style.id {
-                    ACTIVE.store(node, Ordering::Release);
-                }
-                return 0;
-            }
+            Ok(_) => return 0,
             Err(current) => {
                 drop(unsafe { Box::from_raw(node) });
                 head = current;
@@ -96,26 +83,28 @@ fn entries(weapon: u32) -> impl Iterator<Item = &'static Entry> {
         .filter(move |e| e.style.weapon == weapon)
 }
 
-fn choose(entry: Option<&Entry>) {
+fn choose(weapon: u32, entry: Option<&Entry>) {
+    let Some(requested) = REQUESTED.get(weapon as usize) else {
+        return;
+    };
     let id = entry.map_or(0, |e| e.style.id);
-    REQUESTED.store(id, Ordering::Release);
-    ACTIVE.store(
-        entry.map_or(ptr::null_mut(), |e| ptr::from_ref(e).cast_mut()),
-        Ordering::Release,
-    );
-    if !crate::config::save(id as u16) {
+    requested.store(id, Ordering::Release);
+    let selection = core::array::from_fn(|i| REQUESTED[i].load(Ordering::Acquire) as u16);
+    if !crate::config::save(selection) {
         forge::log::prelude::warn!("Style {} selected for this session; INI write failed", id);
     }
 }
 
-fn active() -> Option<&'static Entry> {
-    unsafe { ACTIVE.load(Ordering::Acquire).as_ref() }
+fn active(weapon: u32) -> Option<&'static Entry> {
+    let id = REQUESTED.get(weapon as usize)?.load(Ordering::Acquire);
+    if id == 0 {
+        return None;
+    }
+    entries(weapon).find(|entry| entry.style.id == id)
 }
 
 extern "C" fn selected(weapon: u32) -> u32 {
-    active()
-        .filter(|e| e.style.weapon == weapon)
-        .map_or(0, |e| e.style.id)
+    active(weapon).map_or(0, |e| e.style.id)
 }
 
 unsafe fn local_hunter() -> u32 {
@@ -130,12 +119,24 @@ unsafe fn local_hunter() -> u32 {
     }
 }
 
-unsafe fn local_style(actor: u32) -> Option<&'static Style> {
-    let entry = active()?;
-    unsafe {
-        (actor != 0 && local_hunter() == actor && entry.matches_weapon(actor))
-            .then_some(entry.style)
+unsafe fn actor_entry(actor: u32) -> Option<&'static Entry> {
+    if actor == 0 {
+        return None;
     }
+    unsafe {
+        let equipment = ((actor + 5060) as *const u32).read();
+        if equipment == 0 {
+            return None;
+        }
+        active(u32::from(((equipment + 1236) as *const u8).read()))
+    }
+}
+
+unsafe fn local_style(actor: u32) -> Option<&'static Style> {
+    if actor == 0 || unsafe { local_hunter() } != actor {
+        return None;
+    }
+    unsafe { actor_entry(actor) }.map(|e| e.style)
 }
 
 unsafe fn independent(actor: u32) -> bool {
@@ -173,17 +174,25 @@ static API: ServiceV1 = ServiceV1 {
 static LAST_ENTRY: AtomicPtr<Entry> = AtomicPtr::new(ptr::null_mut());
 static LAST_ACTOR: AtomicU32 = AtomicU32::new(0);
 
-unsafe fn controller_frame(actor: u32, weapon_dispatch: bool) -> u32 {
+unsafe fn controller_frame(actor: u32, custom_id: Option<u8>) -> u32 {
     unsafe {
-        let selected = active().filter(|e| e.style.controller.is_some());
-        if actor == 0
-            || (selected.is_none() && LAST_ENTRY.load(Ordering::Relaxed).is_null())
-            || actor != local_hunter()
+        if actor == 0 || actor != local_hunter() {
+            return PASS;
+        }
+        let selected = actor_entry(actor);
+        if let Some(id) = custom_id
+            && !selected.is_some_and(|entry| entry.style.actions.contains(id))
         {
             return PASS;
         }
-        let e = selected.filter(|entry| entry.matches_weapon(actor));
-        let entry = e.map_or(ptr::null_mut(), |e| ptr::from_ref(e).cast_mut());
+        let controller =
+            selected.and_then(|entry| entry.style.controller.map(|tick| (entry, tick)));
+        if controller.is_none() && LAST_ENTRY.load(Ordering::Relaxed).is_null() {
+            return PASS;
+        }
+        let entry = controller.map_or(ptr::null_mut(), |(entry, _)| {
+            ptr::from_ref(entry).cast_mut()
+        });
         let prev = LAST_ENTRY.swap(entry, Ordering::Relaxed);
         let owner = LAST_ACTOR.swap(actor, Ordering::Relaxed);
         if prev != entry || actor != owner {
@@ -193,11 +202,11 @@ unsafe fn controller_frame(actor: u32, weapon_dispatch: bool) -> u32 {
                 stop(if owner == actor { owner } else { 0 }, ptr::null());
             }
         }
-        let Some(tick) = e.and_then(|e| e.style.controller) else {
+        let Some((_, tick)) = controller else {
             return PASS;
         };
         let (group, slot) = action::current(actor);
-        if action::custom(group, slot) != weapon_dispatch {
+        if action::custom(group, slot) != custom_id.is_some() {
             return PASS;
         }
         // Keep the native dispatch prologue, including priority for a forced
@@ -228,7 +237,7 @@ unsafe fn controller_frame(actor: u32, weapon_dispatch: bool) -> u32 {
 }
 #[forge::hook(offset = 0x282da8)]
 unsafe fn dispatch(actor: u32) -> u32 {
-    let result = unsafe { crate::runtime::controller_frame(actor, false) };
+    let result = unsafe { crate::runtime::controller_frame(actor, None) };
     if result != mhgu_sdk::style::PASS {
         return result;
     }
@@ -241,14 +250,11 @@ unsafe fn weapon_dispatch(actor: u32) -> u32 {
     let Some(id) = action::custom_id(group, slot) else {
         return original!(actor);
     };
-    if active().is_some_and(|entry| entry.style.actions.contains(id)) {
-        let result = unsafe { controller_frame(actor, true) };
-        if result != PASS {
-            return result;
-        }
+    match unsafe { controller_frame(actor, Some(id)) } {
+        // Custom IDs have no entry in the retail weapon tables.
+        PASS => 0,
+        result => result,
     }
-    // Custom IDs have no entry in the retail weapon tables.
-    0
 }
 
 #[forge::hook(offset = 0x2ab670)]
@@ -281,18 +287,7 @@ unsafe fn resolve_weapon_slot(actor: u32, slot: u16, flags: u16) -> Option<u16> 
     if unsafe { weapon::allows_native_art(actor, style, slot, flags) } {
         return Some(slot);
     }
-    unsafe {
-        resolve_request(
-            actor,
-            style,
-            ActionRequest {
-                group: action::GROUP,
-                slot,
-                flags,
-                draw_route: false,
-            },
-        )
-    }
+    unsafe { weapon::resolve_stock_slot(actor, style, slot, flags) }
 }
 
 unsafe fn resolve_request(actor: u32, style: &Style, req: ActionRequest) -> Option<u16> {
@@ -325,7 +320,8 @@ unsafe fn game_style(actor: u32) -> u32 {
 }
 #[forge::hook(offset = 0x2a26c8)]
 unsafe fn art_ready(actor: u32, slot: u32) -> u32 {
-    if active().is_some_and(|entry| entry.style.art_slots == 0) && unsafe { independent(actor) } {
+    if unsafe { local_style(actor) }.is_some_and(|style| style.independent && style.art_slots == 0)
+    {
         return 0;
     }
     original!(actor, slot)
@@ -336,9 +332,8 @@ unsafe fn art_ready(actor: u32, slot: u32) -> u32 {
 #[forge::hook(offset = 0x2778ac)]
 unsafe fn art_capacity(manager: u32, style: u32) -> u32 {
     if NATIVE_MENU.load(Ordering::Acquire) == ARTS_MENU
-        && let Some(entry) = active()
+        && let Some(entry) = unsafe { actor_entry(local_hunter()) }
         && entry.style.art_slots != 0
-        && unsafe { local_style(local_hunter()) }.is_some()
     {
         return u32::from(entry.style.art_slots);
     }
@@ -358,7 +353,7 @@ unsafe fn valor_hud(widget: u32) -> u32 {
 
 unsafe fn update_valor_node(widget: u32) {
     unsafe {
-        let hide = independent(local_hunter());
+        let hide = actor_entry(local_hunter()).is_some_and(|entry| entry.style.independent);
         if !hide && HIDDEN_VALOR_NODE.load(Ordering::Relaxed) == 0 {
             return;
         }
@@ -393,8 +388,9 @@ unsafe fn update_valor_node(widget: u32) {
 
 #[forge::entry]
 fn start() {
-    let value = crate::config::load();
-    REQUESTED.store(value.into(), Ordering::Release);
+    for (requested, id) in REQUESTED.iter().zip(crate::config::load()) {
+        requested.store(id.into(), Ordering::Release);
+    }
     if !unsafe { registry::publish(&API) } {
         return;
     }
@@ -410,6 +406,7 @@ fn start() {
     forge::install_hook!(base, change_action);
     attack::install(base);
     commands::install(base);
+    effect::install(base);
     guard::install(base);
     weapon::install(base);
     menu::install(base);

@@ -1,6 +1,8 @@
 //! Custom hunter styles. ID zero always means GU's equipped native style.
 pub mod action;
 pub mod guard;
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub mod sound;
 
 /// Return this from a motion callback to let GU handle the request.
 pub const PASS: u32 = u32::MAX;

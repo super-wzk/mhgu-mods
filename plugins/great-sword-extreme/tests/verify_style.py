@@ -32,6 +32,7 @@ ART_CAPACITY = 0x2778AC
 VALOR_HUD = 0x639BD0
 FX_RELEASE = 0x32A104
 DRAW_ROUTE = 0x115FCF4
+DB_DRAW_ROUTE = 0x11BA2A0
 EQUIPMENT_GRIP = 0x308834
 CHANGE_ACTION, GS_CHANGE_ACTION = 0x2AB670, 0x1160650
 COMMAND_BIND, COMMAND_CONDITION = 0x2E9B7C, 0x2ECEFC
@@ -74,6 +75,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         COMMAND_CONDITION,
         GS_CHANGE_ACTION,
         DRAW_ROUTE,
+        DB_DRAW_ROUTE,
         FX_RELEASE,
         SHARPNESS,
         HIT_EXPAND,
@@ -138,15 +140,17 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             COMMAND_CONDITION,
             GS_CHANGE_ACTION,
             DRAW_ROUTE,
+            DB_DRAW_ROUTE,
             BLOCK,
             SHARPNESS,
             GUARD_REACTION,
+            DRAW_MODEL,
         }
         if "registry" in order
         else set()
     )
     if order == ("registry", "sword"):
-        expected.update((FX_RELEASE, EQUIPMENT_GRIP, HIT_EXPAND, MODEL_DEPTH, DRAW_MODEL))
+        expected.update((FX_RELEASE, EQUIPMENT_GRIP, HIT_EXPAND, MODEL_DEPTH))
     assert set(g.hooks) == expected
     if config is not None:
         assert g.files[CONFIG] == config
@@ -1468,7 +1472,7 @@ def verify_sdk_registration(elf, on):
 
 def verify():
     elf = (REPO / "mhgu/main.elf").read_bytes()
-    on = b"[General]\r\nstyle = 1\r\n"
+    on = b"[Weapons]\r\n0 = 1\r\n"
     verify_action_lifecycle(elf, on)
     verify_sdk_registration(elf, on)
     verify_valor(elf, on)
@@ -1484,22 +1488,23 @@ def verify():
     assert g.run(service(g)[1], 0) == 0
     for cfg in [
         None,
-        b"[General]\nstyle=0",
+        b"[Weapons]\n0=0",
         b"1",
-        b"[General]\nstyle=-2",
-        b"[General]\nstyle=999",
+        b"[Weapons]\n0=-2",
+        b"[Weapons]\n0=999",
+        b"[General]\nstyle=1",
     ]:
         g = boot(elf, cfg)
         assert g.run(service(g)[1], 0) == 0
         actor, _, _ = hunters(g)
         assert g.run(g.hooks.get(ENCODE, ENCODE), actor, 5001) == 0x501
         if cfg is None:
-            assert g.files == {CONFIG: b"[General]\nstyle = 0\n"}
+            assert not g.files
     g = boot(elf, None, mount_ok=False)
     assert not g.files and g.run(service(g)[1], 0) == 0
 
     # A second plugin may register after config load. Its ID applies only to its weapon.
-    g = boot(elf, b"[General]\nstyle=42")
+    g = boot(elf, b"[Weapons]\n0=1\n1=42")
     register, selected = service(g)
     actor, eq, remote = hunters(g)
 
@@ -1515,7 +1520,7 @@ def verify():
     for bad in [0, style_descriptor(g, 0, 0), style_descriptor(g, 65536, 0),
                 style_descriptor(g, 3, 255), style_descriptor(g, 3, 0, art_slots=4)]:
         assert g.run(register, bad, 0, 0) == 1
-    assert g.run(selected, 0) == 0 and g.run(selected, 1) == 42
+    assert g.run(selected, 0) == 1 and g.run(selected, 1) == 42
     g.cpu.mem_write(eq + 1236, b"\x01")
     assert g.run(g.hooks[ENCODE], actor, 5001) == 0x801
     assert g.run(g.hooks[ENCODE], remote, 5001) == 0x501

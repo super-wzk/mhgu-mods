@@ -48,9 +48,7 @@ impl BoxMenu {
         entries(self.weapon()).nth(self.row().checked_sub(STOCK)?)
     }
     fn equipped(&self) -> Option<&'static Entry> {
-        let weapon = self.weapon();
-        let id = selected(weapon);
-        entries(weapon).find(|e| e.style.id == id)
+        super::active(self.weapon())
     }
     fn configure(&self) {
         if self.panel() == 0 || self.phase() != 1 {
@@ -145,7 +143,7 @@ impl BoxMenu {
         unsafe {
             match gu!(0x54fd94, self.0 + 120, buttons, 128, 32, 0) {
                 1 => {
-                    choose(Some(e));
+                    choose(self.weapon(), Some(e));
                     // Continue to the native Arts screen. It must never see a custom row as an art slot.
                     gu!(0x557d90, self.cursor(), 0);
                     gu!(0x549e24, self.0);
@@ -225,7 +223,7 @@ unsafe fn update(ui: u32) -> u32 {
     let next = m.phase();
     if ((phase == 1 && next == 5) || (phase == 3 && next == 4)) && selected(weapon) != 0 {
         let had_custom_slots = m.equipped().is_some_and(|entry| entry.style.art_slots != 0);
-        choose(None); // Only after GU accepted the native style, including reselecting the equipped one.
+        choose(weapon, None); // Only after GU accepts the native style.
         if had_custom_slots && phase == 1 {
             // GU skipped the normal slot migration because its saved style byte
             // already matched the selected row.
@@ -248,14 +246,12 @@ unsafe fn update(ui: u32) -> u32 {
 // The status controller uses 275A30 for the local equipment record. Other
 // hunters and equipment previews have their own record, even for the same weapon.
 unsafe fn status_entry(equipment: u32) -> Option<&'static Entry> {
-    let entry = super::active()?;
     unsafe {
         let manager: u32 = read(forge::mem::text_addr(), 0x1885b58);
-        (manager != 0
-            && equipment != 0
-            && equipment == gu!(0x275a30, manager)
-            && u32::from(read::<u8>(equipment, 1236)) == entry.style.weapon)
-            .then_some(entry)
+        if manager == 0 || equipment == 0 || equipment != gu!(0x275a30, manager) {
+            return None;
+        }
+        super::active(u32::from(read::<u8>(equipment, 1236)))
     }
 }
 

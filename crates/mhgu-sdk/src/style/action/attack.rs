@@ -9,7 +9,7 @@ pub struct Attack {
     /// Delay and lifetime in GU motion frames measured from this event.
     pub delay: f32,
     pub duration: f32,
-    /// GU weapon attack flags, passed to the constructor and weapon adjustment.
+    /// GU weapon attack flags plus the style options below.
     pub flags: u32,
     /// Optional loaded rHitShape resource. Zero uses the equipped weapon shape.
     pub shape: u32,
@@ -17,6 +17,12 @@ pub struct Attack {
 }
 
 impl Attack {
+    /// Use the native second contact slot for a simultaneous paired strike.
+    pub const SECONDARY: u32 = 1 << 31;
+
+    /// Disable mounting properties inherited from the HDP row.
+    pub const NO_MOUNT: u32 = 1 << 30;
+
     /// Submit a style strike through the same collision and weapon adjustment
     /// path as GU's weapon action descriptors.
     ///

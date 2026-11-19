@@ -1,29 +1,36 @@
 //! Forge savedata INI, using the same tokenizer as Forge's config module.
-const SECTION: &str = "General";
-const KEY: &str = "style";
+const SECTION: &str = "Weapons";
+pub const WEAPONS: usize = 15;
+type Selection = [u16; WEAPONS];
 
-fn parse(bytes: &[u8]) -> u16 {
+fn parse(bytes: &[u8]) -> Selection {
     let Ok(s) = core::str::from_utf8(bytes) else {
-        return 0;
+        return Selection::default();
     };
-    let mut general = false;
-    let mut value = 0;
+    let mut weapons = false;
+    let mut selection = Selection::default();
     // Forge 1.5's Reader unwraps a missing section for a leading bare key.
     // Treat that input as inactive instead of panicking in the game.
     for item in ini_core::Parser::new(s.trim_start_matches('\u{feff}')).auto_trim(true) {
         match item {
-            ini_core::Item::Section(name) => general = name == SECTION,
-            ini_core::Item::Property(KEY, raw) if general => {
-                value = raw
-                    .filter(|v| v.bytes().all(|b| b.is_ascii_digit()))
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0);
+            ini_core::Item::Section(name) => weapons = name == SECTION,
+            ini_core::Item::Property(key, raw) if weapons => {
+                if let Some(slot) = decimal::<usize>(key).and_then(|i| selection.get_mut(i)) {
+                    *slot = raw.and_then(decimal).unwrap_or(0);
+                }
             }
-            ini_core::Item::Error(_) => return 0,
+            ini_core::Item::Error(_) => return Selection::default(),
             _ => (),
         }
     }
-    value
+    selection
+}
+
+fn decimal<T: core::str::FromStr>(s: &str) -> Option<T> {
+    s.bytes()
+        .all(|b| b.is_ascii_digit())
+        .then(|| s.parse().ok())
+        .flatten()
 }
 
 #[cfg(target_arch = "arm")]
@@ -46,31 +53,32 @@ fn mounted<T: Default>(f: impl FnOnce(&str) -> T) -> T {
 }
 
 #[cfg(target_arch = "arm")]
-pub fn save(id: u16) -> bool {
-    mounted(|path| write(path, id))
+pub fn save(selection: Selection) -> bool {
+    use core::fmt::Write;
+    mounted(|path| {
+        use forge::mt::{
+            fs::{MtFile, OpenMode},
+            object::Object,
+        };
+        let Ok(path) = alloc::ffi::CString::new(path) else {
+            return false;
+        };
+        let mut text = alloc::format!("[{SECTION}]\n");
+        for (weapon, id) in selection.into_iter().enumerate().filter(|&(_, id)| id != 0) {
+            let _ = writeln!(text, "{weapon} = {id}");
+        }
+        let Ok(file) = MtFile::open(&path, OpenMode::Write) else {
+            return false;
+        };
+        let ok = file.write(text.as_bytes()) == text.len();
+        file.close();
+        file.destroy();
+        ok
+    })
 }
 
 #[cfg(target_arch = "arm")]
-fn write(path: &str, id: u16) -> bool {
-    use forge::mt::{
-        fs::{MtFile, OpenMode},
-        object::Object,
-    };
-    let Ok(path) = alloc::ffi::CString::new(path) else {
-        return false;
-    };
-    let Ok(file) = MtFile::open(&path, OpenMode::Write) else {
-        return false;
-    };
-    let text = alloc::format!("[{SECTION}]\n{KEY} = {id}\n");
-    let ok = file.write(text.as_bytes()) == text.len();
-    file.close();
-    file.destroy();
-    ok
-}
-
-#[cfg(target_arch = "arm")]
-pub fn load() -> u16 {
+pub fn load() -> Selection {
     mounted(|path| {
         use alloc::ffi::CString;
         use forge::{
@@ -81,21 +89,20 @@ pub fn load() -> u16 {
             },
         };
         if !file_exists(path) {
-            write(path, 0);
-            return 0;
+            return Selection::default();
         }
         let Ok(path) = CString::new(path) else {
-            return 0;
+            return Selection::default();
         };
         let Ok(file) = MtFile::open(&path, OpenMode::Read) else {
-            return 0;
+            return Selection::default();
         };
         let mut buf = [0; 4096];
         let size = file.size();
         let value = if size != 0 && size <= buf.len() && file.read(&mut buf[..size]) == size {
             parse(&buf[..size])
         } else {
-            0
+            Selection::default()
         };
         file.close();
         file.destroy();
@@ -105,22 +112,28 @@ pub fn load() -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{Selection, parse};
     #[test]
     fn forge_ini() {
-        assert_eq!(parse(b"; preference\r\n[General]\r\nstyle = 1\r\n"), 1);
-        assert_eq!(parse(b"\xef\xbb\xbf[General]\nstyle=65535"), 65535);
+        let mut expected = Selection::default();
+        expected[0] = 1;
+        expected[11] = 2;
+        assert_eq!(
+            parse(b"\xef\xbb\xbf[Weapons]\r\n0 = 1\r\n11 = 2\r\n14 = 65536\r\n99 = 3"),
+            expected
+        );
         for invalid in [
             b"style=1".as_slice(),
+            b"[General]\nstyle=1",
             b"[Other]\nstyle=1",
-            b"[General]\nstyle=65536",
-            b"[General]\nstyle=-1",
-            b"[General]\nstyle=true",
-            b"[General\nstyle=1",
+            b"[Weapons]\n0=65536",
+            b"[Weapons]\n11=-1",
+            b"[Weapons]\n0=true",
+            b"[Weapons\n0=1",
             b"\xff",
             b"1",
         ] {
-            assert_eq!(parse(invalid), 0);
+            assert_eq!(parse(invalid), Selection::default());
         }
     }
 }

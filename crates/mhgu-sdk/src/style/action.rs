@@ -7,6 +7,10 @@
 mod attack;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub use attack::Attack;
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+mod motion_bank;
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub use motion_bank::MotionBanks;
 pub mod command;
 
 pub const GROUP: u16 = 16;
@@ -63,7 +67,26 @@ core::arch::global_asm!(
     "mov r3,#0",
     "ldr ip,[sp]",
     "bx ip",
+    ".global mhgu_style_land",
+    ".hidden mhgu_style_land",
+    ".type mhgu_style_land,%function",
+    "mhgu_style_land:",
+    "vmov s0,r1",
+    "mov r1,#0",
+    "bx r2",
 );
+
+/// Run GU's airborne landing check with the same zero tolerance as its dual blades.
+///
+/// # Safety
+/// The actor must be a live airborne hunter on the game thread.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn land(actor: u32) -> bool {
+    unsafe extern "C" {
+        fn mhgu_style_land(actor: u32, tolerance: u32, entry: usize) -> u32;
+    }
+    unsafe { mhgu_style_land(actor, 0, crate::memory::entry(0x2a84d8)) == 1 }
+}
 
 /// Play a motion request through GU's registered weapon motion encoder.
 ///
