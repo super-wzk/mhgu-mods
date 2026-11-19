@@ -11,17 +11,27 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 use mhgu_sdk::style::{
-    ActionRequest, Input, PASS, action,
+    ActionRequest, Input, NATIVE_ACTION, PASS, action,
     action::command::{BufferedCommand, CommandInput, CommandSet, MAX_COMMAND_FRAME},
     guard,
 };
 const DASH: u8 = 200;
+const DASH_SLOT: u16 = action::slot(DASH);
 const BRAKE: u8 = 201;
 const IDLE: u8 = 255;
 pub(super) const ACTIONS: action::Actions = action::Actions::new(74).with(DASH).with(BRAKE);
 const GUARD_GROUP: u16 = 32;
 const GUARD_MOTION: u32 = 5005;
 const GUARD_CANCEL_FRAME: i16 = 56;
+const LEDGE_CLIMBS: &[u16] = &[137, 138, 139];
+const ROLL_OFF_LEDGE: (u16, u16) = (4, 14);
+const LEDGE_LANDING: (u16, u16) = (4, 3);
+const SHEATHED_JUMP_SLASH: u16 = 38;
+const DRAWN_JUMP_SLASH: u16 = 67;
+const JUMP_COMBO_START: i16 = 54;
+const JUMP_COMBO_END: i16 = 158;
+const SWEEP: u8 = 0;
+const VERTICAL_FINISHER: u8 = 40;
 
 const fn roll_commands(slash: u8, accept_until: i16) -> [BufferedCommand; 2] {
     // FZ 811D91FE buffers from 30 and opens the follow-up at 44.
@@ -46,6 +56,8 @@ const fn roll_commands(slash: u8, accept_until: i16) -> [BufferedCommand; 2] {
 static FORWARD_ROLL: CommandSet = CommandSet::new(&roll_commands(26, 54));
 static LEFT_ROLL: CommandSet = CommandSet::new(&roll_commands(26, 64));
 static RIGHT_ROLL: CommandSet = CommandSet::new(&roll_commands(27, 64));
+// The retail drawn GS table has three ledge routes with drawn animations.
+static DASH_TERRAIN: CommandSet = CommandSet::new(&[]).retaining_native(1, LEDGE_CLIMBS);
 static GUARD_RECOVERY: CommandSet = CommandSet::new(&[BufferedCommand {
     group: 1,
     slot: 6,
@@ -54,6 +66,25 @@ static GUARD_RECOVERY: CommandSet = CommandSet::new(&[BufferedCommand {
     execute_from: GUARD_CANCEL_FRAME,
     accept_until: MAX_COMMAND_FRAME,
 }]);
+
+// GU's 2008 landing table gives the jump slash a 54..158 combo window.
+const JUMP_FINISHER: BufferedCommand = BufferedCommand {
+    group: action::GROUP,
+    slot: action::slot(VERTICAL_FINISHER),
+    input: CommandInput::Weapon(12),
+    accept_from: JUMP_COMBO_START,
+    execute_from: JUMP_COMBO_START,
+    accept_until: JUMP_COMBO_END,
+};
+static JUMP_LANDING: CommandSet = CommandSet::new(&[
+    JUMP_FINISHER,
+    BufferedCommand {
+        slot: action::slot(SWEEP),
+        input: CommandInput::Weapon(2),
+        ..JUMP_FINISHER
+    },
+])
+.replacing_weapon(44); // GU strong wide slash
 
 // FZ 817C0982 starts the emitter at frame 84 of clip 1465.
 const RADIANCE_CLIP: u16 = 1465;
@@ -96,6 +127,8 @@ macro_rules! native {
 pub(super) unsafe extern "C" fn commands(p: u32, table_id: u32) -> *const CommandSet {
     let (group, slot) = unsafe { action::current(p) };
     match (table_id, group, slot) {
+        (2000, action::GROUP, DASH_SLOT) => &DASH_TERRAIN,
+        (2008, action::GROUP, SHEATHED_JUMP_SLASH | DRAWN_JUMP_SLASH) => &JUMP_LANDING,
         (2010, GUARD_GROUP, 0 | 1 | 9) if unsafe { native!(0x53a058, p) } == GUARD_MOTION => {
             &GUARD_RECOVERY
         }
@@ -171,6 +204,7 @@ struct Battle {
     radiance_contact: Option<([f32; 3], u32)>,
     aura_time: f32,
     flick: program::Flick,
+    terrain_dash_pending: bool,
     guard_dash: bool,
     roll_side: Option<u32>,
     poise: f32,
@@ -197,6 +231,7 @@ impl Battle {
             radiance_contact: None,
             aura_time: 0.,
             flick: Default::default(),
+            terrain_dash_pending: false,
             guard_dash: false,
             roll_side: None,
             poise: 0.,
@@ -282,6 +317,7 @@ impl Battle {
     }
     unsafe fn begin_at(&mut self, p: u32, state: u8, frame: Option<u16>) -> bool {
         unsafe {
+            self.terrain_dash_pending = false;
             self.charge_effect = None;
             self.radiance_contact = None;
             self.cursor = Cursor::new(state);
@@ -325,12 +361,16 @@ impl Battle {
             write(p, 12325, 0u8);
             write(p, 12320 + 176, 0u32);
             write(p, 5, 1u8);
-            native!(0x282fd8, p, 0, 1, 0);
+            native!(0x282fd8, p, 0, u32::from(state != DASH), 0);
             native!(0x2a2560, p, 1);
             if matches!(state, 13 | 20 | 38 | 47) {
                 native!(0x2a264c, p, 1); // GU draw-attack bookkeeping/skills
             }
             if state == DASH {
+                // Match GU sprint collision flags and use its shared terrain
+                // commands for mounting a ledge while the run clip is active.
+                native!(0x283238, p, 0, 0x180, 0);
+                native!(0x2e9b7c, p, 2000, 0);
                 native!(0x2a25a8, p, 1);
             }
             self.start_step(p, frame)
@@ -562,6 +602,21 @@ impl Battle {
                 }
             }
             if state == DASH {
+                let has_direction = native!(0x27e608, p, 0) > 0;
+                if has_direction {
+                    let yaw = native!(0x27f678, p) & 0xffff;
+                    write(p, 4076, yaw);
+                    // GU's sprint probe feeds the drawn roll-off action used
+                    // by the native roll's terrain handler (2A9098).
+                    if native!(0x2a8458, p) == 1 {
+                        self.cancel();
+                        self.terrain_dash_pending = true;
+                        write(p, 5280, yaw);
+                        let (group, slot) = ROLL_OFF_LEDGE;
+                        native!(0x2831e0, p, u32::from(group), u32::from(slot), 0xc);
+                        return true;
+                    }
+                }
                 if delta > 0. {
                     // The native continuous drain already multiplies by GU's
                     // frame delta. Disable recovery and supply the rate once.
@@ -588,14 +643,9 @@ impl Battle {
                     if input.weapon_command(12) {
                         return self.begin(p, 64);
                     }
-                    if read::<f32>(p, 5088) <= 0. || native!(0x27e608, p, 0) == 0 {
+                    if read::<f32>(p, 5088) <= 0. || !has_direction {
                         return self.begin(p, BRAKE);
                     }
-                }
-                // Use the facing already resolved by GU's stick/camera controller.
-                if native!(0x27e608, p, 0) > 0 {
-                    let dir = native!(0x27f678, p);
-                    write(p, 4076, dir & 0xffff);
                 }
             } else if state < 74 {
                 let mut cmd = 0u32;
@@ -736,8 +786,14 @@ impl Battle {
     }
     unsafe fn tick(&mut self, p: u32, input: &Input) -> bool {
         unsafe {
-            let (group, act) = action::current(p);
-            if (group, act) != (1, 6) {
+            let current = action::current(p);
+            let (group, act) = current;
+            let climbing = group == 1 && LEDGE_CLIMBS.contains(&act);
+            let jump_slash =
+                group == action::GROUP && matches!(act, SHEATHED_JUMP_SLASH | DRAWN_JUMP_SLASH);
+            // With the stick held, GU's drawn climb exits directly to walk 2:30.
+            let ground_movement = matches!(current, (1, 0 | 46) | (2, 0 | 30));
+            if current != (1, 6) {
                 motion::forget_roll(p);
             }
             let phase: u8 = read(p, 5);
@@ -758,8 +814,20 @@ impl Battle {
                 input.stick_angle,
                 read::<f32>(p, 28).max(0.) * 0.5,
             );
+            // GU can land a short roll-off directly in 1:138.
+            let buffered_roll_dash = dash_input
+                && matches!(current, LEDGE_LANDING | (1, 138))
+                && (read(p, 9480), read(p, 9484)) == ROLL_OFF_LEDGE
+                && native!(0x2a2444, p) != 0;
+            let keeps_terrain_dash = climbing
+                || jump_slash
+                || ground_movement
+                || matches!(current, ROLL_OFF_LEDGE | LEDGE_LANDING);
+            self.terrain_dash_pending = buffered_roll_dash
+                || (climbing && self.cursor.state == DASH)
+                || (self.terrain_dash_pending && keeps_terrain_dash);
             if self.cursor.state != IDLE {
-                if (group, act) == (action::GROUP, action::slot(self.cursor.state))
+                if current == (action::GROUP, action::slot(self.cursor.state))
                     && physical == self.packed
                     && phase != 0
                     && read::<u8>(p, 9493) & 4 == 0
@@ -778,6 +846,15 @@ impl Battle {
                 return true;
             }
             if group == action::GROUP {
+                if jump_slash
+                    && phase == 2
+                    && dash_input
+                    && (f32::from(JUMP_COMBO_START)..f32::from(JUMP_COMBO_END))
+                        .contains(&read::<f32>(p, 1280))
+                    && read::<f32>(p, 5088) > 0.
+                {
+                    return self.begin(p, DASH);
+                }
                 return false;
             }
             if group == GUARD_GROUP && matches!(act, 0 | 1 | 9 | 12 | 14) {
@@ -833,38 +910,42 @@ impl Battle {
             {
                 return self.begin(p, if act == 6 { 63 } else { 62 });
             }
-            if phase != 0 && matches!(group, 1 | 2) {
-                let motion = native!(0x53a058, p);
-                if matches!(motion, 5001 | 5004) {
-                    if action::transition(p, action::Transition::HUNTER_ART) {
-                        return true;
-                    }
-                    if input.command(13) {
-                        native!(0x2ab670, p, 1, 2, 0); // shared sheathe, motion 5003
-                        return true;
-                    }
-                    if self.guard >= 3 && input.command(8) {
-                        return self.begin(p, 59);
-                    }
-                    if input.command(70) {
-                        native!(0x2ab670, p, u32::from(GUARD_GROUP), 0, 0);
-                        return true;
-                    }
-                    if input.weapon_command(1) {
-                        return self.begin(p, 48);
-                    }
-                    if input.weapon_command(12) {
-                        return self.begin(p, 19);
-                    }
-                    if input.weapon_command(2) {
-                        return self.begin(p, 0);
-                    }
-                    if dash_input && read::<f32>(p, 5088) > 0. {
-                        return self.begin(p, DASH);
-                    }
-                }
+            let terrain_dash_ready =
+                self.terrain_dash_pending && ground_movement && native!(0x2a2444, p) != 0;
+            let accepts_ground_input = terrain_dash_ready
+                || (phase != 0
+                    && matches!(group, 1 | 2)
+                    && matches!(native!(0x53a058, p), 5001 | 5004));
+            if !accepts_ground_input {
+                return false;
             }
-            false
+            let resume_dash = core::mem::take(&mut self.terrain_dash_pending);
+            if action::transition(p, action::Transition::HUNTER_ART) {
+                return true;
+            }
+            if input.command(13) {
+                native!(0x2ab670, p, 1, 2, 0); // shared sheathe, motion 5003
+                return true;
+            }
+            if self.guard >= 3 && input.command(8) {
+                return self.begin(p, 59);
+            }
+            if input.command(70) {
+                native!(0x2ab670, p, u32::from(GUARD_GROUP), 0, 0);
+                return true;
+            }
+            if input.weapon_command(1) {
+                return self.begin(p, 48);
+            }
+            if input.weapon_command(12) {
+                return self.begin(p, 19);
+            }
+            if input.weapon_command(2) {
+                return self.begin(p, SWEEP);
+            }
+            let wants_dash =
+                dash_input || (resume_dash && !input.command(3) && native!(0x27e608, p, 0) > 0);
+            wants_dash && read::<f32>(p, 5088) > 0. && self.begin(p, DASH)
         }
     }
 }
@@ -892,6 +973,10 @@ pub(super) fn radiance_origin(owner: u32, shapes: u32) -> Option<[f32; 3]> {
 pub(super) unsafe extern "C" fn request(p: u32, raw: *const ActionRequest) -> u32 {
     unsafe {
         let request = &*raw;
+        // GU resolves the aerial input and selects the sheathed or drawn move.
+        if !request.draw_route && matches!(request.slot, SHEATHED_JUMP_SLASH | DRAWN_JUMP_SLASH) {
+            return NATIVE_ACTION;
+        }
         if native!(0x2a2444, p) != 0 {
             return PASS;
         }

@@ -297,6 +297,9 @@ unsafe fn resolve_weapon_slot(actor: u32, slot: u16, flags: u16) -> Option<u16> 
 
 unsafe fn resolve_request(actor: u32, style: &Style, req: ActionRequest) -> Option<u16> {
     let id = unsafe { (style.request?)(actor, &req) };
+    if id == mhgu_sdk::style::NATIVE_ACTION && !req.draw_route {
+        return Some(req.slot);
+    }
     let id = u8::try_from(id).ok()?;
     style.actions.contains(id).then(|| action::slot(id))
 }

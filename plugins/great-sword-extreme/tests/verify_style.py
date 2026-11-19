@@ -455,19 +455,20 @@ def verify_action_lifecycle(elf, config):
     print("GU common lifecycle: independent slots, Hunter Art dispatch, stock rejection, history, cleanup and damage passed")
 
 
-def verify_weapon_arts(g, p):
-    def entries(arc):
-        b = quest_arc(arc).read_bytes()
-        for i in range(struct.unpack_from("<H", b, 6)[0]):
-            name, kind, size, _, off = struct.unpack_from("<64s4I", b, 12 + 80 * i)
-            yield name.rstrip(b"\0"), kind, b[off : off + size]
+def quest_entries(arc):
+    b = quest_arc(arc).read_bytes()
+    for i in range(struct.unpack_from("<H", b, 6)[0]):
+        name, kind, size, _, off = struct.unpack_from("<64s4I", b, 12 + 80 * i)
+        yield name.rstrip(b"\0"), kind, b[off : off + size]
 
+
+def verify_weapon_arts(g, p):
     arts = [
         struct.unpack_from("<H4xH", zlib.decompress(raw), 0x1F8)
-        for name, kind, raw in entries("w00_m.arc")
+        for name, kind, raw in quest_entries("w00_m.arc")
         if kind == 0x5139901D and b"\\sa\\" in name
     ]
-    lmt = next(zlib.decompress(raw) for name, kind, raw in entries("w00.arc")
+    lmt = next(zlib.decompress(raw) for name, kind, raw in quest_entries("w00.arc")
                if kind == 0x76820D81 and name.endswith(b"\\w00_sa"))
     count = struct.unpack_from("<H", lmt, 6)[0]
     bank, header, events = g.alloc(104), g.alloc(8 + 4 * count), g.alloc(288)
@@ -593,6 +594,7 @@ def verify_battle(g, p, remote, resources):
     g.put(0x1896F5C, audio)
     g.cpu.mem_write(p + 4180, b"\xff")  # GU's always-audible area in the offline scene.
     queued = set()
+    charge_rises = []
 
     def drain():
         for i in range(64):
@@ -603,7 +605,10 @@ def verify_battle(g, p, remote, resources):
                 assert g.get(slot + 20) == g.get(slot + 28) == p
                 assert g.cpu.mem_read(slot + 4, 12) == g.cpu.mem_read(p + 64, 12)
                 assert g.run(0xB68280, res, cue)
-                queued.add((res, cue - 4096))
+                request = cue - 4096
+                queued.add((res, request))
+                if 128 <= request <= 130:
+                    charge_rises.append(request)
                 g.cpu.mem_write(slot, b"\0")
 
     g.stub(0x2864C4, lambda _, k, *__: int(k in skills))
@@ -879,6 +884,7 @@ def verify_battle(g, p, remote, resources):
         assert all(g.cpu.mem_read(proof + 48, 1) == b"\x02" for proof in proofs)
     # Charge during the loop; releasing a long hold uses a different SDT row.
     units.clear()
+    charge_rises.clear()
     neutral()
     tick(held=32, pressed=32)
     for n in range(2, 202, 2):
@@ -886,6 +892,7 @@ def verify_battle(g, p, remote, resources):
         if n == 100:
             assert len(units) >= 4
             assert all(g.cpu.mem_read(u + 344, 1)[0] == 0 for u in units)
+    assert charge_rises == [128, 129, 130]
     tick(85)
     g.put(0x188A0D4, 0)
     assert clip() == 28 and value() == 146
@@ -1226,6 +1233,8 @@ def verify_battle(g, p, remote, resources):
     } <= queued
     assert (iron, 12) not in queued
     # Dash: use the occupied hunter's normal movement state and stick.
+    ledge = False
+    g.stub(0x2A8458, lambda *_: int(ledge))
     action(1, 0)
     h(1204, g.run(g.hooks[ENCODE], p, 5004))
     phase(1)
@@ -1249,15 +1258,189 @@ def verify_battle(g, p, remote, resources):
     assert whiff()
     tick(46)
     assert value() == 60 and not whiff()
+    g.cpu.hook_del(g.traps.pop(0x2831E0))
+    verify_dash_climb(g, p, tick, phase)
+    # The next drop uses GU's drawn roll-off action and preserves the run on landing.
+    ledge = True
+    tick(2, held=32, pressed=32)
+    assert (g.half(p + 9478), g.half(p + 9482)) == (4, 14)
+    assert g.get(p + 5280) == g.get(p + 4076)
+    ledge = False
+    g.stub(g.get(0x1749A88 + 828), lambda *_: 0)
+    action(4, 3)
+    tick(0)
+    neutral()
+    tick(0)
+    assert clip() == 30 and g.half(p + 9482) == 0x8000 + 200
+    # A normal B roll has no run to resume. The landing buffers its own flick.
+    for landing in ((4, 3), (1, 138)):
+        neutral()
+        tick(0)
+        action(1, 6)
+        tick(0)
+        action(4, 14)
+        tick(0)
+        action(*landing)
+        double_flick(g, p, tick, 0)
+        assert (g.half(p + 9478), g.half(p + 9482)) == landing
+        neutral()
+        tick(0)
+        assert clip() == 30 and g.half(p + 9482) == 0x8000 + 200
+    g.run(CHANGE_ACTION, p, 16, 0x8000 + 64, 0)
+    tick(0)
     # Switching to another weapon retires an owned action before GU dispatch.
     eq = g.get(p + 5060)
     g.cpu.mem_write(eq + 1236, b"\x01")
     tick()
     assert (g.half(p + 9478), g.half(p + 9482)) == (1, 0)
     g.cpu.mem_write(eq + 1236, b"\0")
+    verify_jump_slash(g, p, tick, neutral)
     print(
         "GU controls: early/held releases, guard rejection, monster-only credit, counters, dash contact and interruption passed"
     )
+
+
+def double_flick(g, p, tick, start):
+    for index, strength in enumerate((0, 120, 0, 120)):
+        g.cpu.mem_write(p + 5136, struct.pack("<H", strength))
+        tick(start + 2 * index)
+
+
+def verify_dash_climb(g, p, tick, phase):
+    table, entries, entry, resource, walk, walk_command, tables, ids = (
+        g.alloc(n) for n in (24, 8, 24, 124, 24, 124, 120, 4)
+    )
+    g.cpu.mem_write(table, struct.pack("<6I", 0, 0, 2, 2, 0, entries))
+    g.cpu.mem_write(entries, struct.pack("<2I", walk, entry))
+    g.cpu.mem_write(walk, struct.pack("<3I3f", 0, 1, walk_command, 0, 0, 0))
+    g.cpu.mem_write(walk_command + 100, struct.pack("<4H4I", 2, 0, 0, 4, 0, 0, 0, 0))
+    g.cpu.mem_write(entry, struct.pack("<3I3f", 0, 1, resource, 0, 0, 0))
+    ledge = next(
+        zlib.decompress(raw)
+        for name, _, raw in quest_entries("w00_m0.arc")
+        if name.endswith(b"_0x0001_137b")
+    )
+    words = [struct.unpack_from("<H", ledge, offset)[0] for offset in (504, 510, 516, 522)]
+    params = [struct.unpack_from("<I", ledge, offset)[0] for offset in (528, 536, 544, 552)]
+    g.cpu.mem_write(resource + 100, struct.pack("<4H4I", *words, *params))
+    g.put(tables + 104, 1)
+    g.put(tables + 116, ids)
+    g.put(ids, table)
+    g.stub(0x285F68, lambda *_: tables)
+    climbable = False
+    g.stub(0x2A8384, lambda *_: int(climbable))
+    g.stub(0x27FF28, lambda *_: 1)  # hunter faces the climbable edge
+    g.run(CHANGE_ACTION, p, 16, 0x8000 + 200, 0)
+    tick(0)
+    assert g.get(p + 9488) & 0x180 == 0x180
+    bound = g.get(p + 9384)
+    assert bound != table and g.get(bound + 8) == 1
+    assert g.get(g.get(bound + 20)) == entry
+    tick(2)
+    assert g.half(p + 9482) == 0x8000 + 200
+    climbable = True
+    tick(4)
+    assert (g.half(p + 9478), g.half(p + 9482)) == (1, 137)
+    climbable = False
+    g.cpu.hook_del(g.traps.pop(0x285F68))
+
+    # Let the native drawn climb finish with the stick still held. It chooses
+    # walk 2:30 while the climb clip is still current.
+    g.stub(0x2E8C24, lambda actor, height, *_: g.put(height, g.get(actor + 68)) or 1)
+    phase(2)
+    motion_flags = g.cpu.mem_read(p + 1206, 1)[0]
+    g.cpu.mem_write(p + 1206, bytes([motion_flags | 4]))
+    g.run(0x2CDEC4, p, 7)
+    assert (g.half(p + 9478), g.half(p + 9482)) == (2, 30)
+    g.cpu.mem_write(p + 1206, bytes([motion_flags]))
+    g.cpu.hook_del(g.traps.pop(0x2E8C24))
+    tick(0)
+    assert g.half(p + 9482) == 0x8000 + 200
+    assert g.half(p + 1204) & 255 == 30
+
+
+def verify_jump_slash(g, p, tick, neutral):
+    lmt = next(
+        zlib.decompress(raw) for name, kind, raw in quest_entries("w00.arc")
+        if kind == 0x76820D81 and name.endswith(b"\\w00")
+    )
+    count = struct.unpack_from("<H", lmt, 6)[0]
+    bank, header, events = g.alloc(104), g.alloc(8 + 4 * count), g.alloc(288)
+    g.put(p + 3844 + 5 * 4, bank)
+    g.put(bank + 100, header)
+    g.cpu.mem_write(header, lmt[:8])
+    for slot in (135, 150, 233):
+        (off,) = struct.unpack_from("<I", lmt, 8 + 4 * slot)
+        clip = g.alloc(64)
+        g.cpu.mem_write(clip + 8, lmt[off + 8 : off + 48])
+        g.put(clip + 52, events)
+        g.put(header + 8 + 4 * slot, clip)
+
+    # Provide the retail strong wide slash row and a common command entry.
+    table, entries, common, stock, resource, tables, ids = (
+        g.alloc(n) for n in (24, 8, 24, 24, 124, 120, 48)
+    )
+    g.cpu.mem_write(table, struct.pack("<6I", 0, 0, 2, 2, 0, entries))
+    g.cpu.mem_write(entries, struct.pack("<2I", common, stock))
+    g.cpu.mem_write(stock, struct.pack("<3I3f", 0, 1, resource, 0, 54, 158))
+    g.cpu.mem_write(resource + 100, struct.pack("<4H4I", 16, 44, 0x1000, 8, 25, 0, 0, 0))
+    g.put(tables + 104, 12)
+    g.put(tables + 116, ids)
+    g.put(ids + 8 * 4, table)
+    g.stub(0x285F68, lambda *_: tables)
+
+    # Mock terrain and rendering while leaving the native flight action,
+    # motion setter, command binding and Frontier dispatch in place.
+    grounded = False
+    hit_rows = []
+    g.stub(0x2A84D8, lambda *_: int(grounded))
+    g.stub(0x539F4C, lambda *_: 0)
+    g.stub(0x2A063C, lambda *_: 0)
+    g.stub(0x27C664, lambda *_: 1)  # hunter model is loaded
+    g.stub(0x19998, lambda *_: 0)  # animation-change notification
+    g.stub(0x1160294, lambda *_: 0)  # motion-linked rendering
+    g.stub(0x2B7240, lambda _, __, row, flags: hit_rows.append((row, flags)))
+    for slot, motion, key, destination, source in (
+        (38, 5233, 0x20, 40, 1451),
+        (67, 5150, 0x100, 0, 1406),
+    ):
+        neutral()
+        grounded = False
+        g.cpu.mem_write(p + 10057, bytes([int(slot == 67)]))
+        g.run(GS_CHANGE_ACTION, p, 16, slot, 0)
+        tick(0)
+        assert g.half(p + 9482) == slot
+        actual = g.run(DECODE, p, g.half(p + 1204))
+        assert actual == motion, (slot, actual, motion)
+        tick(54, held=key, pressed=key)
+        assert g.half(p + 9482) == slot and not g.get(p + 9384)
+        grounded = True
+        tick(54)
+        assert g.run(DECODE, p, g.half(p + 1204)) == 5135
+        assert hit_rows[-1] == (7, 3)
+        bound = g.get(p + 9384)
+        assert bound != table and g.get(bound + 8) == 3
+        assert g.get(g.get(bound + 20)) == common
+        for frame in (53, 158):
+            tick(frame, held=key, pressed=key)
+            assert g.half(p + 9482) == slot
+        tick(54, held=key, pressed=key)
+        assert g.half(p + 9482) == 0x8000 + destination
+        assert g.half(p + 1204) & 255 == source % 100
+        assert g.cpu.mem_read(p + 13115, 1) == b"\0"
+    tick(72, held=0x20, pressed=0x20)
+    assert g.half(p + 9482) == 0x8000 + 22  # sweep -> charge
+    neutral()
+    grounded = False
+    g.run(GS_CHANGE_ACTION, p, 16, 67, 0)
+    tick(0)
+    double_flick(g, p, tick, 54)
+    assert g.half(p + 9482) == 67  # flicks in midair cannot start a run
+    grounded = True
+    tick(62)
+    double_flick(g, p, tick, 54)
+    assert g.half(p + 9482) == 0x8000 + 200
+    print("GU jump slash: both native motions, grounded command window, Frontier finisher and sweep continuation passed")
 
 
 def verify_sdk_registration(elf, on):

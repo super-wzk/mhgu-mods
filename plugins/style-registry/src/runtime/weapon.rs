@@ -21,15 +21,41 @@ pub(super) unsafe fn allows_native_art(actor: u32, style: &Style, slot: u16, fla
     group == action::GROUP && great_sword_art(current)
 }
 
+unsafe fn keeps_native_slot(actor: u32, style: &Style, slot: u16, flags: u16) -> bool {
+    slot < action::FIRST
+        && unsafe {
+            resolve_request(
+                actor,
+                style,
+                ActionRequest {
+                    group: action::GROUP,
+                    slot,
+                    flags,
+                    draw_route: false,
+                },
+            )
+        } == Some(slot)
+}
+
 #[forge::hook(offset = 0x1160650)]
 unsafe fn great_sword_change(actor: u32, group: u32, slot: u32, flags: u32) -> u32 {
     unsafe {
         if let Some(style) = local_style(actor).filter(|s| s.independent && s.controller.is_some())
         {
-            if group == u32::from(action::GROUP)
-                && great_sword_art(slot as u16)
-                && allows_native_art(actor, style, slot as u16, flags as u16)
-            {
+            let (group_id, slot_id, flag_bits) = (group as u16, slot as u16, flags as u16);
+            let entering_native = group_id == action::GROUP
+                && ((great_sword_art(slot_id)
+                    && allows_native_art(actor, style, slot_id, flag_bits))
+                    || keeps_native_slot(actor, style, slot_id, flag_bits));
+            let (current_group, current_slot) = action::current(actor);
+            // An opted-in native action also gets its weapon-specific cleanup
+            // when GU transitions to a custom attack or shared movement.
+            let leaving_native = (group_id != action::GROUP
+                || action::custom_id(group_id, slot_id)
+                    .is_some_and(|id| style.actions.contains(id)))
+                && current_group == action::GROUP
+                && keeps_native_slot(actor, style, current_slot, 0);
+            if entering_native || leaving_native {
                 return original!(actor, group, slot, flags);
             }
             // A custom move can wind up, change clips, or be cancelled before

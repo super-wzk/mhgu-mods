@@ -5,6 +5,9 @@ pub mod guard;
 /// Return this from a motion callback to let GU handle the request.
 pub const PASS: u32 = u32::MAX;
 
+/// Return this from an action request callback to accept the native weapon slot.
+pub const NATIVE_ACTION: u32 = u32::MAX - 1;
+
 /// Receives the local hunter and either the decimal request (encode) or the
 /// packed bank/slot (decode). The actor is borrowed only for this call.
 pub type Motion = unsafe extern "C" fn(u32, u32) -> u32;
@@ -44,8 +47,8 @@ pub struct ActionRequest {
     pub draw_route: bool,
 }
 
-/// Return a registered style move ID (0–255) or PASS. PASS leaves a draw
-/// route to GU and rejects an unhandled stock weapon action.
+/// Return a registered style move ID (0–255), NATIVE_ACTION to accept a stock
+/// weapon request, or PASS to decline. A declined draw route stays with GU.
 pub type Request = unsafe extern "C" fn(u32, *const ActionRequest) -> u32;
 
 /// Immutable process-lifetime descriptor. IDs are global across all weapons.

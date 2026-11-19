@@ -30,7 +30,18 @@ pub(super) fn iron(dat: &Path) -> Result<Bank> {
             .get(start..start + word(&bytes, row + 8)?)
             .context("short Iron Sword bank")?;
         // Requests 32+ reference the separately equipped hunter voice program.
-        return Bank::player_bytes(data, 0..32);
+        let mut bank = Bank::player_bytes(data, 0..32)?;
+        let accent = bank
+            .voices
+            .get(&14)
+            .context("missing great sword charge accent")?;
+        let (wave, gain, cents) = (accent.wave, accent.gain, accent.cents);
+        // Cue 14 uses the same Iron Sword waveform as 13 at a higher gain.
+        // Give each rise a request ID so adjacent steps can overlap.
+        for cue in 128..=130 {
+            bank.voices.insert(cue, source::Voice { wave, gain, cents });
+        }
+        return Ok(bank);
     }
     anyhow::bail!("missing Frontier Iron Sword model 10")
 }

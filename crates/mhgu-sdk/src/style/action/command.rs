@@ -31,6 +31,8 @@ pub struct BufferedCommand {
 pub struct CommandSet {
     rows: *const BufferedCommand,
     count: usize,
+    replaced_weapon_slot: Option<u16>,
+    retained_native: Option<(u16, &'static [u16])>,
 }
 
 // Constructed only from immutable process-lifetime slices.
@@ -41,7 +43,31 @@ impl CommandSet {
         Self {
             rows: rows.as_ptr(),
             count: rows.len(),
+            replaced_weapon_slot: None,
+            retained_native: None,
         }
+    }
+
+    /// Remove the specified native weapon destination when these rows are bound.
+    pub const fn replacing_weapon(mut self, slot: u16) -> Self {
+        self.replaced_weapon_slot = Some(slot);
+        self
+    }
+
+    /// Keep only the given native destinations from the bound table.
+    pub const fn retaining_native(mut self, group: u16, slots: &'static [u16]) -> Self {
+        self.retained_native = Some((group, slots));
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn keeps_native(&self, destination: Option<(u16, u16)>) -> bool {
+        if let Some((group, slots)) = self.retained_native {
+            return destination.is_some_and(|(g, slot)| g == group && slots.contains(&slot));
+        }
+        !self
+            .replaced_weapon_slot
+            .is_some_and(|slot| destination == Some((super::GROUP, slot)))
     }
 
     #[doc(hidden)]
@@ -50,7 +76,7 @@ impl CommandSet {
     }
 }
 
-/// Return a static set to extend the table GU just selected for the hunter.
+/// Return a static set to edit the table GU just selected for the hunter.
 /// A null pointer keeps GU's table. The callback runs on the game thread.
 pub type Bind = unsafe extern "C" fn(actor: u32, table_id: u32) -> *const CommandSet;
 

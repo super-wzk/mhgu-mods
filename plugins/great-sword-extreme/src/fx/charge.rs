@@ -1,6 +1,10 @@
 //! Sound and particle events for one uninterrupted charge.
 use super::{Attachment, CHARGE_ROUTE, route};
 
+// The Iron Sword bank maps 128..=130 to distinct rise requests. Lv4 keeps
+// the Frontier accent alongside the common fourth-charge cue.
+const LEVEL_CUES: [u8; 4] = [128, 129, 130, 13];
+
 pub(crate) struct ChargeEffect {
     level: u8,
     played_sustain: bool,
@@ -26,7 +30,7 @@ impl ChargeEffect {
             }
             if level > self.level && (1..=4).contains(&level) {
                 route(p, CHARGE_ROUTE + usize::from(level), Attachment::Follow(2));
-                crate::sound::charge(p, 13);
+                crate::sound::charge(p, LEVEL_CUES[usize::from(level - 1)]);
             }
             self.level = level;
         }

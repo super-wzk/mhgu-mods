@@ -3,7 +3,7 @@ use core::{cell::UnsafeCell, ptr};
 use mhgu_sdk::style::action::{
     self,
     command::{
-        BufferedCommand, MAX_COMMAND_FRAME,
+        CommandSet, MAX_COMMAND_FRAME,
         native::{CAPACITY, Command, Entry, Resource, Table, buffer, table},
     },
 };
@@ -33,11 +33,22 @@ static BINDING: LocalBinding = LocalBinding(UnsafeCell::new(Binding {
 }));
 
 impl Binding {
-    unsafe fn append(&mut self, actor: u32, stock: Table, rows: &[BufferedCommand]) {
-        let first = stock.count as usize;
+    unsafe fn bind(&mut self, actor: u32, stock: Table, set: &CommandSet) {
+        let mut first = 0;
+        for i in 0..stock.count as usize {
+            let entry = unsafe { stock.entries.add(i).read() };
+            let destination = unsafe { entry.as_ref().and_then(|e| e.resource.as_ref()) }
+                .map(|r| (r.command.group, r.command.slot));
+            if !set.keeps_native(destination) {
+                continue;
+            }
+            self.entries[first] = entry;
+            first += 1;
+        }
+        let rows = set.rows();
         let count = first + rows.len();
-        if first != 0 {
-            unsafe { ptr::copy_nonoverlapping(stock.entries, self.entries.as_mut_ptr(), first) };
+        if count > CAPACITY {
+            return;
         }
         for (i, row) in rows.iter().enumerate() {
             let (opcode, input) = row.input.opcode_and_id();
@@ -101,8 +112,8 @@ unsafe fn bind(actor: u32, id: u32, origin: u32) {
             .copied()
             .unwrap_or(Table::EMPTY);
         let rows = set.rows();
-        if rows.is_empty()
-            || rows.len() > CAPACITY.saturating_sub(stock.count as usize)
+        if rows.len() > CAPACITY
+            || stock.count as usize > CAPACITY
             || rows.iter().any(|row| {
                 let (_, input) = row.input.opcode_and_id();
                 let valid_action = row.group != action::GROUP
@@ -119,7 +130,7 @@ unsafe fn bind(actor: u32, id: u32, origin: u32) {
         {
             return;
         }
-        (*BINDING.0.get()).append(actor, stock, rows);
+        (*BINDING.0.get()).bind(actor, stock, set);
     }
 }
 
