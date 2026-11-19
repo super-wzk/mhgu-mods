@@ -382,7 +382,10 @@ def verify(mod):
         put(actor + 3844 + 4, lmt_resource)
         # Retain both the full motion timeline and the battle-action sequence.
         timeline = []
+        action_time = [0.]
+        rest_started = [0.]
         played = []
+        rest_requests = {(0, 1), (0, 17)}
 
         def play(p, m, *_):
             assert p == actor and m >> 8 == 1
@@ -407,7 +410,9 @@ def verify(mod):
             cpu.mem_write(actor + 1276, s.pack("<4f", 0, 0, length - 1, 0 if loop == 0xffffffff else loop))
             put(actor + 1212, 4 if loop == 0xffffffff else 0)
             timeline.append(motions[m])
-            if motions[m][0] != 248:
+            if motions[m] in rest_requests:
+                rest_started[0] = action_time[0]
+            if motions[m] not in rest_requests and motions[m][0] != 248:
                 played.append(motions[m])
 
         stub(0xAFF40, play)
@@ -514,12 +519,32 @@ def verify(mod):
             put(address, saved)
         assert delegated == [(actor, 3)] * 4 and not played
         delegated.clear()
+        def note_update(*_):
+            action_time[0] += s.unpack("<f", cpu.mem_read(actor + 28, 4))[0]
+        cpu.hook_add(UC_HOOK_CODE, note_update, begin=hooks[0xCF5F64], end=hooks[0xCF5F64])
 
         def update(done=False):
             cpu.mem_write(actor + 1206, bytes([4 if done else 0]))
             cpu.reg_write(arm.UC_ARM_REG_S1, 0x42F60000)
             assert run(dispatcher if independent else hooks[0xCF5F64], actor, 0) == 0 and not delegated
 
+        def finish_rest():
+            # Most move-specific checks skip over the already asserted idle gate.
+            # Use real GU clocks; no finished flag or RNG is injected into it.
+            if motions.get(get(actor + 1204) & 65535) not in rest_requests:
+                return
+            before = len(timeline), len(rolls)
+            delta = s.unpack("<f", cpu.mem_read(actor + 28, 4))[0]
+            elapsed = action_time[0] - rest_started[0]
+            while elapsed < 10.:
+                run(0x951A80, actor)
+                update()
+                elapsed += delta
+                if elapsed < 10.:
+                    assert (len(timeline), len(rolls)) == before, ("early thought during idle", elapsed)
+            assert len(timeline) > before[0] or any(
+                "patrol:" in m or "waiting for motion" in m for m in messages[-2:]
+            )
 
         def finish_blend():
             # Motion-specific tests work in authored frames, after the native
@@ -538,6 +563,7 @@ def verify(mod):
             if done and timeline[-1][0] == 248:
                 finish_blend()
                 update(True)
+            finish_rest()
             if blend:
                 finish_blend()
 
@@ -655,6 +681,8 @@ def verify(mod):
                 break
             assert played[-1] == (255, 62) and cpu.mem_read(status + 417, 1) == b"\1"
         assert done
+        assert timeline[-1] == (0, 1), ("missing post-wake idle", timeline[-3:])
+        finish_rest()
         assert played[-1] == (3, 9)
         # Verify what GU sees, independently of the plugin's chosen animation.
         assert (run(0xC6BE4, actor, 1, 2, 0, 0), cpu.mem_read(status + 704, 1)[0]) == (1, 1), (
@@ -1032,11 +1060,15 @@ def verify(mod):
         for roll, variant, nm, turn in [(14, 42, 18, 123), (14, 41, 18, 120), (25, 101, 19, 119)]:
             choose(2701, roll, True, (3, nm), dispatch_roll=variant)
             draws = len(rolls)
+            start = len(timeline)
+            expected_chain = []
             for i in range(nm - 17):
+                expected_chain.extend([(250, turn), (3, 19 if nm == 19 and i == 0 else 18)])
                 until((250, turn))
                 until((3, 19 if nm == 19 and i == 0 else 18))
             until((252, 118))
             assert len(rolls) == draws
+            assert timeline[start:] == expected_chain + [(252, 118)], ("idle inserted inside chain", timeline[start:])
         shell_mgr, param, remap, joints = (
             base + v for v in (0xC9000, 0xCA000, 0xCB000, 0xCC000)
         )
@@ -1218,6 +1250,7 @@ def verify(mod):
             expected_resource = select_resource(0, 84)
             tick(True)
             assert played[-1] == (252, last)
+            assert timeline[-2:] == [(3, id), (252, last)]
             if last == 115:
                 shot(26, 0x1C72, 0)
             elif independent:
@@ -1476,6 +1509,58 @@ def verify(mod):
         run(hooks[0xBA874], actor, 0)
         hitzones(calm, [15, 20, 40])
         assert cpu.mem_read(status + 1304, 1) == b"\0" and get(status + 1300) == 0
+        # The thought gate is a logic clock, independent of animation speed,
+        # HP, anger and GU update size. Execute every update without tick()'s
+        # convenience wait and inspect the full motion timeline, including idles.
+        for rage in (False, True):
+            attack = (3, 15) if rage else (3, 12)
+            idle = (0, 17) if rage else (0, 1)
+            for delta in (0.5, 1., 2.):
+                choose(100, 8 if rage else 5, rage, attack)
+                put(actor + 28, bits(delta))
+                before = len(timeline), len(rolls)
+                update(True)
+                assert timeline[before[0]:] == [idle] and len(rolls) == before[1]
+                for _ in range(int(10 / delta) - 1):
+                    run(0x951A80, actor)
+                    update()
+                    assert timeline[before[0]:] == [idle] and len(rolls) == before[1]
+                run(0x951A80, actor)
+                update()
+                assert timeline[before[0]:] == [idle, attack] and len(rolls) == before[1] + 1
+                put(actor + 28, bits(1.))
+
+        # Unavailable idle playback must not start the gate. Once playback
+        # succeeds it gets the full wait, even after many failed retries.
+        choose(100, 8, True, (3, 15))
+        idle_motion = next(m for m, req in motions.items() if req == (0, 17))
+        idle_slot = lmt_header + 8 + 4 * (idle_motion & 255)
+        saved_slot = get(idle_slot)
+        put(idle_slot, 0)
+        before = len(timeline), len(rolls)
+        update(True)
+        for _ in range(20):
+            update()
+        assert (len(timeline), len(rolls)) == before
+        put(idle_slot, saved_slot)
+        update()
+        assert timeline[before[0]:] == [(0, 17)]
+        finish_rest()
+        assert timeline[before[0]:] == [(0, 17), (3, 15)]
+
+        # A GU damage motion cancels the old gate and pending route. Returning
+        # from it enters idle afresh, with all five logic updates still due.
+        update(True)
+        for _ in range(3):
+            update()
+        before = len(timeline), len(rolls)
+        cpu.mem_write(actor + 1204, s.pack("<H", reaction_motion))
+        update()
+        assert timeline[before[0]:] == [(0, 17)] and len(rolls) == before[1]
+        finish_rest()
+        assert timeline[before[0]:] == [(0, 17), (3, 15)]
+        print("GU idle: calm/rage gate matches FZ at 0.5/1/2 frame steps; retries and damage restart correctly; charge chains contain no idle.")
+
         # Compare real GU clock output against the native FZ blend regression.
         # Fireball 47 blends for six FZ ticks. Its incoming frame is held for
         # the first five, then the final tick advances by 2*1.3 = 2.6.

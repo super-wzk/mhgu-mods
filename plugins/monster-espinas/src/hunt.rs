@@ -29,6 +29,7 @@ struct Hunter {
     missing: Option<Request>,
     previous_frame: f32,
     fractional_ticks: f32,
+    rest_frames: Option<f32>,
     followup: Option<Request>,
     selection_roll: u16,
     is_attack: bool,
@@ -257,6 +258,7 @@ impl Hunter {
             missing: None,
             previous_frame: 0.,
             fractional_ticks: 0.,
+            rest_frames: None,
             followup: None,
             selection_roll: 0,
             is_attack: false,
@@ -336,6 +338,17 @@ impl Hunter {
         motion_running: bool,
         dt: f32,
     ) -> Option<Request> {
+        if let Some(left) = &mut self.rest_frames {
+            // 81CC604A starts a four-tick thought gate. 816A135C tests
+            // before decrementing: only the fifth FZ tick may resume the script.
+            *left -= dt;
+            if *left > 0. {
+                return None;
+            }
+            self.rest_frames = None;
+            self.playing = None;
+            return self.continue_route(update, state, directory);
+        }
         // 816A36CA turns toward the live target even if the hunter crosses
         // the monster while the clip plays.
         if let Some(turn) = &mut self.turn {
@@ -363,6 +376,23 @@ impl Hunter {
         if motion_running {
             return None;
         }
+        if state.posture().is_airborne() {
+            return self.continue_route(update, state, directory);
+        }
+        self.rest_frames = Some(10.);
+        Some(if state.anger_mode() == AngerMode::Enraged {
+            Request(0, 17)
+        } else {
+            Request(0, 1)
+        })
+    }
+
+    fn continue_route(
+        &mut self,
+        update: MonsterUpdate,
+        state: MonsterState,
+        directory: &Directory,
+    ) -> Option<Request> {
         if core::mem::take(&mut self.walking_to_point) {
             return Some(Request(1, 0));
         }
@@ -458,6 +488,7 @@ impl Hunter {
     }
 
     fn cancel_route(&mut self) {
+        self.rest_frames = None;
         self.followup = None;
         self.pending.clear();
         self.turn = None;

@@ -314,6 +314,28 @@ def verify(path):
     print("Vita 3:12: motion 106, unchanged facing until return to idle.")
 
 
+    # Probe the actual idle handler and thought gate; animation and script
+    # interpretation are boundary services, while the countdown remains native.
+    decisions = []
+    service(0x816A42E0, lambda *_: 0)
+    service(0x818E37EA, lambda *_: 0)
+    service(0x816AA9C0, lambda *_: decisions.append(tick))
+    for request_id, idle in [(1, 1), (17, 51)]:
+        cpu.mem_write(actor, bytes(4176))
+        setat(3, "B", 80)
+        setat(20, "H", request_id)
+        setat(2601, "B", 1)
+        observed.clear()
+        decisions.clear()
+        run(0x81CC6D7C, actor, ctx, 0, 0)
+        assert observed == [("motion", idle)]
+        assert getat(3228, "h") == 4
+        clocks = []
+        for tick in range(1, 6):
+            run(0x816A135C, actor)
+            clocks.append(getat(3228, "h"))
+        assert clocks == [3, 2, 1, 0, 0] and decisions == [5]
+        print(f"FZ 0:{request_id}: idle motion {idle}, 4 logic ticks suppress thinking, first decision at tick {decisions[0]}.")
 
 
     # Real FZ animation clock, with rendering services isolated. The pending

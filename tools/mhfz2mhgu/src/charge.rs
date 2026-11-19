@@ -633,6 +633,20 @@ fn build_mode(
             },
             true,
         )?;
+        // 81CE4652 maps grounded return-to-idle to 0:1 (calm) or 0:17
+        // (enraged). The runtime resumes the script after the thought gate,
+        // independently of these looping motion clocks.
+        for (request, motion) in [(1, &[1][..]), (17, &[51][..])] {
+            bind(
+                0,
+                request,
+                Action {
+                    motions: motion,
+                    events: &[],
+                },
+                true,
+            )?;
+        }
         for id in [41, 42] {
             bind(
                 0,
