@@ -1,5 +1,7 @@
 .idea
-mhfz
-mhgu
+/mhfz/*
+!/mhfz/.gitkeep
+/mhgu/*
+!/mhgu/.gitkeep
 target
 __pycache__/
