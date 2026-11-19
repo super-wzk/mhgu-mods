@@ -28,6 +28,13 @@ mod entry {
         weapon: 0,
         encode: Some(motion::encode),
         decode: Some(motion::decode),
+        independent: true,
+        art_slots: 3,
+        controller: Some(super::battle::dispatch),
+        request: Some(super::battle::request),
+        actions: super::battle::ACTIONS,
+        guard: Some(super::battle::guard_policy),
+        commands: Some(super::battle::commands),
     };
 
     #[forge::entry]
@@ -36,13 +43,8 @@ mod entry {
             forge::log::prelude::warn!("Extreme GS disabled: style registry unavailable at init");
             return;
         };
-        if let Err(err) = registry.register_controller(
-            &EXTREME,
-            c"极之型大剑",
-            c"怪物猎人边境极之型大剑。",
-            super::battle::dispatch,
-            Some(super::battle::request),
-        ) {
+        if let Err(err) = registry.register(&EXTREME, c"极之型大剑", c"怪物猎人边境极之型大剑。")
+        {
             forge::log::prelude::warn!(
                 "Extreme GS: could not register style {}: {err:?}",
                 EXTREME.id
@@ -50,7 +52,6 @@ mod entry {
             return;
         }
         motion::install();
-        super::battle::install();
         super::combat::install();
         super::fx::install();
     }

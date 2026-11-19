@@ -56,8 +56,8 @@ fn spawn(resource: &DirectedShellResource<'_>, launch: ShellLaunch) -> bool {
 
 ## 武器风格插件
 
-[StyleRegistry](src/style/registry.rs) 是内容插件访问风格注册器的 SDK 入口。在 GU 游戏线程调用 `StyleRegistry::current()`，有服务时返回句柄，可以用 `registry.register(&STYLE)` 注册，或用 `registry.selected(weapon)` 查询指定武器实际启用的编号。`style::register`、`style::selected` 也可继续使用，前者在服务不可用时返回 `Unavailable`，后者返回 `0`（保留 GU 原版）。
+[StyleRegistry](src/style/registry.rs) 在 GU 游戏线程访问风格注册器。注册器先初始化，内容插件在 Forge 初始化入口调用一次 `registry.register(&STYLE, name, description)`。一个 V1 描述符提供动作编号、狩技槽位数及可选的请求、更新和防御规则。用 `style::selected(weapon)` 查询当前风格，返回 0 时使用 GU 原版风格。实际用法见[极型大剑](../../plugins/great-sword-extreme/src/lib.rs)。
 
-让注册器先初始化，内容插件只在 Forge 初始化入口注册一次。用 `registry.register_named(&STYLE, name, description)` 为装备箱提供名称和说明；没有提供名称的旧插件显示编号。注册器缺失或稍后才初始化时，本次启动继续使用原版风格。实际用法见[极型大剑](../../plugins/great-sword-extreme/src/lib.rs)。
+GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提供 GU 已解析的公共和武器指令，`request` 处理 GU 已接受的拔刀和武器切招请求。公共动作可返回 `PASS` 交给 GU。空输入通知插件结束，actor 为 0 时代表旧猎人已失效。
 
-独立风格用 `registry.register_controller(&STYLE, name, description, dispatch, Some(request))` 一次注册菜单、战斗回调和可选的原生请求接入。`Input` 直接传递 GU 公共指令表和武器指令表，键位设置、组合键及持续输入由 GU 生成；不把指令重新合成为按键。`request` 在 GU 接受武器动作请求后返回独立招式编号（0–255），可用于接入原生拔刀流程；返回 `PASS` 拒绝该原版招式。不需要接收请求时传 `None`。风格自身派生用 `style::action::enter(actor, move_id)` 切换动作，战斗回调可返回 `PASS` 将公共动作交回引擎。空输入通知插件结束，actor 为 0 时不能再访问旧猎人。尚未正式发布，服务统一使用 V1。
+`Style::commands` 可在 GU 装载命令表时追加一组有序的武器派生，由 GU 缓冲先接收的输入并在指定帧切换动作。`action::enter` 走 GU 的公共动作切换。已判定的单条派生可通过 `action::transition` 提交，狩技使用 `Transition::HUNTER_ART`。`action::play_motion` 使用猎人的原生动作编码。`Attack::submit` 把动作值和形状交给 GU 的攻击构造器及武器修正。注册器在大剑的首个有效攻击事件处理兽魂附身。`guard::Policy` 提供一次格挡结果，注册器负责把结果交给 GU 的受击、斩味和回正流程，内容插件可以用 `guard::take` 进入后续招式。

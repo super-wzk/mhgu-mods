@@ -5,9 +5,13 @@ use core::{
     ptr,
     sync::atomic::{AtomicPtr, AtomicU32, Ordering},
 };
+mod attack;
+mod commands;
+mod guard;
 mod menu;
+mod weapon;
 use mhgu_sdk::style::{
-    Controller, Input, PASS, Request, Style,
+    ActionRequest, Input, PASS, Style, action,
     registry::{self, ServiceV1},
 };
 
@@ -15,10 +19,18 @@ struct Entry {
     style: &'static Style,
     name: CString,
     details: CString,
-    independent: bool,
-    controller: Option<Controller>,
-    request: Option<Request>,
     next: *mut Entry,
+}
+
+impl Entry {
+    // Caller has already resolved the local hunter.
+    unsafe fn matches_weapon(&self, actor: u32) -> bool {
+        unsafe {
+            let equipment = ((actor + 5060) as *const u32).read();
+            equipment != 0
+                && u32::from(((equipment + 1236) as *const u8).read()) == self.style.weapon
+        }
+    }
 }
 
 // Published entries live until exit. The equipment box can enumerate the list;
@@ -27,45 +39,15 @@ static HEAD: AtomicPtr<Entry> = AtomicPtr::new(ptr::null_mut());
 static REQUESTED: AtomicU32 = AtomicU32::new(0);
 static ACTIVE: AtomicPtr<Entry> = AtomicPtr::new(ptr::null_mut());
 
-unsafe extern "C" fn register(raw: *const Style) -> u32 {
-    unsafe { register_named(raw, ptr::null(), ptr::null()) }
-}
-
-unsafe extern "C" fn register_named(
+unsafe extern "C" fn register(
     raw: *const Style,
     name: *const c_char,
     details: *const c_char,
-) -> u32 {
-    unsafe { insert(raw, name, details, false, None, None) }
-}
-unsafe extern "C" fn register_independent(
-    raw: *const Style,
-    name: *const c_char,
-    details: *const c_char,
-) -> u32 {
-    unsafe { insert(raw, name, details, true, None, None) }
-}
-unsafe extern "C" fn register_controller(
-    raw: *const Style,
-    name: *const c_char,
-    details: *const c_char,
-    controller: Controller,
-    request: Option<Request>,
-) -> u32 {
-    unsafe { insert(raw, name, details, true, Some(controller), request) }
-}
-unsafe fn insert(
-    raw: *const Style,
-    name: *const c_char,
-    details: *const c_char,
-    independent: bool,
-    controller: Option<Controller>,
-    request: Option<Request>,
 ) -> u32 {
     let Some(style) = (unsafe { raw.as_ref() }) else {
         return 1;
     };
-    if !(1..=65535).contains(&style.id) || style.weapon > 14 {
+    if !(1..=65535).contains(&style.id) || style.weapon > 14 || style.art_slots > 3 {
         return 1;
     }
     let mut head = HEAD.load(Ordering::Acquire);
@@ -73,15 +55,7 @@ unsafe fn insert(
         let mut cur = head;
         while let Some(entry) = unsafe { cur.as_ref() } {
             if entry.style.id == style.id {
-                return if ptr::eq(entry.style, style)
-                    && entry.independent == independent
-                    && entry.controller.map(|f| f as usize) == controller.map(|f| f as usize)
-                    && entry.request.map(|f| f as usize) == request.map(|f| f as usize)
-                {
-                    0
-                } else {
-                    2
-                };
+                return if ptr::eq(entry.style, style) { 0 } else { 2 };
             }
             cur = entry.next;
         }
@@ -99,9 +73,6 @@ unsafe fn insert(
             style,
             name,
             details,
-            independent,
-            controller,
-            request,
             next: head,
         }));
         match HEAD.compare_exchange(head, node, Ordering::AcqRel, Ordering::Acquire) {
@@ -160,18 +131,15 @@ unsafe fn local_hunter() -> u32 {
 }
 
 unsafe fn local_style(actor: u32) -> Option<&'static Style> {
-    let style = active()?.style;
+    let entry = active()?;
     unsafe {
-        if actor == 0 || local_hunter() != actor {
-            return None;
-        }
-        let eq = *((actor + 5060) as *const u32);
-        (eq != 0 && *((eq + 1236) as *const u8) as u32 == style.weapon).then_some(style)
+        (actor != 0 && local_hunter() == actor && entry.matches_weapon(actor))
+            .then_some(entry.style)
     }
 }
 
 unsafe fn independent(actor: u32) -> bool {
-    active().is_some_and(|entry| entry.independent) && unsafe { local_style(actor) }.is_some()
+    unsafe { local_style(actor) }.is_some_and(|style| style.independent)
 }
 
 #[forge::hook(offset = 0x27c6a0)]
@@ -196,43 +164,42 @@ unsafe fn decode(actor: u32, packed: u32) -> u32 {
     original!(actor, packed)
 }
 
-static API: ServiceV1 = ServiceV1 { register, selected };
-static MENU_API: registry::MenuV1 = registry::MenuV1 {
-    register: register_named,
-};
-static INDEPENDENT_API: registry::MenuV1 = registry::MenuV1 {
-    register: register_independent,
-};
-static CONTROL_API: registry::ControlV1 = registry::ControlV1 {
-    register: register_controller,
+static API: ServiceV1 = ServiceV1 {
+    register,
+    selected,
+    attack: attack::submit,
+    take_guard: guard::take,
 };
 static LAST_ENTRY: AtomicPtr<Entry> = AtomicPtr::new(ptr::null_mut());
 static LAST_ACTOR: AtomicU32 = AtomicU32::new(0);
 
-unsafe fn controller_frame(actor: u32) -> u32 {
+unsafe fn controller_frame(actor: u32, weapon_dispatch: bool) -> u32 {
     unsafe {
-        let selected = active().filter(|e| e.controller.is_some());
+        let selected = active().filter(|e| e.style.controller.is_some());
         if actor == 0
             || (selected.is_none() && LAST_ENTRY.load(Ordering::Relaxed).is_null())
             || actor != local_hunter()
         {
             return PASS;
         }
-        let eq = *((actor + 5060) as *const u32);
-        let e = selected
-            .filter(|e| eq != 0 && u32::from(*((eq + 1236) as *const u8)) == e.style.weapon);
+        let e = selected.filter(|entry| entry.matches_weapon(actor));
         let entry = e.map_or(ptr::null_mut(), |e| ptr::from_ref(e).cast_mut());
         let prev = LAST_ENTRY.swap(entry, Ordering::Relaxed);
         let owner = LAST_ACTOR.swap(actor, Ordering::Relaxed);
         if prev != entry || actor != owner {
-            if let Some(stop) = prev.as_ref().and_then(|e| e.controller) {
+            guard::clear(owner);
+            if let Some(stop) = prev.as_ref().and_then(|e| e.style.controller) {
                 // A previous scene's actor may already have been destroyed.
                 stop(if owner == actor { owner } else { 0 }, ptr::null());
             }
         }
-        let Some(tick) = e.and_then(|e| e.controller) else {
+        let Some(tick) = e.and_then(|e| e.style.controller) else {
             return PASS;
         };
+        let (group, slot) = action::current(actor);
+        if action::custom(group, slot) != weapon_dispatch {
+            return PASS;
+        }
         // Keep the native dispatch prologue, including priority for a forced
         // action (damage, scene transitions), before handing control to a style.
         if *((actor + 9493) as *const u8) & 4 != 0 {
@@ -249,26 +216,39 @@ unsafe fn controller_frame(actor: u32) -> u32 {
             auxiliary_pressed: u32::from(*((actor + 5112) as *const u16)) & auxiliary(),
         };
         let result = tick(actor, &input);
-        if result == PASS
-            && mhgu_sdk::style::action::custom(
-                *((actor + 9478) as *const u16),
-                *((actor + 9482) as *const u16),
-            )
-        {
-            // A nested dispatch during a transition must not run a stock
-            // weapon handler with a controller-owned slot.
-            return 0;
+        if result == PASS {
+            let (group, slot) = action::current(actor);
+            if action::custom(group, slot) {
+                // Keep nested dispatch away from the stock weapon tables.
+                return 0;
+            }
         }
         result
     }
 }
 #[forge::hook(offset = 0x282da8)]
 unsafe fn dispatch(actor: u32) -> u32 {
-    let result = unsafe { crate::runtime::controller_frame(actor) };
+    let result = unsafe { crate::runtime::controller_frame(actor, false) };
     if result != mhgu_sdk::style::PASS {
         return result;
     }
     original!(actor)
+}
+
+#[forge::hook(offset = 0x2b8178)]
+unsafe fn weapon_dispatch(actor: u32) -> u32 {
+    let (group, slot) = unsafe { action::current(actor) };
+    let Some(id) = action::custom_id(group, slot) else {
+        return original!(actor);
+    };
+    if active().is_some_and(|entry| entry.style.actions.contains(id)) {
+        let result = unsafe { controller_frame(actor, true) };
+        if result != PASS {
+            return result;
+        }
+    }
+    // Custom IDs have no entry in the retail weapon tables.
+    0
 }
 
 #[forge::hook(offset = 0x2ab670)]
@@ -277,31 +257,56 @@ unsafe fn change_action(actor: u32, group: u32, slot: u32, flags: u32) -> u32 {
     // movement, guarding, damage and interactions remain available, but stock
     // weapon requests must not change state before the new style consumes GU's
     // resolved command buffer. Custom slots use the same native lifecycle.
-    if group == u32::from(mhgu_sdk::style::action::GROUP)
-        && slot < u32::from(mhgu_sdk::style::action::FIRST)
-        && unsafe { local_style(actor) }.is_some()
-        && active().is_some_and(|e| e.controller.is_some())
-    {
-        if let Some(resolve) = active().and_then(|e| e.request) {
-            let move_id = unsafe { resolve(actor, slot, flags) };
-            if move_id <= u8::MAX.into() {
-                return original!(
-                    actor,
-                    group,
-                    u32::from(mhgu_sdk::style::action::slot(move_id as u8)),
-                    flags
-                );
-            }
+    let slot = if group == u32::from(action::GROUP) {
+        match unsafe { resolve_weapon_slot(actor, slot as u16, flags as u16) } {
+            Some(slot) => u32::from(slot),
+            None => return 0,
         }
-        return 0;
+    } else {
+        slot
+    };
+    let out = original!(actor, group, slot, flags);
+    unsafe { guard::after_change(actor, group, slot) };
+    out
+}
+
+unsafe fn resolve_weapon_slot(actor: u32, slot: u16, flags: u16) -> Option<u16> {
+    let style = unsafe { local_style(actor) };
+    if let Some(id) = action::custom_id(action::GROUP, slot) {
+        return style?.actions.contains(id).then_some(slot);
     }
-    original!(actor, group, slot, flags)
+    let Some(style) = style.filter(|style| style.controller.is_some()) else {
+        return Some(slot);
+    };
+    if unsafe { weapon::allows_native_art(actor, style, slot, flags) } {
+        return Some(slot);
+    }
+    unsafe {
+        resolve_request(
+            actor,
+            style,
+            ActionRequest {
+                group: action::GROUP,
+                slot,
+                flags,
+                draw_route: false,
+            },
+        )
+    }
+}
+
+unsafe fn resolve_request(actor: u32, style: &Style, req: ActionRequest) -> Option<u16> {
+    let id = unsafe { (style.request?)(actor, &req) };
+    let id = u8::try_from(id).ok()?;
+    style.actions.contains(id).then(|| action::slot(id))
 }
 static NATIVE_MENU: AtomicU32 = AtomicU32::new(0);
-fn native_menu<R>(call: impl FnOnce() -> R) -> R {
-    NATIVE_MENU.fetch_add(1, Ordering::AcqRel);
+const ARTS_MENU: u32 = 2;
+fn native_menu<R>(configure_arts: bool, call: impl FnOnce() -> R) -> R {
+    let mode = if configure_arts { ARTS_MENU } else { 1 };
+    let previous = NATIVE_MENU.swap(mode, Ordering::AcqRel);
     let result = call();
-    NATIVE_MENU.fetch_sub(1, Ordering::Release);
+    NATIVE_MENU.store(previous, Ordering::Release);
     result
 }
 #[forge::hook(offset = 0x268818)]
@@ -315,14 +320,26 @@ unsafe fn game_style(actor: u32) -> u32 {
     }
     original!(actor)
 }
-// The action and input controllers test this before consuming an equipped
-// hunter art. Do not zero the equipment slots: the save writer uses them too.
 #[forge::hook(offset = 0x2a26c8)]
 unsafe fn art_ready(actor: u32, slot: u32) -> u32 {
-    if unsafe { crate::runtime::independent(actor) } {
+    if active().is_some_and(|entry| entry.style.art_slots == 0) && unsafe { independent(actor) } {
         return 0;
     }
     original!(actor, slot)
+}
+
+// This native limit also serves preset previews. Override it only for the
+// local hunter's equipment-box art selection.
+#[forge::hook(offset = 0x2778ac)]
+unsafe fn art_capacity(manager: u32, style: u32) -> u32 {
+    if NATIVE_MENU.load(Ordering::Acquire) == ARTS_MENU
+        && let Some(entry) = active()
+        && entry.style.art_slots != 0
+        && unsafe { local_style(local_hunter()) }.is_some()
+    {
+        return u32::from(entry.style.art_slots);
+    }
+    original!(manager, style)
 }
 
 // The Valor HUD factory (633D1C) uses game_style, but a widget which already
@@ -338,7 +355,7 @@ unsafe fn valor_hud(widget: u32) -> u32 {
 
 unsafe fn update_valor_node(widget: u32) {
     unsafe {
-        let hide = active().is_some_and(|e| e.independent) && independent(local_hunter());
+        let hide = independent(local_hunter());
         if !hide && HIDDEN_VALOR_NODE.load(Ordering::Relaxed) == 0 {
             return;
         }
@@ -378,18 +395,19 @@ fn start() {
     if !unsafe { registry::publish(&API) } {
         return;
     }
-    unsafe {
-        registry::publish_menu(&MENU_API);
-        registry::publish_independent(&INDEPENDENT_API);
-        registry::publish_controller(&CONTROL_API);
-    }
     let base = forge::mem::text_addr();
     forge::install_hook!(base, encode);
     forge::install_hook!(base, decode);
     forge::install_hook!(base, game_style);
     forge::install_hook!(base, art_ready);
+    forge::install_hook!(base, art_capacity);
     forge::install_hook!(base, valor_hud);
     forge::install_hook!(base, dispatch);
+    forge::install_hook!(base, weapon_dispatch);
     forge::install_hook!(base, change_action);
+    attack::install(base);
+    commands::install(base);
+    guard::install(base);
+    weapon::install(base);
     menu::install(base);
 }

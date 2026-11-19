@@ -157,6 +157,9 @@ unsafe fn bank(player: u32, resource: u32) -> Option<u32> {
 }
 pub(super) unsafe extern "C" fn encode(player: u32, request: u32) -> u32 {
     unsafe {
+        if (0x10000..0x20000).contains(&request) {
+            return physical(player, request as u16).unwrap_or(PASS);
+        }
         // Only replace the GS's drawn ground roll (GU 2CF8A4 -> 2ACFA4).
         // Let its controller spend stamina and set the invulnerability clock.
         if request == 28 && at::<u16>(player, 9478) == 1 && at::<u16>(player, 9482) == 6 {
@@ -277,43 +280,13 @@ pub(super) fn install() {
     forge::install_hook!(base(), equipment_grip);
 }
 
-// Forge is soft-float; the GU layered motion setter takes blend, initial frame
-// and playback speed in s0..s2. Pass the packed bank/slot directly to 954640.
-core::arch::global_asm!(
-    ".syntax unified",
-    ".arm",
-    ".fpu vfpv3",
-    ".text",
-    ".align 2",
-    ".global extreme_start_clip",
-    ".hidden extreme_start_clip",
-    ".type extreme_start_clip,%function",
-    "extreme_start_clip:",
-    "vmov s0,r2",
-    "vmov s1,r3",
-    "vmov.f32 s2,#1.0",
-    "mov r2,r1",
-    "mov r1,#0",
-    "mov r3,#0",
-    "ldr ip,[sp]",
-    "bx ip",
-);
-unsafe extern "C" {
-    fn extreme_start_clip(player: u32, id: u32, blend: u32, start: u32, entry: u32) -> u32;
-}
 pub(super) unsafe fn play(player: u32, source: u16, start: u16, blend: u16) -> Option<u16> {
     unsafe {
-        let packed = physical(player, source)?;
-        if at::<u32>(player, 240) == 0 {
-            return None;
-        }
-        let ok = extreme_start_clip(
+        mhgu_sdk::style::action::play_motion(
             player,
-            packed,
-            f32::from(blend / 2).to_bits(),
-            f32::from(start).to_bits(),
-            base() + 0x954640,
-        );
-        (ok != 0).then_some(packed as u16)
+            0x10000 | u32::from(source),
+            f32::from(start),
+            f32::from(blend / 2),
+        )
     }
 }

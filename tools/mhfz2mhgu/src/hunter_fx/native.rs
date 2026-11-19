@@ -1,7 +1,7 @@
 //! Frontier curves compiled to GU EFL model particles. No playback code is
 //! embedded in the plugin: A9958C/A9A280 animate model particles, AFB2BC and
 //! AF938C evaluate their vector/colour keys, and AEDE08 owns their lifetime.
-use super::{BANKS, half, sheet::Sheet};
+use super::{BANKS, CHARGE_AURA_MESH, half, sheet::Sheet};
 use anyhow::{Context, Result, ensure};
 use mhgu_resource::arc::{self, Asset};
 use std::collections::BTreeSet;
@@ -586,7 +586,7 @@ impl Compiler {
                 let y = if mirrored { core::f32::consts::PI } else { 0. };
                 self.layer(
                     Layer {
-                        mesh: [66, 72][kind],
+                        mesh: [CHARGE_AURA_MESH, 72][kind],
                         uv_speed: [0.; 2],
                         frames_per_second: 30.,
                         // Limit the combined brightness of the overlapping auras
@@ -635,7 +635,7 @@ impl Compiler {
                 };
                 self.layer(
                     Layer {
-                        mesh: [66, 88][kind],
+                        mesh: [CHARGE_AURA_MESH, 88][kind],
                         uv_speed: [0.; 2],
                         frames_per_second: 30.,
                         blend: 1,

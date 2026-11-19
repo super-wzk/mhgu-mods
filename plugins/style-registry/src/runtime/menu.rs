@@ -1,6 +1,6 @@
 //! GU 1.4 equipment-box Change Style controller. Its list has eight real row widgets
 //! (6376BC); 5490FC and 548E24, however, only have six native style records.
-use super::{Entry, choose, entries, selected};
+use super::{Entry, choose, entries, native_menu, selected};
 
 const STOCK: usize = 6;
 const ROWS: [u32; 8] = [7, 8, 9, 10, 0x46, 0x47, 0x4e, 0x4f];
@@ -149,7 +149,7 @@ impl BoxMenu {
                     // Continue to the native Arts screen. It must never see a custom row as an art slot.
                     gu!(0x557d90, self.cursor(), 0);
                     gu!(0x549e24, self.0);
-                    gu!(0x548f94, self.0, 5);
+                    native_menu(true, || gu!(0x548f94, self.0, 5));
                     self.equipped_label();
                     gu!(0x54f260, 1, 201);
                 }
@@ -175,7 +175,7 @@ impl BoxMenu {
 
 #[forge::hook(offset = 0x548b7c)]
 unsafe fn open(ui: u32, panel: u32, help: u32, mode: u32) -> u32 {
-    let out = crate::runtime::native_menu(|| original!(ui, panel, help, mode));
+    let out = native_menu(true, || original!(ui, panel, help, mode));
     if panel != 0 && help != 0 {
         BoxMenu(ui).configure();
     }
@@ -186,12 +186,12 @@ unsafe fn open(ui: u32, panel: u32, help: u32, mode: u32) -> u32 {
 unsafe fn update(ui: u32) -> u32 {
     let m = BoxMenu(ui);
     if m.panel() == 0 {
-        return crate::runtime::native_menu(|| original!(ui));
+        return native_menu(false, || original!(ui));
     }
     let phase = m.phase();
     let weapon = m.weapon();
     if entries(weapon).next().is_none() {
-        return crate::runtime::native_menu(|| original!(ui));
+        return native_menu(false, || original!(ui));
     }
     let pad: u32 = unsafe { read(forge::mem::text_addr(), 0x188c670) };
     if pad == 0 {
@@ -221,10 +221,20 @@ unsafe fn update(ui: u32) -> u32 {
             }
         }
     }
-    let out = crate::runtime::native_menu(|| original!(ui));
+    let out = native_menu((5..=9).contains(&phase), || original!(ui));
     let next = m.phase();
     if ((phase == 1 && next == 5) || (phase == 3 && next == 4)) && selected(weapon) != 0 {
+        let had_custom_slots = m.equipped().is_some_and(|entry| entry.style.art_slots != 0);
         choose(None); // Only after GU accepted the native style, including reselecting the equipped one.
+        if had_custom_slots && phase == 1 {
+            // GU skipped the normal slot migration because its saved style byte
+            // already matched the selected row.
+            unsafe {
+                let style = read::<u32>(m.panel(), 104);
+                gu!(0x549fb4, ui, 0, style);
+                gu!(0x548f94, ui, 5);
+            }
+        }
     }
     if phase != 1 && next == 1 {
         m.configure();

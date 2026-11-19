@@ -8,15 +8,53 @@ use crate::{
 };
 use core::{
     cell::UnsafeCell,
-    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, Ordering},
 };
-use mhgu_sdk::style::{Input, PASS, action};
+use mhgu_sdk::style::{
+    ActionRequest, Input, PASS, action,
+    action::command::{BufferedCommand, CommandInput, CommandSet, MAX_COMMAND_FRAME},
+    guard,
+};
 const DASH: u8 = 200;
 const BRAKE: u8 = 201;
 const IDLE: u8 = 255;
+pub(super) const ACTIONS: action::Actions = action::Actions::new(74).with(DASH).with(BRAKE);
 const GUARD_GROUP: u16 = 32;
 const GUARD_MOTION: u32 = 5005;
-const GUARD_RECOIL_SLOTS: [u32; 4] = [3, 4, 5, 8];
+const GUARD_CANCEL_FRAME: i16 = 56;
+
+const fn roll_commands(slash: u8, accept_until: i16) -> [BufferedCommand; 2] {
+    // FZ 811D91FE buffers from 30 and opens the follow-up at 44.
+    let uppercut = BufferedCommand {
+        group: action::GROUP,
+        slot: action::slot(53),
+        input: CommandInput::Weapon(1),
+        accept_from: 30,
+        execute_from: 44,
+        accept_until,
+    };
+    [
+        uppercut,
+        BufferedCommand {
+            slot: action::slot(slash),
+            input: CommandInput::Weapon(5),
+            ..uppercut
+        },
+    ]
+}
+
+static FORWARD_ROLL: CommandSet = CommandSet::new(&roll_commands(26, 54));
+static LEFT_ROLL: CommandSet = CommandSet::new(&roll_commands(26, 64));
+static RIGHT_ROLL: CommandSet = CommandSet::new(&roll_commands(27, 64));
+static GUARD_RECOVERY: CommandSet = CommandSet::new(&[BufferedCommand {
+    group: 1,
+    slot: 6,
+    input: CommandInput::Common(3),
+    accept_from: GUARD_CANCEL_FRAME,
+    execute_from: GUARD_CANCEL_FRAME,
+    accept_until: MAX_COMMAND_FRAME,
+}]);
+
 // FZ 817C0982 starts the emitter at frame 84 of clip 1465.
 const RADIANCE_CLIP: u16 = 1465;
 const RADIANCE_START: f32 = 84.;
@@ -55,6 +93,22 @@ macro_rules! native {
     }};
     (@t $x:expr)=>{u32};
 }
+pub(super) unsafe extern "C" fn commands(p: u32, table_id: u32) -> *const CommandSet {
+    let (group, slot) = unsafe { action::current(p) };
+    match (table_id, group, slot) {
+        (2010, GUARD_GROUP, 0 | 1 | 9) if unsafe { native!(0x53a058, p) } == GUARD_MOTION => {
+            &GUARD_RECOVERY
+        }
+        (2011, 1, 6) => match unsafe { native!(0x53a058, p) } {
+            28 => &FORWARD_ROLL,
+            5012 => &LEFT_ROLL,
+            5013 => &RIGHT_ROLL,
+            _ => core::ptr::null(),
+        },
+        _ => core::ptr::null(),
+    }
+}
+
 pub(super) unsafe fn local(p: u32) -> bool {
     unsafe {
         if p == 0 || read::<u32>(p, 0) != forge::mem::text_addr() + 0x1749a88 {
@@ -118,7 +172,6 @@ struct Battle {
     aura_time: f32,
     flick: program::Flick,
     guard_dash: bool,
-    roll_attack: Option<u8>,
     roll_side: Option<u32>,
     poise: f32,
     sustain_poise: bool,
@@ -145,7 +198,6 @@ impl Battle {
             aura_time: 0.,
             flick: Default::default(),
             guard_dash: false,
-            roll_attack: None,
             roll_side: None,
             poise: 0.,
             sustain_poise: false,
@@ -162,10 +214,13 @@ impl Battle {
         self.hit = false;
         self.roll_side = None;
     }
+    unsafe fn cancel_attack(&mut self, p: u32) {
+        self.cancel();
+        unsafe { write(p, 12325, 0u8) };
+    }
     unsafe fn finish(&mut self, p: u32) {
         unsafe {
-            self.cancel();
-            write(p, 12325, 0u8);
+            self.cancel_attack(p);
             native!(0x2b6e5c, p);
         }
     }
@@ -177,8 +232,7 @@ impl Battle {
                     .take()
                     .unwrap_or_else(|| motion::roll_side(p)),
             );
-            self.cancel();
-            write(p, 12325, 0u8);
+            self.cancel_attack(p);
             // Stock drawn roll: 2CBFCC case 6 -> 2CF8A4, including its stamina,
             // invulnerability, collision and recovery handling.
             native!(0x2ab670, p, 1, 6, 0);
@@ -241,9 +295,8 @@ impl Battle {
                 return false;
             }
             // An accepted GU request has already run the common transition.
-            let requested = read::<u16>(p, 9478) == action::GROUP
-                && read::<u16>(p, 9482) == action::slot(state)
-                && read::<u8>(p, 5) == 0;
+            let requested =
+                action::current(p) == (action::GROUP, action::slot(state)) && read::<u8>(p, 5) == 0;
             if !requested && !action::enter(p, state) {
                 self.cancel();
                 return false;
@@ -313,11 +366,6 @@ impl Battle {
                         self.level = 0;
                     }
                     14 => self.level = param as u8,
-                    // The draw slash joins clip 1428 at frame 32. Its row
-                    // opens at clip frame 36, four frames after the handoff.
-                    17 if self.cursor.state == 13 => {
-                        combat::emit(p, param, self.cursor.time.frame);
-                    }
                     16 | 17 => {
                         combat::emit(p, param, late);
                     }
@@ -353,11 +401,23 @@ impl Battle {
         unsafe {
             let next = match branch {
                 65 => {
-                    self.cancel();
-                    native!(0x2ab670, p, u32::from(GUARD_GROUP), 0, 0);
+                    if action::transition_to(p, GUARD_GROUP, 0) {
+                        self.cancel();
+                    }
                     return true;
                 }
-                74 => return self.evade(p),
+                74 => {
+                    motion::remember_roll(
+                        p,
+                        self.roll_side.unwrap_or_else(|| motion::roll_side(p)),
+                    );
+                    if action::transition_to(p, 1, 6) {
+                        self.cancel_attack(p);
+                    } else {
+                        motion::forget_roll(p);
+                    }
+                    return true;
+                }
                 75 => DASH,
                 76 => 22,
                 77 => 24,
@@ -379,7 +439,12 @@ impl Battle {
                 n if n < 74 => n as u8,
                 _ => return true,
             };
-            self.begin(p, next)
+            if action::transition_to(p, action::GROUP, action::slot(next)) {
+                motion::aim(p, branch);
+                self.begin(p, next)
+            } else {
+                true
+            }
         }
     }
     unsafe fn advance(&mut self, p: u32, input: &Input, dash_input: bool) -> bool {
@@ -402,7 +467,10 @@ impl Battle {
                 if previous < 10. && !input.weapon_command(5) {
                     self.draw_released = true;
                 }
-                if frame >= 10. && self.draw_released {
+                if frame >= 10.
+                    && self.draw_released
+                    && action::transition_to(p, action::GROUP, action::slot(13))
+                {
                     return self.begin_at(p, 13, Some(frame.min(36.) as u16));
                 }
             }
@@ -433,6 +501,13 @@ impl Battle {
             self.poise = (self.poise - delta).max(0.);
             let was_charging = self.charging;
             self.events(p);
+            if state < 74
+                && self.cursor.hunter_art_window(self.hit)
+                && action::transition(p, action::Transition::HUNTER_ART)
+            {
+                self.cancel_attack(p);
+                return true;
+            }
             if self.sustain_poise {
                 self.poise = self.poise.max(8.);
                 write(p, 10288, self.poise.max(read::<f32>(p, 10288)));
@@ -449,7 +524,11 @@ impl Battle {
                 spend_stamina(p, 150.);
                 crate::sound::play(p, false, 1);
                 fx::emit(p, 4, Some(0));
-                let duration = if charge_state(state) { 240. } else { self.poise };
+                let duration = if charge_state(state) {
+                    240.
+                } else {
+                    self.poise
+                };
                 write(p, 10296, duration);
             }
             if self.charging && delta > 0. {
@@ -474,7 +553,6 @@ impl Battle {
                 };
                 if expired {
                     let branch = if uppercut_charge { 86 } else { 85 };
-                    motion::aim(p, branch);
                     if uppercut_charge {
                         // 811D84FE resets +2856 to level two on overcharge;
                         // manual release during the fourth tier still uses row 168.
@@ -590,7 +668,6 @@ impl Battle {
                     self.roll_side = Some(motion::roll_side(p));
                 }
                 if let Some(branch) = branch {
-                    motion::aim(p, branch);
                     return self.begin_branch(p, branch);
                 }
             }
@@ -659,8 +736,7 @@ impl Battle {
     }
     unsafe fn tick(&mut self, p: u32, input: &Input) -> bool {
         unsafe {
-            let group: u16 = read(p, 9478);
-            let act: u16 = read(p, 9482);
+            let (group, act) = action::current(p);
             if (group, act) != (1, 6) {
                 motion::forget_roll(p);
             }
@@ -692,30 +768,30 @@ impl Battle {
                 }
                 self.cancel(); // damage, sheathing, warp or another GU action took ownership
             }
-            if group == action::GROUP {
-                if phase == 0 && action::custom(group, act) {
-                    return self.begin(p, (act - action::FIRST) as u8);
+            if let Some(id) = action::custom_id(group, act) {
+                if phase == 0 {
+                    return self.begin(p, id);
                 }
                 // A lost clip or a style switched during a weapon action must
                 // return through the shared lifecycle, never the stock GS table.
                 self.finish(p);
                 return true;
             }
+            if group == action::GROUP {
+                return false;
+            }
             if group == GUARD_GROUP && matches!(act, 0 | 1 | 9 | 12 | 14) {
                 if phase == 0 {
-                    PRECISE_GUARD_OWNER.store(0, Ordering::Release);
                     self.guard_dash = false;
                 }
                 if phase != 0 && motion::decode(p, u32::from(physical)) == GUARD_MOTION {
                     let frame = read::<f32>(p, 1280);
                     self.guard_dash |= frame >= 20. && dash_input;
-                    if frame >= 56. {
-                        if input.command(3) {
-                            return self.evade(p);
-                        }
-                        if self.guard_dash && read::<f32>(p, 5088) > 0. {
-                            return self.begin(p, DASH);
-                        }
+                    if frame >= f32::from(GUARD_CANCEL_FRAME)
+                        && self.guard_dash
+                        && read::<f32>(p, 5088) > 0.
+                    {
+                        return self.begin(p, DASH);
                     }
                     if read::<u8>(p, 1206) & 4 != 0 || frame >= read::<f32>(p, 1284) {
                         self.finish(p);
@@ -725,44 +801,23 @@ impl Battle {
                 }
                 return false;
             }
-            if group == GUARD_GROUP && GUARD_RECOIL_SLOTS.contains(&u32::from(act)) {
-                if phase == 0 && PRECISE_GUARD_OWNER.swap(0, Ordering::AcqRel) == p {
-                    // Snapshot the damage owner before GU initializes recoil.
-                    // Only monster guards charge the finisher.
-                    let monster = read::<u16>(p, 12826) != 0xffff;
-                    native!(0x2c4eec, p);
-                    return self.begin(p, if monster { 66 } else { 72 });
+            if group == GUARD_GROUP {
+                if phase == 0
+                    && let Some(block) = guard::take(p)
+                {
+                    return self.begin(
+                        p,
+                        match block {
+                            guard::Contact::Monster => 66,
+                            guard::Contact::Other => 72,
+                        },
+                    );
                 }
                 return false;
             }
-            PRECISE_GUARD_OWNER.store(0, Ordering::Release);
             if read::<u8>(p, 9493) & 4 != 0 {
                 return false;
             }
-            if group == 1 && act == 6 && phase != 0 && native!(0x2a2444, p) != 0 {
-                let m = native!(0x53a058, p);
-                if matches!(m, 28 | 5012 | 5013) {
-                    // 811D91FE buffers from frame 30, releases at 44. The
-                    // forward roll stops accepting at 54, either side at 64.
-                    let frame = read::<f32>(p, 1280);
-                    if (30. ..if m == 28 { 54. } else { 64. }).contains(&frame)
-                        && self.roll_attack.is_none()
-                    {
-                        if input.weapon_command(1) {
-                            self.roll_attack = Some(53);
-                        } else if input.weapon_command(5) {
-                            self.roll_attack = Some(if m == 5013 { 27 } else { 26 });
-                        }
-                    }
-                    if frame >= 44.
-                        && let Some(state) = self.roll_attack.take()
-                    {
-                        return self.begin(p, state);
-                    }
-                    return false;
-                }
-            }
-            self.roll_attack = None;
             // FZ 817E9CB4 / 817EAA30: recover forwards or backwards from a
             // launch. Wait for GU's own landing test (2BB164), never replace
             // a lethal hit, an airborne trajectory or a different reaction.
@@ -781,6 +836,9 @@ impl Battle {
             if phase != 0 && matches!(group, 1 | 2) {
                 let motion = native!(0x53a058, p);
                 if matches!(motion, 5001 | 5004) {
+                    if action::transition(p, action::Transition::HUNTER_ART) {
+                        return true;
+                    }
                     if input.command(13) {
                         native!(0x2ab670, p, 1, 2, 0); // shared sheathe, motion 5003
                         return true;
@@ -816,7 +874,6 @@ impl Battle {
 struct Controller(AtomicBool, UnsafeCell<Option<Battle>>);
 unsafe impl Sync for Controller {}
 static CONTROL: Controller = Controller(AtomicBool::new(false), UnsafeCell::new(None));
-static PRECISE_GUARD_OWNER: AtomicU32 = AtomicU32::new(0);
 
 pub(super) fn radiance_origin(owner: u32, shapes: u32) -> Option<[f32; 3]> {
     if CONTROL.0.swap(true, Ordering::Acquire) {
@@ -832,20 +889,23 @@ pub(super) fn radiance_origin(owner: u32, shapes: u32) -> Option<[f32; 3]> {
     origin
 }
 
-pub(super) unsafe extern "C" fn request(p: u32, slot: u32, _flags: u32) -> u32 {
+pub(super) unsafe extern "C" fn request(p: u32, raw: *const ActionRequest) -> u32 {
     unsafe {
-        // Called only after GU's native movement/interaction controller accepts
-        // a weapon request. In particular sprint and walk share this entry;
-        // no button/state whitelist is needed here.
-        if native!(0x2a2444, p) != 0 || !matches!(slot, 0 | 1 | 3 | 19 | 20) {
+        let request = &*raw;
+        if native!(0x2a2444, p) != 0 {
             return PASS;
         }
         let commands = read::<u32>(p, 5156);
+        if !request.draw_route && !matches!(request.slot, 0 | 1 | 3 | 19 | 20) {
+            return PASS;
+        }
         if commands & (1 << 1) != 0 {
             47
+        } else if request.draw_route {
+            PASS
         } else if commands & (1 << 2) != 0 && commands & (1 << 12) == 0 {
             38
-        } else if slot == 3 || commands & (1 << 5) == 0 {
+        } else if request.slot == 3 || commands & (1 << 5) == 0 {
             13
         } else {
             20
@@ -869,12 +929,13 @@ pub(super) unsafe extern "C" fn dispatch(p: u32, input: *const Input) -> u32 {
             if let Some(mut battle) = slot.take()
                 && p != 0
                 && battle.owner == p
-                && action::custom(read(p, 9478), read(p, 9482))
             {
-                battle.finish(p);
+                let (group, slot) = action::current(p);
+                if action::custom(group, slot) {
+                    battle.finish(p);
+                }
             }
             motion::forget_roll(p);
-            PRECISE_GUARD_OWNER.store(0, Ordering::Release);
             false
         }
     };
@@ -882,70 +943,31 @@ pub(super) unsafe extern "C" fn dispatch(p: u32, input: *const Input) -> u32 {
     if handled { 0 } else { PASS }
 }
 
-#[forge::hook(offset = 0x115fcf4)]
-unsafe fn draw_route(p: u32, kind: u32) -> u32 {
+pub(super) unsafe extern "C" fn guard_policy(
+    p: u32,
+    result: *mut guard::GuardResult,
+) -> guard::Decision {
     unsafe {
-        // GU has already accepted the draw command here. X+A ordinarily maps
-        // to a shared draw/guard group, so intercepting group 16 afterwards
-        // misses it. Replace the weapon's route, preserving native movement,
-        // interaction checks and the mapped command buffer.
-        // Native routes 2/4 explicitly request draw-guard (group 32). Their
-        // R+X+A combination also sets X+A, so keep those routes intact.
-        if matches!(kind, 0 | 1 | 3)
-            && crate::battle::local(p)
-            && native!(0x2a2444, p) == 0
-            && read::<u32>(p, 5156) & (1 << 1) != 0
-        {
-            static UPPERCUT: [u16; 3] = [16, action::slot(47), 0];
-            return UPPERCUT.as_ptr() as u32;
-        }
-    }
-    original!(p, kind)
-}
-
-// Independent actions use GU's shared lifecycle without stock GS charge state.
-#[forge::hook(offset = 0x1160650)]
-unsafe fn change_action(p: u32, group: u32, slot: u32, flags: u32) -> u32 {
-    unsafe {
-        if crate::battle::local(p) {
-            let result = native!(0x2ab670, p, group, slot, flags);
-            if group == u32::from(GUARD_GROUP)
-                && GUARD_RECOIL_SLOTS.contains(&slot)
-                && PRECISE_GUARD_OWNER.load(Ordering::Acquire) == p
-                && read::<u16>(p, 9478) == GUARD_GROUP
-                && u32::from(read::<u16>(p, 9482)) == slot
-            {
-                // FZ 81744DA0 grants four simulation ticks immediately;
-                // state 66/72 then starts its seven-tick recovery protection.
-                // GU 29CEC4 decrements this clock in 60-Hz motion units.
-                write(p, 11072, 8f32.max(read(p, 11072)));
-            }
-            return result;
-        }
-    }
-    original!(p, group, slot, flags)
-}
-#[forge::hook(offset = 0x2f2ba0)]
-unsafe fn guard_test(p: u32, angle: u32) -> u32 {
-    let accepted = original!(p, angle);
-    unsafe {
-        if accepted == 0 || !local(p) || read::<u16>(p, 9478) != GUARD_GROUP {
-            return accepted;
-        }
         let packed = read::<u16>(p, 1204);
         if motion::decode(p, u32::from(packed)) != GUARD_MOTION {
-            return accepted;
+            return guard::Decision::Native;
         }
 
         // FZ state 65 event 10 closes at frame 28, 30 with Guard +1
         // or 32 with Guard +2.
         let frame = read::<f32>(p, 1280);
         if frame >= 32. || (frame >= 28. && !extended_guard(p, frame)) {
-            return 0;
+            return guard::Decision::Reject;
         }
-        PRECISE_GUARD_OWNER.store(p, Ordering::Release);
+        // FZ 81744DA0 grants four simulation ticks before the follow-up
+        // animation starts. Light recoil suppresses chip damage.
+        result.write(guard::GuardResult {
+            invulnerability: 8.,
+            recoil: 0,
+            sharpness_power: 40,
+        });
+        guard::Decision::Precise
     }
-    accepted
 }
 unsafe fn extended_guard(p: u32, frame: f32) -> bool {
     unsafe {
@@ -954,47 +976,4 @@ unsafe fn extended_guard(p: u32, frame: f32) -> bool {
             .any(|&id| native!(0x2864c4, p, id) != 0)
             || (frame < 30. && native!(0x2864c4, p, 169) != 0)
     }
-}
-
-unsafe fn pending_precise_guard(p: u32) -> bool {
-    PRECISE_GUARD_OWNER.load(Ordering::Acquire) == p
-        && unsafe { local(p) && read::<u16>(p, 9478) == GUARD_GROUP }
-}
-
-#[forge::hook(offset = 0x2f4b20)]
-unsafe fn guard_reaction(p: u32, recoil: u32, impact: u32, damage: *mut i32) -> u32 {
-    // GU's light recoil omits chip damage, matching FZ 81744DA0.
-    // The caller still uses the hit for the sharpness check.
-    let recoil = if unsafe { pending_precise_guard(p) } {
-        0
-    } else {
-        recoil
-    };
-    original!(p, recoil, impact, damage)
-}
-
-#[forge::hook(offset = 0x2ad288)]
-unsafe fn sharpness(p: u32, amount: i32, fixed: u32) -> u32 {
-    unsafe {
-        // FZ 81744DA0 charges a precise GS guard only for effective power
-        // >=40 or a Guard-Up attack. GU marks the latter with bit 0x20.
-        // Keep the native cost/skills for those hits; do not refund afterwards.
-        if amount < 0
-            && fixed == 0
-            && pending_precise_guard(p)
-            && read::<u16>(p, 12820) & 0x20 == 0
-            && native!(0x2f4a2c, p) < 40
-        {
-            return 0;
-        }
-    }
-    original!(p, amount, fixed)
-}
-pub(super) fn install() {
-    let base = forge::mem::text_addr();
-    forge::install_hook!(base, guard_test);
-    forge::install_hook!(base, change_action);
-    forge::install_hook!(base, draw_route);
-    forge::install_hook!(base, guard_reaction);
-    forge::install_hook!(base, sharpness);
 }

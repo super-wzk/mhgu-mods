@@ -25,15 +25,20 @@ MENU_OPEN, MENU_UPDATE = 0x548B7C, 0x5490FC
 STATUS_STYLE, STATUS_STYLE_SMALL = 0x62FB78, 0x633450
 HIT_ROW = 0x2A8A88
 DISPATCH, BLOCK = 0x282DA8, 0x2F2BA0
+WEAPON_DISPATCH = 0x2B8178
 GAME_STYLE = 0x268818
 ART_READY = 0x2A26C8
+ART_CAPACITY = 0x2778AC
 VALOR_HUD = 0x639BD0
 FX_RELEASE = 0x32A104
 DRAW_ROUTE = 0x115FCF4
 EQUIPMENT_GRIP = 0x308834
 CHANGE_ACTION, GS_CHANGE_ACTION = 0x2AB670, 0x1160650
+COMMAND_BIND, COMMAND_CONDITION = 0x2E9B7C, 0x2ECEFC
+COMMAND_UPDATE = 0x2E9D54
 SHARPNESS = 0x2AD288
 HIT_EXPAND, MODEL_DEPTH = 0x1696FC, 0xA957CC
+GUARD_REACTION, DRAW_MODEL = 0x2F4B20, 0xA956D8
 
 
 def api_for(g, identifier, magic):
@@ -48,22 +53,37 @@ def service(g):
     api = api_for(g, b"mhgu::StyleRegistryV1", b"SRG1")
     return g.get(api), g.get(api + 4)
 
+def style_descriptor(g, ident, weapon, encode=0, art_slots=0):
+    descriptor = g.alloc(68)
+    g.cpu.mem_write(descriptor, struct.pack("<4IBB50x", ident, weapon, encode, 0, 0, art_slots))
+    return descriptor
+
 
 def boot(elf, config, order=("registry", "sword"), mount_ok=True):
     g = Game(elf)
+    g.stub(0x13EFDAC, lambda p, size, *_: g.cpu.mem_write(p, bytes(size)))
     g.inline_hooks = g.inline_hooks | {
         ENCODE,
         DECODE,
         GAME_STYLE,
         ART_READY,
+        ART_CAPACITY,
         VALOR_HUD,
         CHANGE_ACTION,
+        COMMAND_BIND,
+        COMMAND_CONDITION,
         GS_CHANGE_ACTION,
         DRAW_ROUTE,
         FX_RELEASE,
         SHARPNESS,
         HIT_EXPAND,
         MODEL_DEPTH,
+        GUARD_REACTION,
+        DRAW_MODEL,
+        ENCODE,
+        DISPATCH,
+        WEAPON_DISPATCH,
+        HIT_ROW,
     }
     g.originals = {}
     install = g.hook
@@ -108,16 +128,25 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             STATUS_STYLE_SMALL,
             GAME_STYLE,
             ART_READY,
+            ART_CAPACITY,
             VALOR_HUD,
             DISPATCH,
+            WEAPON_DISPATCH,
+            HIT_ROW,
             CHANGE_ACTION,
+            COMMAND_BIND,
+            COMMAND_CONDITION,
+            GS_CHANGE_ACTION,
+            DRAW_ROUTE,
+            BLOCK,
+            SHARPNESS,
+            GUARD_REACTION,
         }
         if "registry" in order
         else set()
     )
     if order == ("registry", "sword"):
-        expected.update((GS_CHANGE_ACTION, DRAW_ROUTE, BLOCK, FX_RELEASE,
-                         EQUIPMENT_GRIP, SHARPNESS, HIT_EXPAND, MODEL_DEPTH))
+        expected.update((FX_RELEASE, EQUIPMENT_GRIP, HIT_EXPAND, MODEL_DEPTH, DRAW_MODEL))
     assert set(g.hooks) == expected
     if config is not None:
         assert g.files[CONFIG] == config
@@ -132,6 +161,7 @@ def hunters(g):
     for a in actor, remote:
         g.put(a, 0x1749A88)
         g.put(a + 5060, eq)
+        g.cpu.mem_write(a + 10068, b"\x03")  # no queued Hunter Art
     g.put(0x1885B58, mgr)
     g.put(mgr + 28, actor)
     g.stub(0x3F8398, lambda *_: 0)
@@ -210,10 +240,11 @@ def verify_great_sword(g):
     g.cpu.mem_write(eq + 1241, b"\x05")
     g.stub(0x2862F4, lambda _, art_id, *__: int(art_id in (4, 5, 6)))
     g.cpu.mem_write(eq + 4 + 572, struct.pack("<3H", 4, 5, 6))
-    for slot in range(3):
-        assert (
-            g.run(ART_READY, actor, slot) == 0 and g.run(ART_READY, remote, slot) == 1
-        )
+    for hunter in actor, remote:
+        g.cpu.mem_write(hunter + 10078, struct.pack("<3H", 100, 100, 100))
+        g.cpu.mem_write(hunter + 10072, struct.pack("<3H", 99, 100, 100))
+        for slot in range(3):
+            assert g.run(ART_READY, hunter, slot) == int(slot != 0)
     assert bytes(g.cpu.mem_read(eq + 576, 6)) == struct.pack("<3H", 4, 5, 6)
 
     def byte(p, v):
@@ -376,8 +407,7 @@ def load_hit_data(g, actor, remote, encode):
         g.put(a + 12696, obj)
         g.put(a + 12700, shapes)
     g.stub(0x16B920, lambda *_: 1)  # engine-wide collision serial
-    # Stock attack aliases and hit-row replacements have been removed. The
-    # Frontier event emitter below owns all timing/power; native rows stay shared.
+    # Outside a style strike the native HDP table remains intact.
     for public, index in [(5106, 6), (5107, 5)]:
         assert encode(actor, public) == 0x500 + public % 1000
         stock = data + 16 + 56 * index
@@ -390,7 +420,7 @@ def verify_action_lifecycle(elf, config):
     p, eq, remote = hunters(g)
     # Scene notifications and unrelated actor predicates are outside this
     # check. Execute the real common transition/reset and both NRO detours.
-    for fn in (0x2E9B7C, 0x2AC690, 0x27C8F8, 0xE6890, 0x2827B4,
+    for fn in (0x2AC690, 0x27C8F8, 0xE6890, 0x2827B4,
                0x227B3C, 0x2F722C, 0x2C7E28):
         g.stub(fn, lambda *_: 0)
     for off in (432, 628, 1012, 1356, 1780, 1792, 1796, 1732, 1744,
@@ -418,10 +448,62 @@ def verify_action_lifecycle(elf, config):
         assert g.get(p + 9488) == 0 and g.get(p + 13100) == 0x12345678
     g.run(GS_CHANGE_ACTION, p, 64, 1, 0)
     assert (g.half(p + 9478), g.half(p + 9482)) == (64, 1)
+    verify_weapon_arts(g, p)
     g.cpu.mem_write(eq + 1241, b"\0")
     g.run(CHANGE_ACTION, remote, 16, 19, 0)
     assert g.half(remote + 9482) == 19
-    print("GU common lifecycle: independent slots, stock rejection, history, cleanup and damage passed")
+    print("GU common lifecycle: independent slots, Hunter Art dispatch, stock rejection, history, cleanup and damage passed")
+
+
+def verify_weapon_arts(g, p):
+    def entries(arc):
+        b = quest_arc(arc).read_bytes()
+        for i in range(struct.unpack_from("<H", b, 6)[0]):
+            name, kind, size, _, off = struct.unpack_from("<64s4I", b, 12 + 80 * i)
+            yield name.rstrip(b"\0"), kind, b[off : off + size]
+
+    arts = [
+        struct.unpack_from("<H4xH", zlib.decompress(raw), 0x1F8)
+        for name, kind, raw in entries("w00_m.arc")
+        if kind == 0x5139901D and b"\\sa\\" in name
+    ]
+    lmt = next(zlib.decompress(raw) for name, kind, raw in entries("w00.arc")
+               if kind == 0x76820D81 and name.endswith(b"\\w00_sa"))
+    count = struct.unpack_from("<H", lmt, 6)[0]
+    bank, header, events = g.alloc(104), g.alloc(8 + 4 * count), g.alloc(288)
+    g.put(p + 3844 + 7 * 4, bank)
+    g.put(bank + 100, header)
+    g.cpu.mem_write(header, lmt[:8])
+    # Keep the retail clip lengths and playback metadata. The offline hunter
+    # has neither a skeleton nor effect tracks to render.
+    for slot in (1, 51, 101, 151, 155, 156):
+        off = struct.unpack_from("<I", lmt, 8 + 4 * slot)[0]
+        assert off != 0
+        clip = g.alloc(64)
+        g.cpu.mem_write(clip + 8, lmt[off + 8 : off + 48])
+        g.put(clip + 52, events)
+        g.put(header + 8 + 4 * slot, clip)
+    g.put(p + 240, g.alloc(32))
+    g.put(p + 1188, 1)
+    g.cpu.mem_write(p + 1206, b"\x02")
+    for fn in (0x2AC4BC, 0x2B7240, 0x2864C4, 0x1160294, 0x282624, 0x11688D0):
+        g.stub(fn, lambda *_: 0)
+    g.stub(0x27C664, lambda *_: 1)  # hunter model is loaded
+    starters = [1, 1, 1, 51, 51, 51, 101, 101, 101, 155, 156, 151]
+    for i, ((group, slot), motion) in enumerate(zip(arts, starters, strict=True)):
+        g.put(p + 10084, i % 3)
+        g.run(GS_CHANGE_ACTION, p, group, slot, 0x40)
+        g.run(g.hooks[DISPATCH], p)
+        assert (g.half(p + 9478), g.half(p + 9482)) == (group, slot)
+        assert g.cpu.mem_read(p + 5, 1)[0] in (1, 2)
+        assert g.half(p + 1204) == 0x700 + motion
+
+    for start, follow_up in ((54, 57), (62, 63), (63, 64), (64, 65), (90, 91)):
+        g.run(GS_CHANGE_ACTION, p, 16, start, 0x40)
+        g.run(GS_CHANGE_ACTION, p, 16, follow_up, 0)
+        assert g.half(p + 9482) == follow_up
+        g.run(GS_CHANGE_ACTION, p, 16, 19, 0)
+        assert g.half(p + 9482) == follow_up
 
 
 def verify_battle(g, p, remote, resources):
@@ -440,11 +522,17 @@ def verify_battle(g, p, remote, resources):
         h(9478, group)
         h(9482, act)
         phase(0)
+        g.cpu.mem_write(p + 9384, bytes(64))
         g.cpu.mem_write(p + 10057, bytes([g.cpu.mem_read(p + 10057, 1)[0] & ~6]))
+
+    def draw_weapon(kind=0):
+        route = g.run(DRAW_ROUTE, p, kind)
+        g.run(GS_CHANGE_ACTION, p, *struct.unpack("<3H", g.cpu.mem_read(route, 6)))
 
     def tick(frame=None, held=0, pressed=0, draw=False):
         if frame is not None:
             f(1280, frame)
+            f(5332, frame)
         h(5108, held)
         h(5112, pressed)
         # Resolved native commands, not the first physical edge of a combo.
@@ -460,7 +548,9 @@ def verify_battle(g, p, remote, resources):
         # Execute GU's weapon command mapper rather than recreating its bits.
         g.run(0x1160058, p)
         if draw:
-            g.run(GS_CHANGE_ACTION, p, 16, 20, 0)
+            draw_weapon()
+        if g.get(p + 9384):
+            g.run(COMMAND_UPDATE, p)
         g.run(g.hooks[DISPATCH], p)
         drain()
 
@@ -477,10 +567,13 @@ def verify_battle(g, p, remote, resources):
     # construction. Substitute the outer scene transitions and audio services.
     g.put(p + 240, g.alloc(32))
     g.put(p + 1188, 1)
+    g.put(p + 5068, 1)
+    h(5078, 100)
     f(28, 2)
     g.stub(0x65F93C, lambda *_: 64)
     g.stub(0x65FA04, lambda *_: 0x800)
-    g.stub(DISPATCH, lambda *_: 0)
+    for off in (752, 756, 792, 796, 808, 812):
+        g.stub(g.get(0x1749A88 + off), lambda *_: 0)
     # Keep the two real detours. Replace only the common scene lifecycle,
     # independently exercised by verify_action_lifecycle.
     g.stub(g.originals[CHANGE_ACTION], lambda actor, group, act, _: action(group, act))
@@ -564,10 +657,16 @@ def verify_battle(g, p, remote, resources):
             g.run(0x27CA28, p)
             g.run(0x1160058, p)
             if g.get(p + 5156) & 2:
-                g.run(GS_CHANGE_ACTION, p, 16, 20, 0)
+                draw_weapon()
             g.run(g.hooks[DISPATCH], p)
             assert clip() == expected
         assert g.half(p + 9482) == 0x8000 + 47
+    for kind in (2, 4):
+        action(2, 3)
+        g.cpu.mem_write(p + 10057, b"\0")
+        g.put(p + 5156, 1 << 1)
+        draw_weapon(kind)
+        assert (g.half(p + 9478), g.half(p + 9482)) == (32, 0)
     # A monster hit is not necessary to route a directional input within
     # the ordinary sweep window. Holding right + A must select state 45.
     neutral()
@@ -599,12 +698,19 @@ def verify_battle(g, p, remote, resources):
     tick(80, held=0x100, pressed=0x100)
     assert clip() == 56, clip()
     h(5136, 0)
-    for side, key, start in [
-        (0, 32, 62),
-        (9102, 32, 62),
-        (32769, 32, 63),
-        (32769, 0x120, 37),
-    ]:
+    stock, entries, resource, command, table_list, tables = (
+        g.alloc(n) for n in (24, 4, 124, 24, 120, 48)
+    )
+    g.cpu.mem_write(stock, struct.pack("<6I", 0, 0, 1, 1, 0, entries))
+    g.put(entries, command)  # An inactive stock row stands in for the retail table.
+    g.put(command + 8, resource)
+    g.put(table_list + 104, 12)
+    g.put(table_list + 116, tables)
+    g.put(tables + 10 * 4, stock)
+    g.put(tables + 11 * 4, stock)
+    g.stub(0x285F68, lambda *_: table_list)
+
+    def roll(side):
         action(1, 6)
         g.cpu.mem_write(p + 10057, b"\x01")
         g.put(p + 4076, 0)
@@ -615,10 +721,61 @@ def verify_battle(g, p, remote, resources):
         assert packed & 255 == {0: 28, 9102: 12, 32769: 13}[side], (hex(packed), side)
         h(1204, packed)
         phase(2)
+        f(1268, 0)
+        f(5328, 0)
+        f(1284, 80)
+        g.run(0x115FDF8, p)  # GU's drawn GS roll binds weapon table 2011.
+        bound = g.get(p + 9384)
+        assert bound != stock and g.get(bound + 8) == 3
+        assert g.get(g.get(bound + 20)) == command
+        return packed
+
+    for side, key, start in [(0, 32, 62), (9102, 32, 62), (32769, 32, 63),
+                             (32769, 0x120, 37)]:
+        packed = roll(side)
+        tick(29, held=key, pressed=key)
+        assert not any(g.cpu.mem_read(p + 9392, 48))
         tick(30, held=key, pressed=key)
         assert g.half(p + 1204) == packed
-        tick(44, held=key)
+        # The earlier choice survives release and a later competing input.
+        if key == 32:
+            tick(31, held=0x120, pressed=0x120)
+        tick(43)
+        assert g.half(p + 1204) == packed
+        tick(44)
         assert clip() == start
+        assert not g.get(p + 9384)
+    for side, close in [(0, 54), (9102, 64), (32769, 64)]:
+        packed = roll(side)
+        tick(close, held=32, pressed=32)
+        assert g.half(p + 1204) == packed
+        roll(side)
+        tick(close - 0.5, held=32, pressed=32)
+        assert clip() == (63 if side == 32769 else 62)
+
+    # Guard recovery uses the native common B command with no pre-input.
+    for stick, strength, expected in [(0x4000, 0, 28), (0x8000, 120, 12), (0, 120, 13)]:
+        action(32, 0)
+        g.cpu.mem_write(p + 10057, b"\x01")
+        g.put(p + 4076, 0)
+        g.put(p + 5280, 0)
+        h(5132, stick)
+        h(5136, strength)
+        h(1204, g.run(g.hooks[ENCODE], p, 5005))
+        f(1284, 80)
+        f(1268, 0)
+        phase(1)
+        g.run(0x115FDEC, p)  # GU's GS guard startup binds table 2010.
+        bound = g.get(p + 9384)
+        assert g.get(bound + 8) == 2 and g.get(g.get(bound + 20)) == command
+        f(5328, 1)
+        tick(55, pressed=0x80)  # GU's projected motion frame is already 56.
+        tick(56)
+        assert g.half(p + 9478) == 32
+        f(5328, 0)
+        tick(56, pressed=0x80)
+        assert (g.half(p + 9478), g.half(p + 9482)) == (1, 6)
+        assert g.run(ENCODE, p, 28) & 255 == expected
     h(5136, 0)
     for key, expected in [(32, 31), (0x100, 47), (0x120, 48)]:
         action(1, 0)
@@ -793,7 +950,30 @@ def verify_battle(g, p, remote, resources):
             assert [g.get(u + 68) for u in units] == list(range(first, first + count))
             assert all(bytes(g.cpu.mem_read(u + 304, 12)) == origin for u in units)
             g.put(0x188A0D4, 0)
+            # Charged uppercut -> A joins the sweep at frame 44. SDT row 2
+            # opens the same 52..66 window as a sweep started from idle.
+            tick(76, held=0x100, pressed=0x100)
+            assert clip() == 21
+            tick(200)
+            assert clip() == 6 and value() == 46
+            assert struct.unpack("<f", g.cpu.mem_read(p + 1280, 4))[0] == 44.
+            assert struct.unpack("<2f", g.cpu.mem_read(p + 12320 + 92, 8)) == (8., 14.)
     skills.clear()
+    # Lion's Maw applies to the first registered strike even on a whiff.
+    # Exercise GU's bonus and clear routines with all three native tiers.
+    for tier in (1, 2, 3):
+        neutral()
+        g.put(p + 13096, 1)
+        g.put(p + 13100, tier)
+        tick(0)
+        assert (g.get(p + 13096), g.get(p + 13100)) == (1, tier)
+        tick(0, held=0x100, pressed=0x100)
+        assert clip() == 6 and value() == 46 + tier
+        assert g.get(p + 12320 + 76) & 0x8000
+        assert (g.get(p + 13096), g.get(p + 13100)) == (0, 0)
+        neutral()
+        tick(0, held=0x100, pressed=0x100)
+        assert value() == 46 and g.get(p + 12320 + 76) & 0x8000 == 0
     # Confirm a real monster-contact callback and reject a remote hunter's volume.
     # At frame 100 the whiff window is closed, but a monster hit extends it to
     # frame 104 (FZ state 0, predicate 2). Use the real GU result writer.
@@ -809,6 +989,28 @@ def verify_battle(g, p, remote, resources):
     h(1204, 0x101)
     tick(50, pressed=0x100)
     assert g.half(p + 1204) == 0x101
+
+    # Give the native command interpreter a pending art. Confirm the request
+    # reaches GU's resolver only once the current move allows an art cancel.
+    art_pending = False
+    art_prepared = []
+
+    def resolve_art(_, group, slot, flags):
+        for address, value in ((group, 16), (slot, 54), (flags, 0)):
+            g.cpu.mem_write(address, struct.pack("<H", value))
+        return 1
+
+    g.stub(0x2A8B34, lambda *_: int(art_pending))
+    g.stub(0x2ACB60, resolve_art)
+    g.stub(0x2ACBEC, lambda *_: art_prepared.append(True))
+    neutral()
+    tick(0, held=0x100, pressed=0x100)
+    art_pending = True
+    tick(40)
+    assert g.half(p + 9482) == 0x8000 and not art_prepared
+    tick(72)
+    assert g.half(p + 9482) == 54 and art_prepared == [True]
+    art_pending = False
     # Only an actual landed, drawn, living launch victim can use the two FZ
     # recoveries. A rejected input costs nothing. The attack bank stays bound.
     g.put(p + 3844 + 4 * 10, 0)
@@ -836,6 +1038,11 @@ def verify_battle(g, p, remote, resources):
 
     # Pressing R is not credit. The guard collision test must accept, then GU
     # must actually enter recoil, and a monster must own the incoming hit.
+    heavy_recoil = []
+    g.stub(0x2F4CC8, lambda *_: heavy_recoil.append(True) or 1)
+    g.stub(0x2831E0, lambda *_: 0)
+    damage = g.alloc(4)
+
     def guard(when, accepted, monster=True, cost=None):
         action(32, 0)
         f(11072, 0)
@@ -847,6 +1054,10 @@ def verify_battle(g, p, remote, resources):
         g.put(p + 9488, 16 if accepted else 0)
         h(12828, 0)
         result = g.run(g.hooks[BLOCK], p, 0)
+        if accepted:
+            heavy_recoil.clear()
+            g.run(GUARD_REACTION, p, 2, p + 12820, damage)
+            assert len(heavy_recoil) == int(not result)
         h(12826, 123 if monster else 0xFFFF)
         g.run(GS_CHANGE_ACTION, p, 32, 3, 0)
         if result:
@@ -1056,14 +1267,11 @@ def verify_sdk_registration(elf, on):
         register, selected = service(g)
         original_thread = g.thread
         if case == "conflict":
-            descriptor = g.alloc(16)
-            g.cpu.mem_write(descriptor, struct.pack("<4I", 1, 1, 0, 0))
-            assert g.run(register, descriptor) == 0
+            assert g.run(register, style_descriptor(g, 1, 1), 0, 0) == 0
         elif case == "worker":
             g.thread = original_thread + 0x100
         calls = []
-        named = g.get(api_for(g, b"mhgu::StyleControllerV1", b"SCV1"))
-        g.cpu.hook_add(UC_HOOK_CODE, lambda *_: calls.append(1), begin=named, end=named)
+        g.cpu.hook_add(UC_HOOK_CODE, lambda *_: calls.append(1), begin=register, end=register)
         ex = g.load(CONTENT, 0x9200000)
         g.run(ex["forge_onLoad"], MANAGER)
         g.run(ex["forge_onInit"], MANAGER)
@@ -1112,22 +1320,18 @@ def verify():
     register, selected = service(g)
     actor, eq, remote = hunters(g)
 
-    def descriptor(i, w, enc=0):
-        p = g.alloc(16)
-        g.cpu.mem_write(p, struct.pack("<4I", i, w, enc, 0))
-        return p
-
     enc = g.alloc(4)
     g.stub(enc, lambda a, r, *_: 0x801 if a == actor and r == 5001 else 0xFFFFFFFF)
-    other = descriptor(42, 1, enc)
+    other = style_descriptor(g, 42, 1, enc)
     assert g.run(selected, 1) == 0
-    assert g.run(register, other) == g.run(register, other) == 0
+    assert g.run(register, other, 0, 0) == g.run(register, other, 0, 0) == 0
     assert (
-        g.run(register, descriptor(42, 0)) == 2
-        and g.run(register, descriptor(1, 1)) == 2
+        g.run(register, style_descriptor(g, 42, 0), 0, 0) == 2
+        and g.run(register, style_descriptor(g, 1, 1), 0, 0) == 2
     )
-    for bad in [0, descriptor(0, 0), descriptor(65536, 0), descriptor(3, 255)]:
-        assert g.run(register, bad) == 1
+    for bad in [0, style_descriptor(g, 0, 0), style_descriptor(g, 65536, 0),
+                style_descriptor(g, 3, 255), style_descriptor(g, 3, 0, art_slots=4)]:
+        assert g.run(register, bad, 0, 0) == 1
     assert g.run(selected, 0) == 0 and g.run(selected, 1) == 42
     g.cpu.mem_write(eq + 1236, b"\x01")
     assert g.run(g.hooks[ENCODE], actor, 5001) == 0x801

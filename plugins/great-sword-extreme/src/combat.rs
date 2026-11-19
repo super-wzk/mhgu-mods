@@ -1,13 +1,19 @@
 //! Register Frontier move events through GU's shared weapon collision volume.
 
-use mhgu_sdk::combat::collision::Contact;
+use mhgu_sdk::{combat::collision::Contact, style::action::Attack};
 
-/// Use GU's actual equipped sword shape, attributes, owner and collision serial.
-/// A delayed FZ event is relative to its dispatch time; GU's normal HDP start
-/// time is absolute within the clip. Set the two remaining timers after setup.
+/// Use GU's equipped sword shape, attributes, owner and collision serial.
+/// FZ 81DBE87E subtracts the current motion frame from a nonzero SDT start
+/// frame. A zero start uses the event time instead.
 pub(super) unsafe fn emit(player: u32, source: u16, late: f32) -> Option<u32> {
-    let [delay, length, power] = crate::program::row(source)?;
-    let left = f32::from(delay) + f32::from(length) - late;
+    let [start, length, power] = crate::program::row(source)?;
+    let elapsed = if start == 0 {
+        late
+    } else {
+        unsafe { *((player + 1280) as *const f32) }
+    };
+    let until_start = f32::from(start) - elapsed;
+    let left = until_start + f32::from(length);
     if left <= 0.0 {
         return None;
     }
@@ -42,35 +48,26 @@ pub(super) unsafe fn emit(player: u32, source: u16, late: f32) -> Option<u32> {
         } else {
             None
         };
-        let slot = match source {
+        let template = match source {
             1 | 164..=168 => 5,
             2 | 261 => 6,
             _ => 1,
         };
-        let native: unsafe extern "C" fn(u32, u32, u32, u32) -> u32 =
-            core::mem::transmute(forge::mem::text_addr() + 0x2b7240);
-        native(player, 0, slot, 0);
-        let hit = player + 12320;
-        if *((hit + 132) as *const u32) == 0 || *((hit + 12) as *const u32) != player {
-            if let Some(r) = extra {
-                release(r);
-            }
-            return None;
+        let delay = until_start.max(0.);
+        let registered = Attack {
+            template,
+            power,
+            delay,
+            duration: left - delay,
+            flags: 0x7,
+            shape: extra.unwrap_or(0),
+            no_sharpness_cost: u32::from(extra.is_some()),
         }
-        if let Some(r) = extra {
-            let old = core::ptr::replace((hit + 132) as *mut u32, r);
-            *((hit + 136) as *mut u32) = 0;
-            // GU's hit resolver checks this flag before applying sharpness
-            // loss. Each Frontier radiance pulse is a non-consuming hit.
-            *((hit + 48) as *mut u32) |= 0x08000000;
-            release(old);
+        .submit(player);
+        if let Some(shape) = extra {
+            release(shape);
         }
-        let wait = (f32::from(delay) - late).max(0.);
-        *((hit + 92) as *mut f32) = wait;
-        *((hit + 96) as *mut f32) = left - wait;
-        *((hit + 56) as *mut u16) = power;
-        *((hit + 5) as *mut u8) = 1;
-        extra
+        extra.filter(|_| registered)
     }
 }
 

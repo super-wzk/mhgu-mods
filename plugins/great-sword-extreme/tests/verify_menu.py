@@ -2,7 +2,7 @@
 
 import struct
 
-from verify_style import CONFIG, MENU_OPEN, MENU_UPDATE, REPO, STATUS_STYLE, STATUS_STYLE_SMALL, boot, hunters, service
+from verify_style import CONFIG, MENU_OPEN, MENU_UPDATE, REPO, STATUS_STYLE, STATUS_STYLE_SMALL, boot, hunters, service, style_descriptor
 
 
 def verify_status(g):
@@ -85,6 +85,7 @@ def verify():
         0x4EEB78,
         0x4EEC94,
         0x638730,
+        0x638424,
         0x56E538,
         0x56E5A8,
         0x549FB4,
@@ -119,6 +120,10 @@ def verify():
     assert press(0x2000) == 2 and press(0x2000) == 5
     assert g.run(selected, 0) == 1 and g.files[CONFIG].endswith(b"= 1\n")
     assert g.cpu.mem_read(eq + 1241, 1) == b"\x05"  # custom selection preserves Valor
+    g.cpu.mem_write(eq + 576, struct.pack("<3H", 4, 5, 0))
+    g.run(0x557D90, ui + 12, 2)
+    assert press(0x2000) == 6  # GU opens the third slot's art list
+    g.cpu.mem_write(eq + 576, bytes(6))
     open_box()
     assert row() == 6 and marks[panel, 0x4E, 1] == 1 and not marks[panel, 0x46, 1]
     assert (
@@ -144,9 +149,7 @@ def verify():
     assert g.run(selected, 0) == 0 and g.files[CONFIG].endswith(b"= 0\n")
     # More than two extra styles: the next native page uses the same eight widgets.
     for id_ in (40, 41):
-        desc = g.alloc(16)
-        g.cpu.mem_write(desc, struct.pack("<4I", id_, 0, 0, 0))
-        assert g.run(register, desc) == 0
+        assert g.run(register, style_descriptor(g, id_, 0), 0, 0) == 0
     open_box()
     press(0x20)
     assert (
@@ -161,7 +164,7 @@ def verify():
     open_box()
     assert g.half(ui + 32) == 6 and g.get(widgets + 100) == 6
     print(
-        "GU equipment box: seventh row, named details, cancel, equip, native reselect, paging and weapon filtering passed"
+        "GU equipment box: seventh style row, third Hunter Art slot, native reselect, paging and weapon filtering passed"
     )
 
 

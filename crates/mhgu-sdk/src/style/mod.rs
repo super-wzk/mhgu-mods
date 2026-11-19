@@ -1,5 +1,6 @@
 //! Custom hunter styles. ID zero always means GU's equipped native style.
 pub mod action;
+pub mod guard;
 
 /// Return this from a motion callback to let GU handle the request.
 pub const PASS: u32 = u32::MAX;
@@ -34,10 +35,18 @@ impl Input {
 /// Controllers own weapon selection and use `action::enter` for their moves.
 pub type Controller = unsafe extern "C" fn(u32, *const Input) -> u32;
 
-/// Resolve an accepted native weapon request before GU changes state. Return
-/// a style move ID (0..255), or PASS to reject it. This preserves GU's context
-/// checks for drawing during movement, gathering, interaction and interruption.
-pub type Request = unsafe extern "C" fn(u32, u32, u32) -> u32;
+/// An action route already accepted by GU's input and movement controllers.
+#[repr(C)]
+pub struct ActionRequest {
+    pub group: u16,
+    pub slot: u16,
+    pub flags: u16,
+    pub draw_route: bool,
+}
+
+/// Return a registered style move ID (0–255) or PASS. PASS leaves a draw
+/// route to GU and rejects an unhandled stock weapon action.
+pub type Request = unsafe extern "C" fn(u32, *const ActionRequest) -> u32;
 
 /// Immutable process-lifetime descriptor. IDs are global across all weapons.
 /// `weapon` uses GU's equipment byte, not the Frontier weapon number.
@@ -47,11 +56,18 @@ pub struct Style {
     pub weapon: u32,
     pub encode: Option<Motion>,
     pub decode: Option<Motion>,
+    /// Use a neutral index for the engine's fixed-size native style tables.
+    pub independent: bool,
+    pub art_slots: u8,
+    pub controller: Option<Controller>,
+    pub request: Option<Request>,
+    pub actions: action::Actions,
+    pub guard: Option<guard::Policy>,
+    pub commands: Option<action::command::Bind>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum RegisterError {
-    Unavailable,
     Invalid,
     Conflict,
 }
@@ -62,4 +78,4 @@ pub mod registry;
 #[doc(hidden)]
 pub use registry::{ServiceV1, publish};
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
-pub use registry::{StyleRegistry, register, selected};
+pub use registry::{StyleRegistry, selected};

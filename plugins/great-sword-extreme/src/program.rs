@@ -30,7 +30,13 @@ pub const RADIANCE: u16 = 0xff08;
 pub fn radiance_capsule() -> (f32, [[f32; 3]; 2]) {
     let p = DATA.len() - 28;
     let value = |i: usize| f32::from_bits(word(p + 4 * i) as u32);
-    (value(0), [[value(1), value(2), value(3)], [value(4), value(5), value(6)]])
+    (
+        value(0),
+        [
+            [value(1), value(2), value(3)],
+            [value(4), value(5), value(6)],
+        ],
+    )
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Step {
@@ -94,6 +100,52 @@ impl Cursor {
     pub fn buffered_roll(&self) -> bool {
         self.buffer
             .is_some_and(|i| half(records(self.state, 1, 40), usize::from(i) * 40 + 22) == 74)
+    }
+    pub fn hunter_art_window(&self, hit: bool) -> bool {
+        // GU Hunter Art policy for the port. The step and frame ranges preserve
+        // the previous cancel timings. An end of zero keeps the current step open.
+        let time = self.time;
+        let frame = if time.cycles == 0 {
+            time.frame
+        } else {
+            f32::INFINITY
+        };
+        let (step, start, end) = match self.state {
+            0 => (0, 72., 0.),
+            2 | 13 | 16 | 30..=32 => (1, 48., 0.),
+            5..=8 => (1, 72., 0.),
+            14 | 15 | 17 | 18 => (2, 48., 0.),
+            19 => (0, 58., 0.),
+            20 | 21 | 25..=28 | 71 => (1, 58., 0.),
+            22 => (0, 24., 0.),
+            24 => (0, 26., 0.),
+            29 => (0, 48., 0.),
+            33 => (0, 120., 0.),
+            34..=36 => (1, 120., 0.),
+            37 | 38 => (1, 72., if hit { 104. } else { 98. }),
+            40 | 43 | 44 if frame < 74. => (1, 32., 74.),
+            40 | 43 | 44 => (1, 136., 0.),
+            41 | 45 => (1, 78., 0.),
+            42 | 46 => (1, 68., 0.),
+            47 | 49..=52 | 70 => (1, 54., 0.),
+            48 | 53 => (0, 54., 0.),
+            54 => (0, 68., 0.),
+            55..=58 => (0, 76., 0.),
+            59 => {
+                return time.step == 1
+                    && (time.cycles > 1 || time.cycles == 1 && time.frame >= 20.)
+                    && (time.cycles < 4 || time.cycles == 4 && time.frame < 134.);
+            }
+            61 | 65 => (0, 56., 0.),
+            62 | 63 => (0, 64., 0.),
+            64 => (0, 86., 0.),
+            66 | 72 => (0, 20., 0.),
+            67 | 73 => (0, 0., 0.),
+            68 => (0, 128., 0.),
+            69 => (0, 84., 0.),
+            _ => return false,
+        };
+        time.step == step && frame >= start && (end == 0. || frame < end)
     }
     pub fn next_event(&mut self) -> Option<(u16, u16, f32)> {
         let e = records(self.state, 2, 12)

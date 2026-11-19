@@ -19,6 +19,7 @@ use std::{
 };
 
 const BANKS: &[(u16, &[u16])] = &[(4006, &[0, 1, 2, 3, 4, 5, 6]), (4022, &[5, 21])];
+const CHARGE_AURA_MESH: u16 = 66;
 
 fn half(data: &[u8], at: usize) -> Result<u16> {
     Ok(u16::from_le_bytes(
@@ -64,6 +65,19 @@ fn particle_proof(weapon: &[arc::Entry<'_>]) -> Result<[u8; 160]> {
         }
     }
     anyhow::bail!("missing great sword EFL proof for generator 0")
+}
+
+fn charge_aura_texture(source: &image::Image) -> Result<Vec<u8>> {
+    // The sprite has opaque near-black texels. Smoothly fade their coverage
+    // between RGB intensities 12 and 96 while preserving the bright core.
+    let mut rgba = source.rgba.clone();
+    for [red, green, blue, alpha] in rgba.as_chunks_mut::<4>().0 {
+        let intensity = f32::from((*red).max(*green).max(*blue));
+        let t = ((intensity - 12.) / (96. - 12.)).clamp(0., 1.);
+        let coverage = t * t * (3. - 2. * t);
+        *alpha = (f32::from(*alpha) * coverage).round() as u8;
+    }
+    tex::rgba8_unmipped(source.width, source.height, &rgba)
 }
 
 pub fn extract(dat: &Path, out: &Path, gu_weapon: &Path) -> Result<()> {
@@ -140,25 +154,36 @@ pub fn extract(dat: &Path, out: &Path, gu_weapon: &Path) -> Result<()> {
             .image_id;
         let path = format!(r"effect\frontier_gs\m{id}");
         let atlas = format!(r"effect\frontier_gs\t{img}");
-        let name = model::material_name(index as usize);
-        assets.push(Asset {
-            name: path.clone(),
-            kind: arc::MATERIAL,
-            data: mhgu_resource::mrl::effect(&mrl, &name, &atlas, wrap)?,
-        });
-        bindings.push_str(&format!("{id}\t{index}\t0\t{img}\n"));
         let png = match atlases.entry(img) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
                 let png = image::decode(&pac::member(&images, img as usize)?)?;
                 assets.push(Asset {
-                    name: atlas,
+                    name: atlas.clone(),
                     kind: arc::TEXTURE,
                     data: tex::rgba8_unmipped(png.width, png.height, &png.rgba)?,
                 });
                 entry.insert(png)
             }
         };
+        let material_atlas = if id == usize::from(CHARGE_AURA_MESH) {
+            let masked_atlas = format!("{path}_alpha");
+            assets.push(Asset {
+                name: masked_atlas.clone(),
+                kind: arc::TEXTURE,
+                data: charge_aura_texture(png)?,
+            });
+            masked_atlas
+        } else {
+            atlas
+        };
+        let name = model::material_name(index as usize);
+        assets.push(Asset {
+            name: path.clone(),
+            kind: arc::MATERIAL,
+            data: mhgu_resource::mrl::effect(&mrl, &name, &material_atlas, wrap)?,
+        });
+        bindings.push_str(&format!("{id}\t{index}\t0\t{img}\n"));
         // FMOD stores colours as floating-point byte values (0..255).
         let colors = obj.colors().map(|c| {
             c.values
