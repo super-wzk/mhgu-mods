@@ -13,21 +13,46 @@ struct Blade {
     base: Point,
     x: Point,
     y: Point,
+    length: f32,
 }
 
-unsafe fn sample_blades(actor: u32) -> Option<[Blade; 2]> {
+unsafe fn sample_blade(actor: u32, hand: usize, joint: u8) -> Option<Blade> {
     unsafe {
-        let mut blades = [Blade::default(); 2];
-        for (blade, joint) in blades.iter_mut().zip(super::BLADE_JOINTS) {
-            let matrix = super::joint_matrix(actor, joint)?;
-            let m: [f32; 16] = read(matrix, 0);
-            *blade = Blade {
-                base: core::array::from_fn(|i| m[12 + i] + 15. * m[8 + i]),
-                x: [m[0], m[1], m[2]],
-                y: [m[4], m[5], m[6]],
-            };
+        // GU 288248/3084C4 bind parts 7 and 8 to drawn joints 8 and 12.
+        let weapon = read::<u32>(actor, 9120 + 4 * hand as u32);
+        if weapon == 0 {
+            return None;
         }
-        Some(blades)
+        let model = read::<u32>(weapon, 240);
+        if model == 0 {
+            return None;
+        }
+        // FZ 81F8A174 adjusts the blade axis per weapon and hand. GU's
+        // B490CC loads the equipped MOD's local max Z at rModel + 216.
+        let mut tip_z = read::<f32>(model, 216);
+        if read::<u32>(weapon, 5068) == u32::from(joint) {
+            let grip_scale = read::<f32>(weapon, 104);
+            let grip_offset = read::<f32>(weapon, 72);
+            tip_z = tip_z * grip_scale + grip_offset;
+        }
+        if !tip_z.is_finite() || tip_z <= 0. {
+            return None;
+        }
+        let matrix = super::joint_matrix(actor, joint)?;
+        let [x, y, z, origin]: [[f32; 4]; 4] = read(matrix, 0);
+        // Shorten the inset on fist weapons so the strip still reaches the tip.
+        let start_z = 15_f32.min(tip_z * 0.5);
+        let axis_scale = libm::sqrtf(z[0] * z[0] + z[1] * z[1] + z[2] * z[2]);
+        let length = (tip_z - start_z) * axis_scale;
+        if !length.is_finite() || length <= 0. {
+            return None;
+        }
+        Some(Blade {
+            base: core::array::from_fn(|i| origin[i] + start_z * z[i]),
+            x: [x[0], x[1], x[2]],
+            y: [y[0], y[1], y[2]],
+            length,
+        })
     }
 }
 
@@ -72,6 +97,7 @@ const EMPTY: Poses = Poses {
         base: [0.; 3],
         x: [0.; 3],
         y: [0.; 3],
+        length: 0.,
     }; 6]; 2],
     active: [false; 3],
 };
@@ -101,25 +127,21 @@ impl History {
             self.sharpen_time = (self.sharpen_time - dt).max(0.);
             let sharpening = self.sharpen_time > 0.;
             let demon = phase != 0;
-            let any_active = sharpening || demon;
-            if !any_active && self.area.is_none() {
-                return;
-            }
-            let area = read(actor, 4180);
-            let blades = if any_active {
-                sample_blades(actor)
-            } else {
-                None
-            };
-            if let Some(blades) = blades {
+            if sharpening || demon {
+                let area = read(actor, 4180);
                 let reset = self.area != Some(area) || dt > 8.;
                 self.fraction += dt;
                 let advance = self.fraction >= 2.;
                 if advance {
                     self.fraction %= 2.;
                 }
-                for (past, blade) in self.poses.hands.iter_mut().zip(blades) {
-                    if reset {
+                for (hand, joint) in super::BLADE_JOINTS.into_iter().enumerate() {
+                    let past = &mut self.poses.hands[hand];
+                    let Some(blade) = sample_blade(actor, hand, joint) else {
+                        past[0].length = 0.;
+                        continue;
+                    };
+                    if reset || past[0].length == 0. {
                         past.fill(blade);
                     } else if advance {
                         past.copy_within(0..5, 1);
@@ -127,11 +149,18 @@ impl History {
                     }
                 }
                 self.area = Some(area);
-                self.poses.active = [sharpening, demon, demon];
-            } else {
+                let [right_ready, left_ready] =
+                    self.poses.hands.each_ref().map(|past| past[0].length > 0.);
+                self.poses.active = [
+                    sharpening && right_ready,
+                    demon && right_ready,
+                    demon && left_ready,
+                ];
+            } else if self.area.take().is_some() {
                 self.poses.active = [false; 3];
-                self.area = None;
                 self.fraction = 0.;
+            } else {
+                return;
             }
             publish(&self.poses);
         }
@@ -178,6 +207,12 @@ unsafe fn skin(model: u32, origin: Point, poses: &[Blade; 6], buffers: &mut [u32
         if template == 0 {
             return None;
         }
+        // Each converted strip starts with the outer vertex of its first pair.
+        let authored_span = read::<f32>(template, 8);
+        if !authored_span.is_finite() || authored_span <= 0. {
+            return None;
+        }
+        let blade_scale = poses[0].length / authored_span;
         let retired = read::<i32>(base, 0x2124120);
         let slot = buffers
             .iter_mut()
@@ -215,11 +250,15 @@ unsafe fn skin(model: u32, origin: Point, poses: &[Blade; 6], buffers: &mut [u32
                 x[2] * y[0] - x[0] * y[2],
                 x[0] * y[1] - x[1] * y[0],
             ];
-            let length = libm::sqrtf(z.iter().map(|v| v * v).sum());
-            let inverse = if length > 0. { 1. / length } else { 0. };
+            let axis_length = libm::sqrtf(z.iter().map(|v| v * v).sum());
+            let distance_scale = if axis_length > 0. {
+                blade_scale / axis_length
+            } else {
+                0.
+            };
             for vertex in 2 * pair..2 * pair + 2 {
                 let offset = (vertex * STRIDE) as u32;
-                let distance = read::<f32>(template, offset + 8) * inverse;
+                let distance = read::<f32>(template, offset + 8) * distance_scale;
                 let point: Point = core::array::from_fn(|i| base[i] + z[i] * distance);
                 write(dest, offset, point);
             }
