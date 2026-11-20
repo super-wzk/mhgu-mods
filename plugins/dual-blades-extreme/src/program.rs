@@ -1,4 +1,5 @@
 //! Frontier w06 Extreme action program, in authored motion frames.
+use mhfz_sdk::action::{BranchRules, Cursor, Step};
 use mhgu_sdk::style::action::Actions;
 
 const DATA: &[u8] = include_bytes!("../target/assets/dual_blades.fdba");
@@ -112,16 +113,6 @@ pub(super) fn finish_window() -> f32 {
     2. * f32::from(half(DATA, PARAMETERS + 192))
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct Step {
-    pub op: u16,
-    pub clip: u16,
-    pub start: u16,
-    pub blend: u16,
-    pub until: u16,
-    pub loops: u16,
-}
-
 pub(super) fn step(state: u8, index: u8) -> Option<Step> {
     if matches!(state, SPRINT | BRAKE) && index == 0 {
         return Some(Step {
@@ -133,138 +124,20 @@ pub(super) fn step(state: u8, index: u8) -> Option<Step> {
             loops: 0,
         });
     }
-    let row = records(state, 0, 12).chunks_exact(12).nth(index.into())?;
-    Some(Step {
-        op: half(row, 0),
-        clip: half(row, 2),
-        start: half(row, 4),
-        blend: half(row, 6),
-        until: half(row, 8),
-        loops: half(row, 10),
-    })
+    Step::read(records(state, 0, 12), index)
 }
 
-#[derive(Clone, Copy, Default)]
-pub(super) struct Time {
-    pub step: u8,
-    pub cycles: u16,
-    pub frame: f32,
-    pub blend: f32,
-}
+const ORDER: [u16; 28] = [
+    23, 25, 24, 22, 0, 12, 11, 17, 18, 19, 20, 1, 4, 3, 2, 7, 6, 5, 8, 9, 10, 13, 15, 16, 14, 26,
+    27, 21,
+];
 
-impl Time {
-    fn reached(self, record: &[u8]) -> bool {
-        let step = half(record, 0);
-        if u16::from(self.step) != step {
-            return u16::from(self.step) > step;
-        }
-        match record[2] {
-            1 => true,
-            0 if record[3] as i8 > 0 => self.blend <= f32::from(record[3]),
-            0 => {
-                let cycle = half(record, 6);
-                self.cycles > cycle
-                    || self.cycles == cycle && self.frame >= f32::from(half(record, 4))
-            }
-            _ => false,
-        }
-    }
-}
+static RULES: BranchRules = BranchRules {
+    order: &ORDER,
+    combo_override: Some((2..=4, 5..=7)),
+    art_commands: 1 | 0xf << 22,
+};
 
-pub(super) struct Cursor {
-    pub state: u8,
-    pub time: Time,
-    event: usize,
-    pending: Option<usize>,
-}
-
-impl Cursor {
-    pub fn new(state: u8) -> Self {
-        Self {
-            state,
-            time: Time::default(),
-            event: 0,
-            pending: None,
-        }
-    }
-
-    pub fn next_event(&mut self) -> Option<(u16, u16, f32)> {
-        let row = records(self.state, 2, 12)
-            .chunks_exact(12)
-            .nth(self.event)?;
-        if !self.time.reached(row) {
-            return None;
-        }
-        self.event += 1;
-        let late = if half(row, 0) == u16::from(self.time.step)
-            && row[2] == 0
-            && row[3] == 0
-            && half(row, 6) == self.time.cycles
-        {
-            (self.time.frame - f32::from(half(row, 4))).max(0.)
-        } else {
-            0.
-        };
-        Some((half(row, 8), half(row, 10), late))
-    }
-
-    pub fn branch(&mut self, commands: u32, eligible: impl Fn(u16) -> bool) -> Option<u16> {
-        const ORDER: [u16; 28] = [
-            23, 25, 24, 22, 0, 12, 11, 17, 18, 19, 20, 1, 4, 3, 2, 7, 6, 5, 8, 9, 10, 13, 15, 16,
-            14, 26, 27, 21,
-        ];
-        let table = records(self.state, 1, 40);
-        self.pending = self
-            .pending
-            .filter(|&at| !self.time.reached(&table[at + 32..]));
-        let previous = self
-            .pending
-            .map(|at| (half(table, at), half(table, at + 4)));
-        for command in ORDER {
-            if commands & (1 << command) == 0 {
-                continue;
-            }
-            let candidate = table
-                .chunks_exact(40)
-                .enumerate()
-                .filter(|(_, row)| {
-                    half(row, 4) == command
-                        && previous.is_none_or(|(priority, pending)| {
-                            let next = half(row, 0);
-                            // GU can resolve X+A after X was already queued.
-                            next > priority
-                                || (next == priority
-                                    && matches!(pending, 2..=4)
-                                    && matches!(command, 5..=7))
-                        })
-                        && eligible(half(row, 2))
-                        && self.time.reached(&row[6..])
-                        && !self.time.reached(&row[14..])
-                })
-                .max_by_key(|(_, row)| half(row, 0));
-            if let Some((i, _)) = candidate {
-                self.pending = Some(i * 40);
-                break;
-            }
-        }
-        let at = self.pending?;
-        let row = &table[at..at + 40];
-        if eligible(half(row, 2)) && self.time.reached(&row[24..]) && !self.time.reached(&row[32..])
-        {
-            // GU may defer the change during hitstop. The next action gets a
-            // new cursor on acceptance, so keep this input until its window ends.
-            Some(half(row, 22))
-        } else {
-            None
-        }
-    }
-
-    pub fn art_window(&self, eligible: impl Fn(u16) -> bool) -> bool {
-        records(self.state, 1, 40).chunks_exact(40).any(|row| {
-            matches!(half(row, 4), 0 | 22..=25)
-                && eligible(half(row, 2))
-                && self.time.reached(&row[24..])
-                && !self.time.reached(&row[32..])
-        })
-    }
+pub(super) fn cursor(state: u8) -> Cursor {
+    Cursor::new(state, records(state, 1, 40), records(state, 2, 12), &RULES)
 }

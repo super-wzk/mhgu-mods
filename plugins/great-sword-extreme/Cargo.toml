@@ -9,6 +9,6 @@ crate-type = ["cdylib"]
 doctest = false
 
 [target.'cfg(all(target_arch = "arm", target_endian = "little"))'.dependencies]
+mhfz-sdk = { path = "../../crates/mhfz-sdk" }
 mhgu-forge = "1.5.0"
 mhgu-sdk = { path = "../../crates/mhgu-sdk" }
-libm = "0.2"

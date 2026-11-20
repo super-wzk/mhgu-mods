@@ -240,10 +240,27 @@ pub fn great_sword(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
 }
 
 pub fn dual_blades(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
-    let (timeline, [blade, common, weapon]) = gs::timeline(dat, 6)?;
+    hunter_banks(dat, 6, "frontier_db", "wh000snd.abn", b"wh006.snd\0")
+}
+
+pub fn long_sword(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
+    hunter_banks(dat, 7, "frontier_ls", "we000snd.abn", b"we000.snd\0")
+}
+
+fn hunter_banks(
+    dat: &Path,
+    id: usize,
+    namespace: &str,
+    archive: &str,
+    model: &[u8],
+) -> Result<(Vec<Asset>, Vec<u8>)> {
+    let (timeline, [blade, common, weapon]) = gs::timeline(dat, id)?;
     let mut assets = Vec::new();
     for (name, bank) in [
-        ("blade", Bank::player(&dat.join("sound/we06.snd"), blade)?),
+        (
+            "blade",
+            Bank::player(&dat.join(format!("sound/we{id:02}.snd")), blade)?,
+        ),
         (
             "common",
             Bank::player(&dat.join("sound/common01.snd"), common)?,
@@ -252,8 +269,8 @@ pub fn dual_blades(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
             "weapon",
             gs::model_bank(
                 dat,
-                "wh000snd.abn",
-                b"wh006.snd\0",
+                archive,
+                model,
                 weapon.into_iter().filter(|&id| id < 32),
             )?,
         ),
@@ -261,7 +278,7 @@ pub fn dual_blades(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
         if bank.voices.is_empty() {
             continue;
         }
-        let path = format!(r"sound\se\pl\frontier_db\{name}");
+        let path = format!(r"sound\se\pl\{namespace}\{name}");
         assets.extend(bank_assets(
             &bank,
             bank.voices.keys().copied().collect(),

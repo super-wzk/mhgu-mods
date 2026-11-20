@@ -7,9 +7,29 @@ fn great_sword_art(slot: u16) -> bool {
     matches!(slot, 51..=57 | 62..=65 | 90 | 91)
 }
 
+pub(super) unsafe fn finish_ground_motion(actor: u32, style: &Style, slot: u16) {
+    unsafe {
+        let packed = *((actor + 1204) as *const u16);
+        if !(0x800..0x1000).contains(&packed) {
+            return;
+        }
+        let Some(decode) = style.decode else { return };
+        let phase = *((actor + 5) as *const u8);
+        // 2CD978, 2CDB38 and 2CF8A4 wait on 950BCC for these phases.
+        if matches!(
+            (slot, phase, decode(actor, packed.into())),
+            (1, 1, 5002) | (2, 1, 5003) | (6, 2, 5012 | 5013)
+        ) {
+            action::signal_stopped_motion(actor);
+        }
+    }
+}
+
 fn weapon_art(weapon: u32, slot: u16) -> bool {
     match weapon {
         0 => great_sword_art(slot),
+        // w07_m's four art starters and 11998B0's follow-up handlers.
+        7 => matches!(slot, 51..=62 | 90),
         // w11_m's four art groups and the continuations in 11BB0F8.
         11 => matches!(slot, 39..=43 | 45..=56 | 76..=83 | 86..=93),
         _ => false,
@@ -21,6 +41,12 @@ pub(super) unsafe fn allows_native_art(actor: u32, style: &Style, slot: u16, fla
         return false;
     }
     if flags & 0x40 != 0 {
+        return true;
+    }
+    // w07 119C738 and 119C9C8 issue the Sakura Slash follow-ups
+    // without the activation flag. Its counter also requests 16:61
+    // through GU's hit reaction path, which can change the current group.
+    if style.weapon == 7 && matches!(slot, 54 | 61 | 62) {
         return true;
     }
     if !weapon_art(style.weapon, slot) {
@@ -133,6 +159,12 @@ unsafe fn great_sword_draw_route(actor: u32, kind: u32) -> u32 {
     native
 }
 
+#[forge::hook(offset = 0x1198bb4)]
+unsafe fn long_sword_draw_route(actor: u32, kind: u32) -> u32 {
+    let native = original!(actor, kind);
+    unsafe { draw_route(actor, native, 7) }
+}
+
 #[forge::hook(offset = 0x11ba2a0)]
 unsafe fn dual_blades_draw_route(actor: u32, kind: u32) -> u32 {
     let native = original!(actor, kind);
@@ -160,4 +192,5 @@ pub(super) fn install(base: u32) {
     forge::install_hook!(base, great_sword_change);
     forge::install_hook!(base, great_sword_draw_route);
     forge::install_hook!(base, dual_blades_draw_route);
+    forge::install_hook!(base, long_sword_draw_route);
 }

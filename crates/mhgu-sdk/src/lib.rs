@@ -13,5 +13,6 @@ pub mod motion;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub mod quest;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
-mod service;
+#[doc(hidden)]
+pub mod service;
 pub mod style;

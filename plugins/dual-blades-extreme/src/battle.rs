@@ -3,7 +3,7 @@ mod sharpen;
 
 use crate::{
     fx, motion, native,
-    program::{self, AERIAL_DANCE, AERIAL_FINISH, AERIAL_MOUNT_FINISH, BRAKE, Cursor, SPRINT},
+    program::{self, AERIAL_DANCE, AERIAL_FINISH, AERIAL_MOUNT_FINISH, BRAKE, SPRINT},
     read, sound, write,
 };
 use core::{
@@ -13,20 +13,25 @@ use core::{
         Ordering::{Acquire, Relaxed, Release},
     },
 };
+use mhfz_sdk::{
+    action::Cursor,
+    combat::HitWindow,
+    sound::Clock,
+    sprint::{self, Flick, Resume, STICK_DEADZONE},
+};
 use mhgu_sdk::style::{
     ActionRequest, Input, NATIVE_ACTION, PASS,
     action::{
         self, Attack,
         command::{BufferedCommand, CommandInput, CommandSet},
+        melee::{self, BLADE_CONTACT_OFFSETS},
     },
-    sound::Clock,
+    movement::{self, CLIMBS, stamina},
 };
 
 const DASH_SLASH: u8 = 82;
 const NATIVE_AERIAL_SLOTS: &[u16] = &[31, 32, 33, 66, 67];
-const CONTACTS: [u32; 2] = [12320, 12504];
-const CLIMBS: &[u16] = &[137, 138, 139];
-const ROLL_OFF_LEDGE: (u16, u16) = (4, 14);
+const DEFLECTION: u8 = 11;
 static SPRINT_TERRAIN: CommandSet = CommandSet::new(&[]).retaining_native(1, CLIMBS);
 
 // 817E4840 (forward) and 817E386C (side) pass these windows to 811F0CC6.
@@ -69,7 +74,6 @@ const CMD_SPRINT: u16 = 1;
 const CMD_SLASH_DOWN: u16 = 2;
 const CMD_COMBO: u16 = 5;
 const CMD_SWEEP: u16 = 9;
-const STICK_DEADZONE: i16 = 48;
 
 static PHASE: AtomicU32 = AtomicU32::new(0);
 static OWNER: AtomicU32 = AtomicU32::new(0);
@@ -104,70 +108,11 @@ fn phase(actor: u32) -> u8 {
     }
 }
 
-core::arch::global_asm!(
-    ".syntax unified",
-    ".arm",
-    ".fpu vfpv3",
-    ".text",
-    ".align 2",
-    ".global frontier_db_stamina",
-    ".hidden frontier_db_stamina",
-    ".type frontier_db_stamina,%function",
-    "frontier_db_stamina:",
-    "vmov s0,r1",
-    "mov r1,#0",
-    "bx r2",
-);
-unsafe extern "C" {
-    fn frontier_db_stamina(actor: u32, amount: u32, entry: u32);
-}
-
-unsafe fn stamina(actor: u32, amount: f32, continuous: bool) {
-    let offset = if continuous { 0x2a5ce4 } else { 0x2a5ebc };
-    unsafe { frontier_db_stamina(actor, amount.to_bits(), forge::mem::text_addr() + offset) }
-}
-
-#[derive(Default)]
-struct Flick {
-    direction: u16,
-    remaining: f32,
-    released: bool,
-    deflected: bool,
-}
-
-impl Flick {
-    fn update(&mut self, input: &Input, elapsed: f32) -> bool {
-        // Frontier 81ECC418 gives the first push and the return to neutral
-        // separate 12-tick windows. GU measures elapsed time in 60 Hz frames.
-        const WINDOW: f32 = 24.;
-        self.remaining = (self.remaining - elapsed).max(0.);
-        if input.stick_strength < STICK_DEADZONE {
-            if self.deflected && self.remaining > 0. {
-                self.remaining = WINDOW;
-            }
-            self.deflected = false;
-            self.released = true;
-            return false;
-        }
-        if input.stick_strength < 80 || self.deflected || !self.released {
-            return false;
-        }
-        self.deflected = true;
-        let angle = input.stick_angle;
-        let doubled = self.remaining > 0.
-            && (angle.wrapping_sub(self.direction) as i16).unsigned_abs() <= 0x3000;
-        self.remaining = if doubled { 0. } else { WINDOW };
-        self.direction = angle;
-        doubled
-    }
-}
-
 #[derive(Clone, Copy)]
 struct Commands {
     bits: u32,
     direction: usize,
     relative_yaw: u16,
-    stick_yaw: Option<u16>,
 }
 
 impl Commands {
@@ -188,8 +133,9 @@ struct Battle {
     finish_window: f32,
     finish_requested: bool,
     hit: bool,
+    deflected: bool,
     evade_yaw: Option<u16>,
-    resume_sprint: bool,
+    resume_sprint: Resume,
     keep_poise: bool,
     keep_evade: bool,
     polish: sharpen::Polish,
@@ -236,7 +182,6 @@ impl Battle {
             let mut bits = 0;
             if input.command(3) && read::<f32>(actor, 5088) >= 150. {
                 bits |= 1 | 1 << [22, 23, 24, 25][direction];
-                self.evade_yaw = Some(relative_yaw);
             }
             if self.flick.update(input, self.elapsed) && read::<f32>(actor, 5088) > 0. {
                 bits |= 1 << CMD_SPRINT;
@@ -273,7 +218,11 @@ impl Battle {
                 }
             }
             if input.command(13) {
-                bits |= (1 << 10) | (1 << 27);
+                bits |= 1 << 10;
+            }
+            // w06 command 27 is the attack-edge follow-up from recoil.
+            if bits & ((1 << CMD_SLASH_DOWN) | (1 << CMD_SWEEP) | (1 << CMD_COMBO)) != 0 {
+                bits |= 1 << 27;
             }
             // Frontier 811EE87C tests the level for both held and released.
             // An early tap must still count as released when its window opens.
@@ -285,19 +234,20 @@ impl Battle {
                 bits,
                 direction,
                 relative_yaw,
-                stick_yaw,
             }
         }
     }
 
     unsafe fn clear_action(&mut self, actor: u32) {
         self.cursor = None;
-        self.resume_sprint = false;
+        self.effects.clear_action();
+        self.resume_sprint.set(false);
         MONSTER_HIT.store(false, Relaxed);
+        self.deflected = false;
         self.keep_evade = false;
         self.keep_poise = false;
         self.polish.leave_action();
-        for contact in CONTACTS {
+        for contact in BLADE_CONTACT_OFFSETS {
             unsafe { write(actor, contact + 5, 0u8) };
         }
     }
@@ -317,7 +267,7 @@ impl Battle {
                 return false;
             }
             self.clear_action(actor);
-            self.cursor = Some(Cursor::new(state));
+            self.cursor = Some(program::cursor(state));
             self.evade_yaw = None;
             self.hit = false;
             self.finish_window = 0.;
@@ -326,7 +276,7 @@ impl Battle {
                 self.activation_phase = phase(actor);
             }
             write(actor, 5, 1u8);
-            for contact in CONTACTS {
+            for contact in BLADE_CONTACT_OFFSETS {
                 write(actor, contact + 176, 0u32);
             }
             let was_sheathed = native!(0x2a2444, actor) == 0;
@@ -382,6 +332,7 @@ impl Battle {
                         cursor.time.frame = f32::from(step.start);
                         cursor.time.blend = f32::from(step.blend / 2);
                         let frame = f32::from(step.start);
+                        self.effects.seek(step.clip, frame);
                         sound::update(&mut self.audio, actor, Some(step.clip), frame, Some(frame));
                         self.events(actor);
                         return true;
@@ -437,43 +388,7 @@ impl Battle {
                     }
                     8 => self.keep_evade = true,
                     9 => stamina(actor, -150., false),
-                    11 | 12 => {
-                        if let Some(row) = program::strike(parameter) {
-                            let other = matches!(row.shape, 10 | 35) ^ (kind == 12);
-                            let template = match (row.shape, other) {
-                                (34 | 35, false) => 62,
-                                (34 | 35, true) => 61,
-                                (_, false) => 1,
-                                (_, true) => 2,
-                            };
-                            let distance = if row.start == 0 {
-                                -late
-                            } else {
-                                f32::from(row.start) - read::<f32>(actor, 1280)
-                            };
-                            let delay = distance.max(0.);
-                            let duration = f32::from(row.duration) + distance.min(0.);
-                            if duration > 0. {
-                                let mut flags = 7;
-                                if other {
-                                    flags |= Attack::SECONDARY;
-                                }
-                                if state != AERIAL_MOUNT_FINISH {
-                                    flags |= Attack::NO_MOUNT;
-                                }
-                                Attack {
-                                    template,
-                                    power: row.power,
-                                    delay,
-                                    duration,
-                                    flags,
-                                    shape: 0,
-                                    no_sharpness_cost: 0,
-                                }
-                                .submit(actor);
-                            }
-                        }
-                    }
+                    11 | 12 => submit_strike(actor, state, parameter, late, kind == 12),
                     13 => {
                         self.set_phase(actor, parameter as u8);
                         self.effects.demon(actor, phase(actor), 0.);
@@ -500,9 +415,7 @@ impl Battle {
             let direction = direction(yaw);
             let state = match phase(actor) {
                 0 | 1 => {
-                    motion::remember_roll(actor, yaw);
-                    if !action::transition_to(actor, 1, 6) {
-                        motion::clear_roll();
+                    if !motion::ROLL.enter(actor, yaw) {
                         return false;
                     }
                     self.clear_action(actor);
@@ -522,7 +435,7 @@ impl Battle {
             let state = match target {
                 0..=88 => target as u8,
                 89 | 90 => {
-                    let yaw = self.evade_yaw.take().unwrap_or(command.relative_yaw);
+                    let yaw = self.evade_yaw.unwrap_or(command.relative_yaw);
                     return self.evade(actor, yaw, target == 90);
                 }
                 91 => SPRINT,
@@ -548,19 +461,6 @@ impl Battle {
                 _ => return false,
             };
             program::ACTIONS.contains(state) && self.begin(actor, state)
-        }
-    }
-
-    unsafe fn roll_off_ledge(&mut self, actor: u32, resume_sprint: bool) -> bool {
-        unsafe {
-            let (group, slot) = ROLL_OFF_LEDGE;
-            native!(0x2831e0, actor, u32::from(group), u32::from(slot), 0xc);
-            if action::current(actor) != ROLL_OFF_LEDGE {
-                return false;
-            }
-            self.clear_action(actor);
-            self.resume_sprint = resume_sprint;
-            true
         }
     }
 
@@ -594,7 +494,8 @@ impl Battle {
             }
             let target_yaw = read::<u32>(actor, 5280);
             set_facing(actor, yaw);
-            if self.roll_off_ledge(actor, false) {
+            if movement::roll_off_ledge(actor) {
+                self.clear_action(actor);
                 return true;
             }
             write(actor, 4076, facing);
@@ -613,11 +514,16 @@ impl Battle {
                 self.finish(actor);
                 return true;
             };
+            if self.deflected && self.begin(actor, DEFLECTION) {
+                melee::clear_hitstop(actor);
+                return true;
+            }
             if self.elapsed > 0. && self.slide_off_ledge(actor, step.clip) {
                 return true;
             }
             let cursor = self.cursor.as_mut().unwrap();
-            let frame = read::<f32>(actor, 1280);
+            let sample = action::MotionFrame::sample(actor);
+            let frame = sample.frame;
             sound::update(&mut self.audio, actor, Some(step.clip), frame, None);
             if MONSTER_HIT.swap(false, Relaxed) {
                 self.hit = true;
@@ -625,11 +531,8 @@ impl Battle {
                     self.finish_window = program::finish_window();
                 }
             }
-            if frame < cursor.time.frame {
-                cursor.time.cycles = cursor.time.cycles.saturating_add(1);
-            }
-            cursor.time.frame = frame;
-            cursor.time.blend = read(actor, 1268);
+            let wrapped = cursor.time.observe(frame, sample.blend);
+            self.effects.motion_events(actor, step.clip, sample);
             self.events(actor);
 
             if self.keep_poise {
@@ -693,24 +596,25 @@ impl Battle {
             };
             let cursor = self.cursor.as_mut().unwrap();
             if (cursor.art_window(eligible) || state == SPRINT)
-                && action::transition(actor, action::Transition::HUNTER_ART)
+                && action::activate_hunter_art(actor)
             {
                 self.clear_action(actor);
                 return true;
             }
-            if let Some(target) = cursor.branch(commands.bits, eligible)
+            let target = cursor.branch(commands.bits, eligible);
+            if matches!(cursor.pending_action(), Some(89 | 90)) {
+                self.evade_yaw.get_or_insert(commands.relative_yaw);
+            } else {
+                self.evade_yaw = None;
+            }
+            if let Some(target) = target
                 && self.branch(actor, commands, target)
             {
                 return true;
             }
 
             if state == SPRINT {
-                if let Some(yaw) = commands.stick_yaw {
-                    set_facing(actor, yaw);
-                    if native!(0x2a8458, actor) == 1 && self.roll_off_ledge(actor, true) {
-                        return true;
-                    }
-                }
+                let has_direction = movement::steer(actor);
                 let attack = if commands.has(CMD_SWEEP) {
                     enough_stamina.then_some(AERIAL_DANCE)
                 } else if commands.has(CMD_SLASH_DOWN) {
@@ -731,17 +635,18 @@ impl Battle {
                     self.clear_action(actor);
                     return true;
                 }
-                if commands.stick_yaw.is_none() || read::<f32>(actor, 5088) <= 0. {
+                if sprint::can_brake(frame, self.cursor.as_ref().unwrap().time.cycles)
+                    && (!has_direction || read::<f32>(actor, 5088) <= 0.)
+                {
                     return self.begin(actor, BRAKE);
                 }
             }
             let cursor = self.cursor.as_mut().unwrap();
-            let finished = if step.op == 5 {
-                aerial.is_none() && step.loops != 0 && cursor.time.cycles >= step.loops
-            } else if step.until != 0 {
-                frame >= f32::from(step.until)
+            let finished = if step.op == 3 && step.until != 0 {
+                // The w06 side slide (1445) has an authored early exit at 46.
+                step.reached_frame(frame)
             } else {
-                read::<u8>(actor, 1206) & 4 != 0 || frame >= read::<f32>(actor, 1284)
+                step.complete(cursor.time, sample, wrapped)
             };
             if finished {
                 cursor.time.step += 1;
@@ -756,8 +661,7 @@ impl Battle {
             // 811EE0E8 suspends upkeep during these activation and release motions.
             let active = !matches!(clip, Some(1018 | 1440 | 1425 | 1442 | 1448));
             if sprint || (active && mode == 1) {
-                native!(0x2a25a8, actor, 1);
-                stamina(actor, -1., true);
+                movement::drain_running_stamina(actor);
             }
             if mode < 2 {
                 return;
@@ -793,15 +697,14 @@ impl Battle {
                 self.polish = sharpen::Polish::default();
                 sharpen::clear_active_level();
                 self.cursor = None;
+                self.effects.clear_action();
                 return false;
             }
             self.elapsed = read::<f32>(actor, 28).max(0.);
             let current = action::current(actor);
-            if self.elapsed > 0. {
-                motion::finish_blood_wind_frame(actor, current);
-            }
+            motion::finish_blood_wind_frame(actor, current);
             if current != (1, 6) {
-                motion::clear_roll();
+                motion::ROLL.clear();
             }
             let drawn = native!(0x2a2444, actor) != 0;
             let custom = action::custom_id(current.0, current.1);
@@ -816,6 +719,11 @@ impl Battle {
             }
             let in_attack_chain =
                 current.0 == action::GROUP && !matches!(custom, Some(SPRINT | BRAKE));
+            // 816F27BC suppresses recoil while w06's blade-polish timer is live.
+            // The collision occurred before this tick advances or expires the timer.
+            if custom.is_some() && melee::take_deflection(actor) && !self.polish.active() {
+                self.deflected = true;
+            }
             self.polish.tick(self.elapsed, drawn, in_attack_chain);
             let mode = phase(actor);
             self.effects
@@ -835,16 +743,20 @@ impl Battle {
             let chaining = custom.is_some_and(|id| !matches!(id, SPRINT | BRAKE));
             let commands = self.commands(actor, input, chaining);
             if let Some(id) = custom {
+                if read::<u8>(actor, 5) == 0 {
+                    return self.begin(actor, id);
+                }
                 if self
                     .cursor
                     .as_ref()
                     .is_some_and(|cursor| cursor.state == id)
                     && read::<u16>(actor, 1204) == self.packed
-                    && read::<u8>(actor, 5) != 0
                 {
                     return self.advance(actor, commands);
                 }
-                return self.begin(actor, id);
+                // GU retained the custom slot but replaced its playing clip.
+                self.finish(actor);
+                return true;
             }
             sound::update(
                 &mut self.audio,
@@ -853,15 +765,13 @@ impl Battle {
                 read(actor, 1280),
                 None,
             );
-            let terrain = sprint_terrain(current);
-            let ground = matches!(current, (1, 0 | 46) | (2, 0 | 30));
-            if let Some(cursor) = self.cursor.take()
-                && cursor.state == SPRINT
-            {
-                let previous = (read(actor, 9480), read(actor, 9484));
-                self.resume_sprint = terrain || (ground && sprint_terrain(previous));
-            }
-            self.resume_sprint &= drawn && (ground || terrain);
+            let ground = movement::ground_idle(current);
+            let was_sprinting = self
+                .cursor
+                .take()
+                .is_some_and(|cursor| cursor.state == SPRINT);
+            self.resume_sprint
+                .on_native(actor, current, ground, drawn, was_sprinting);
             if drawn
                 && (matches!(current, (4, 14 | 23))
                     || (current.0 == 16 && NATIVE_AERIAL_SLOTS.contains(&current.1)))
@@ -889,9 +799,11 @@ impl Battle {
                 return false;
             }
             let has_stamina = read::<f32>(actor, 5088) > 0.;
-            self.resume_sprint &= commands.stick_yaw.is_some() && has_stamina;
-            if action::transition(actor, action::Transition::HUNTER_ART) {
-                self.resume_sprint = false;
+            let resume_sprint = self
+                .resume_sprint
+                .ready(native!(0x27e608, actor, 0) > 0, has_stamina);
+            if action::activate_hunter_art(actor) {
+                self.resume_sprint.set(false);
                 return true;
             }
             if mode != 0 && !can_sustain(actor, mode) {
@@ -903,16 +815,12 @@ impl Battle {
             if let Some(state) = idle_attack(commands, mode, read::<i16>(actor, 5078) > 1) {
                 return self.begin(actor, state);
             }
-            if (commands.has(CMD_SPRINT) || self.resume_sprint) && has_stamina {
+            if (commands.has(CMD_SPRINT) || resume_sprint) && has_stamina {
                 return self.begin(actor, SPRINT);
             }
             false
         }
     }
-}
-
-fn sprint_terrain((group, slot): (u16, u16)) -> bool {
-    (group == 1 && CLIMBS.contains(&slot)) || matches!((group, slot), (4, 3 | 14 | 23))
 }
 
 unsafe fn can_sustain(actor: u32, phase: u8) -> bool {
@@ -963,6 +871,46 @@ fn idle_attack(commands: Commands, phase: u8, vitality: bool) -> Option<u8> {
     })
 }
 
+// FZ event 12 swaps the hands selected by event 11 for the same strike row.
+unsafe fn submit_strike(actor: u32, state: u8, strike_id: u16, late: f32, swap_hands: bool) {
+    let Some(row) = program::strike(strike_id) else {
+        return;
+    };
+    let secondary = matches!(row.shape, 10 | 35) ^ swap_hands;
+    let template = match (row.shape, secondary) {
+        (34 | 35, false) => 62,
+        (34 | 35, true) => 61,
+        (_, false) => 1,
+        (_, true) => 2,
+    };
+    let frame = unsafe { read::<f32>(actor, 1280) };
+    let Some(HitWindow { delay, duration }) = HitWindow::new(row.start, row.duration, frame, late)
+    else {
+        return;
+    };
+    let mut flags = 7;
+    // 811EF80C enables the hard-contact transition in 811EF762 for these states.
+    if matches!(state, 0..=6 | 8 | 12..=17 | 20 | 43 | 54 | 55) {
+        flags |= Attack::DEFLECTABLE;
+    }
+    if secondary {
+        flags |= Attack::SECONDARY;
+    }
+    if state != AERIAL_MOUNT_FINISH {
+        flags |= Attack::NO_MOUNT;
+    }
+    let attack = Attack {
+        template,
+        power: row.power,
+        delay,
+        duration,
+        flags,
+        shape: 0,
+        no_sharpness_cost: 0,
+    };
+    unsafe { attack.submit(actor) };
+}
+
 unsafe fn turn(actor: u32, amount: u16) {
     unsafe {
         let yaw = read::<u16>(actor, 4076).wrapping_add(amount);
@@ -1006,7 +954,7 @@ unsafe fn dispatch_frame(actor: u32, raw: *const Input) -> u32 {
                 }
             }
             *battle = None;
-            motion::clear_roll();
+            motion::ROLL.clear();
             OWNER.store(0, Relaxed);
             reset_gauges();
             return PASS;
@@ -1016,7 +964,7 @@ unsafe fn dispatch_frame(actor: u32, raw: *const Input) -> u32 {
             .as_ref()
             .is_none_or(|old| old.owner != actor || old.equipment != equipment)
         {
-            motion::clear_roll();
+            motion::ROLL.clear();
             reset_gauges();
             OWNER.store(actor, Relaxed);
             *battle = Some(Battle {
@@ -1073,7 +1021,11 @@ unsafe fn native_demon_gauge(actor: u32, amount: u32, kind: u32) -> u32 {
 #[forge::hook(offset = 0x169d44)]
 unsafe fn record_contact(hit: u32, target: u32, kind: u32) -> u32 {
     let actor = OWNER.load(Relaxed);
-    if actor != 0 && kind == 1 && target != 0 && CONTACTS.contains(&hit.wrapping_sub(actor)) {
+    if actor != 0
+        && kind == 1
+        && target != 0
+        && BLADE_CONTACT_OFFSETS.contains(&hit.wrapping_sub(actor))
+    {
         let (group, slot) = unsafe { action::current(actor) };
         if action::custom(group, slot) {
             MONSTER_HIT.store(true, Relaxed);
@@ -1090,7 +1042,7 @@ unsafe fn adjust_strike(actor: u32, hit: u32, row: u32, flags: u32) -> u32 {
     unsafe {
         // 2B76CC calls this with the HDP row pointer and flags.
         if OWNER.load(Relaxed) != actor
-            || !CONTACTS.contains(&hit.wrapping_sub(actor))
+            || !BLADE_CONTACT_OFFSETS.contains(&hit.wrapping_sub(actor))
             || flags & 1 == 0
         {
             return original!(actor, hit, row, flags);
@@ -1149,5 +1101,5 @@ pub(super) fn install() {
     forge::install_hook!(base, adjust_strike);
     forge::install_hook!(base, native_demon_upkeep);
     forge::install_hook!(base, native_demon_status);
-    unsafe { sharpen::install(base) };
+    unsafe { sharpen::install() };
 }

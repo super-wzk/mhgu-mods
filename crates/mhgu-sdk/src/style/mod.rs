@@ -2,7 +2,21 @@
 pub mod action;
 pub mod guard;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub mod hud;
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub mod hunter;
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub mod movement;
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub mod particle;
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub mod physical;
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub mod remote;
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub mod sound;
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub mod world_contact;
 
 /// Return this from a motion callback to let GU handle the request.
 pub const PASS: u32 = u32::MAX;
@@ -23,7 +37,6 @@ pub struct Input {
     pub stick_angle: u16,
     pub stick_strength: i16,
     /// Extra right shoulder, resolved by GU's binding query (65FA04).
-    /// This is available for moves, such as Frontier brace, absent from GU.
     pub auxiliary_pressed: u32,
 }
 impl Input {
@@ -54,7 +67,7 @@ pub struct ActionRequest {
 pub type Request = unsafe extern "C" fn(u32, *const ActionRequest) -> u32;
 
 /// Immutable process-lifetime descriptor. IDs are global across all weapons.
-/// `weapon` uses GU's equipment byte, not the Frontier weapon number.
+/// `weapon` uses GU's equipment byte.
 #[repr(C)]
 pub struct Style {
     pub id: u32,

@@ -98,21 +98,43 @@ def rendering(g):
         g.put(ctx + 8 * (state & 4095) + 516, state)
 
     routes = list(struct.iter_unpack("<HH", (ROOT / "target/assets/effects/routes.bin").read_bytes()))
-    uppercut, release, ready, charge = (routes[i][0] for i in (2, 7, 8, 9))
+    uppercut_flash, fourth, third, dust, late_dust, release, ready, charge, blade = (
+        routes[i][0] for i in (0, 1, 2, 5, 6, 7, 8, 9, 23))
     directory = NX / "effect/frontier_gs"
+    blend_states = {
+        0: 0x805701F3,  # Additive alpha
+        1: 0x0F09B1F4,  # Alpha blend
+        6: 0x8150B1F9,  # Reverse subtract with alpha blend factors
+    }
     # Radiance's atlas supplies its tint and opacity. GU must multiply it by
     # neutral white, including when another particle previously set the tint.
     cases = {
-        uppercut: (1, [(2, (255, 64, 32, 255)), (8, (255, 64, 32, 128))]),
+        uppercut_flash: (0, [(2, (255, 64, 32, 255)), (8, (255, 64, 32, 128))]),
+        # The 4006 smoke uses the default ground tint and each source alpha key.
+        fourth + 1: (1, [(2, (126, 118, 109, 255)), (8, (126, 118, 109, 128))]),
+        third: (1, [(2, (126, 118, 109, 255)), (8, (126, 118, 109, 128))]),
+        dust + 1: (1, [(2, (126, 118, 109, 255)), (8, (126, 118, 109, 128))]),
+        late_dust + 2: (1, [(10, (126, 118, 109, 255)), (22, (126, 118, 109, 128))]),
+        release: (6, [(0, (255,) * 4)]),
         release + 2: (0, [(4, (255,) * 4), (6, (255,) * 4)]),
         release + 4: (1, [(5, (0,) * 4), (6, (255,) * 4)]),
         ready + 1: (0, [(24, (255,) * 4)]),
         charge: (1, [(90, (255, 192, 64, 96))]),
         charge + 2: (1, [(90, (224, 32, 32, 96))]),
     }
+    # FZ 4022:9 has three delayed pairs of layers with separate alpha curves.
+    for i, (white_peak, white_end, glow_peak, glow_end) in enumerate(
+        [(6, 24, 12, 32), (19, 40, 26, 50), (28, 61, 39, 75)]
+    ):
+        cases[blade + 2 * i] = (1, [
+            (white_peak, (255,) * 4), (white_end, (255, 255, 255, 0)),
+        ])
+        cases[blade + 2 * i + 1] = (0, [
+            (glow_peak, (255, 200, 124, 124)), (glow_end, (255, 0, 0, 0)),
+        ])
     for layer, (selector, samples) in cases.items():
         resource = (directory / f"e{layer}.efl").read_bytes()
-        assert struct.unpack_from("<f", resource, 12)[0] == (60 if layer < charge else 30)
+        assert struct.unpack_from("<f", resource, 12)[0] == (30 if layer in (charge, charge + 2) else 60)
         efl = resource[48:]
         offset = struct.unpack_from("<I", efl, 4)[0] >> 8
         params = efl[offset:offset + 320]
@@ -151,7 +173,7 @@ def rendering(g):
             assert bytes(g.cpu.mem_read(color, 4)) == bytes(rgba), (layer, age)
             g.cpu.reg_write(arm.UC_ARM_REG_S0, 0)  # No extra specular gain.
             g.run(0xC90B50, effect, ctx, 0, matrix, color, 256, flags, 0, uv)
-            assert g.get(ctx + 280) == (0x0F09B1F4 if selector else 0x805701F3)
+            assert g.get(ctx + 280) == blend_states[selector], (layer, age, selector)
             # The retail model-particle program binds CBPrimEflEmu (0x2ad).
             tint = struct.unpack("<4f", g.cpu.mem_read(g.get(ctx + 5996), 16))
             assert all(abs(a - b / 255) < 1e-6 for a, b in zip(tint, (*rgba[:3], 255)))

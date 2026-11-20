@@ -172,6 +172,7 @@ def emission(g):
     depth_layers = {release[2], release[5]}
     impact_layers = {routes[i][0] for i in range(14, 19)}
     counter_layers = set().union(routes[19], routes[20], routes[21])
+    blade_layers = routes[23]
     debris = routes[17][0]
     # 4006:1 alternates an upright streak with two rising mist layers, five times.
     offsets = [(-50, -100), (-150, 0), (-100, 140), (-50, 210), (0, 280)]
@@ -179,7 +180,7 @@ def emission(g):
     uppercut_mesh = {layer: (0, 77, 35)[i % 3] for i, layer in enumerate(fourth)}
     uppercut_mesh.update({third[0]: 77, third[1]: 35})
     sampled = {0, charge[0], charge[2], routes[12][0]}
-    sampled.update(ready, depth_layers, impact_layers, counter_layers, uppercut_mesh)
+    sampled.update(ready, depth_layers, impact_layers, counter_layers, blade_layers, uppercut_mesh)
     for path in sorted((NX / "effect/frontier_gs").glob("e*.efl")):
         data = path.read_bytes()
         lists, joints = struct.unpack_from("<HH", data, 16)
@@ -193,6 +194,7 @@ def emission(g):
         if layer not in sampled:
             continue
         following = layer in ready
+        counter = layer in counter_layers or layer in blade_layers
         resource = g.alloc(160)
         assert g.run(0xB5C5CC, resource, stream) == 1
         unit = g.alloc(528)
@@ -213,7 +215,9 @@ def emission(g):
                 "<16f", 0,0,-1,0, 0,1,0,0, 1,0,0,0, 1200,85,-700,1))
         visible = False
         debris_positions = []
-        for frame in range(91 if layer in charge else 30):
+        # The delayed third pair of counter blade flashes lives through age 76.
+        frames = 91 if layer in charge else 77 if layer in blade_layers else 30
+        for frame in range(frames):
             g.run(0x9B9668, unit)
             if following:
                 # Move the GU joint after the native particle has already been born.
@@ -277,10 +281,10 @@ def emission(g):
                 alpha = g.get(node + 260) >> 24
                 size = struct.unpack("<3f", g.cpu.mem_read(node + 224, 12))
                 assert all(math.isfinite(v) for v in size)
-                # Some source shockwaves mirror the mesh with negative X scale.
-                scaled = all(v != 0 for v in size) if layer in counter_layers else all(v > 0 for v in size)
+                # The counter includes authored negative scales for mirrored meshes.
+                scaled = all(v != 0 for v in size) if counter else all(v > 0 for v in size)
                 if alpha > 0 and scaled and not visible:
-                    if layer in counter_layers:
+                    if counter:
                         submissions.clear()
                         g.run(0xA956D8, gen, context, 256)
                         assert submissions, path

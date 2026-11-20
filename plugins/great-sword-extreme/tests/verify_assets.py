@@ -292,6 +292,9 @@ def target(archive, sex, requests):
             assert (8, 0) in ids and (12, 0) in ids, (group, slot)
             motion = 1000 + 100 * group + slot
             (loop,) = struct.unpack("<i", m.c.mem_read(clip + 12, 4))
+            if motion == 1465:
+                # FZ wraps past 136 on the next two-frame tick, back to 108.
+                assert (frames - 1, loop) == (138, 108), (sex, frames, loop)
             if loop >= 0:
                 assert loop < frames
                 loops[motion] = loop
@@ -378,6 +381,55 @@ def target(archive, sex, requests):
     return len(found)
 
 
+def guard_effects():
+    m = Machine(REPO / "mhfz/eboot.bin.elf", True)
+    player, effect, aux, extension, params = (MEM + n * 0x2000 for n in range(1, 6))
+    waves = []
+    m.trap(0x817BCD54, lambda _, selector, *__: waves.append(selector))
+    for previous, current, blend, expected in [
+        (89, 90, 0, []), (90, 91, 1, []), (90, 91, 0, [10, 16]),
+        (92, 93, 0, [6]), (99, 109, 0, [5]),
+        (100, 101, 0, [5]), (108, 109, 0, [5]),
+    ]:
+        waves.clear()
+        m.c.mem_write(player + 476, struct.pack("<4f", previous, current - previous, 0, 128))
+        m.put(player + 516, blend)
+        m.c.reg_write(arm.UC_ARM_REG_R6, player)
+        m.c.emu_start(0x817C08AB, 0x817BEB22, count=1000)
+        assert m.c.reg_read(arm.UC_ARM_REG_PC) == 0x817BEB22
+        assert waves == expected
+
+    pulses = []
+    m.put(effect + 28, aux)
+    m.put(effect + 172, player)
+    m.put(params + 16, 3)
+    m.c.mem_write(extension + 457, b"\x03")
+    m.trap(0x81818BF8, lambda *_: extension)
+    m.trap(0x817C3E88, lambda *_: params)
+    m.trap(0x81EC5B28, lambda *_: None)
+    m.trap(0x81EC5B3A, lambda _, bank, selector, __: pulses.append((bank, selector)))
+    m.call(0x8115A7CC, effect)
+    assert pulses == [(4022, 21)]
+    assert m.c.mem_read(aux + 88, 2) == b"\x12\0"
+    m.c.mem_write(player + 18, b"\x01")
+    for _ in range(12):
+        m.call(0x8115B4D0, effect)
+    assert len(pulses) == 1
+    m.call(0x8115B4D0, effect)
+    assert len(pulses) == 2
+    m.c.mem_write(player + 18, b"\x00")
+    m.call(0x8115B4D0, effect)
+    assert len(pulses) == 2
+    m.c.mem_write(player + 18, b"\x01")
+    m.call(0x8115B4D0, effect)
+    assert len(pulses) == 3 and pulses[-1] == (4022, 21)
+    m.c.mem_write(extension + 457, b"\x00")
+    for _ in range(13):
+        m.call(0x8115B4D0, effect)
+    assert len(pulses) == 3 and m.c.mem_read(effect + 9, 1) == b"\x09"
+    print("FZ guard counter crossings and Shining Sword ready pulse lifecycle passed")
+
+
 def radiance(program):
     shape = program[-40:]
     radius, *ends = struct.unpack_from("<7f", shape, 12)
@@ -417,6 +469,7 @@ if __name__ == "__main__":
     p = parser.parse_args().assets
     program = (p / "great_sword.fgsa").read_bytes()
     requests = source(program)
+    guard_effects()
     radiance(program)
     for sex in "mf":
         print(f"{sex}: {target(p / f'frontier_gs_{sex}.arc', sex, requests)} GU clips")

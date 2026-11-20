@@ -25,7 +25,7 @@ pub unsafe fn publish(api: &'static ServiceV1) -> bool {
 }
 
 fn provider() -> Option<&'static ServiceV1> {
-    crate::service::find(NAME, MAGIC)
+    unsafe { crate::service::find(NAME, MAGIC) }
 }
 
 /// Access on the initialized game thread. Do not send across threads.

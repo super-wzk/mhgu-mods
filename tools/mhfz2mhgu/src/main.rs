@@ -1,8 +1,8 @@
 mod charge;
 mod emc;
 mod hunter;
-mod hunter_hud;
 mod hunter_fx;
+mod hunter_hud;
 mod model;
 mod motion;
 mod package;
@@ -76,6 +76,33 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Convert the original long sword effect banks and animation sounds.
+    LongSwordEffects {
+        dat: PathBuf,
+        #[arg(long)]
+        gu_weapon: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    LongSwordSound {
+        dat: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Convert Frontier w07 motions and their equipment events.
+    LongSwordMotions {
+        dat: PathBuf,
+        #[arg(long)]
+        female: bool,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Extract the original long sword state, branch, event and contact tables.
+    LongSwordActions {
+        dat: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Convert the paired Frontier dual-blade motion directories.
     DualBladesMotions {
         dat: PathBuf,
@@ -96,7 +123,13 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
-    /// Build the private flame gauge and blade-polish sprite atlas for GU.
+    /// Build the spirit and cut gauge backing for the long sword.
+    LongSwordHud {
+        dat: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Build the flame gauge and blade-polish sprite atlas.
     DualBladesHud {
         #[arg(short, long)]
         output: PathBuf,
@@ -272,25 +305,56 @@ fn main() -> Result<()> {
             save(&output.with_extension("fgse"), timeline)?;
             save(&output, mhgu_resource::arc::encode(&assets)?)
         }
-        Command::GreatSwordActions { dat, output } => save(&output, hunter::actions(&dat)?),
+        Command::GreatSwordActions { dat, output } => {
+            save(&output, hunter::actions(&dat, hunter::Weapon::GreatSword)?)
+        }
         Command::GreatSwordMotions {
             dat,
             female,
             output,
-        } => save(&output, hunter::great_sword(&dat, female)?),
+        } => save(
+            &output,
+            hunter::motions(&dat, female, hunter::Weapon::GreatSword)?,
+        ),
+        Command::LongSwordSound { dat, output } => {
+            let (assets, timeline) = sound::long_sword(&dat)?;
+            save(&output.with_extension("flse"), timeline)?;
+            save(&output, mhgu_resource::arc::encode(&assets)?)
+        }
+        Command::LongSwordEffects {
+            dat,
+            gu_weapon,
+            output,
+        } => hunter_fx::long_sword(&dat, &output, &gu_weapon),
+        Command::LongSwordMotions {
+            dat,
+            female,
+            output,
+        } => save(
+            &output,
+            hunter::motions(&dat, female, hunter::Weapon::LongSword)?,
+        ),
+        Command::LongSwordActions { dat, output } => {
+            hunter::long_sword_shapes(&dat, output.parent().unwrap_or(Path::new(".")))?;
+            save(&output, hunter::actions(&dat, hunter::Weapon::LongSword)?)
+        }
         Command::DualBladesMotions {
             dat,
             female,
             output,
-        } => save(&output, hunter::dual_blades(&dat, female)?),
+        } => save(
+            &output,
+            hunter::motions(&dat, female, hunter::Weapon::DualBlades)?,
+        ),
         Command::DualBladesActions { dat, output } => {
-            save(&output, hunter::dual_blades_actions(&dat)?)
+            save(&output, hunter::actions(&dat, hunter::Weapon::DualBlades)?)
         }
         Command::DualBladesSound { dat, output } => {
             let (assets, timeline) = sound::dual_blades(&dat)?;
             save(&output.with_extension("fdse"), timeline)?;
             save(&output, mhgu_resource::arc::encode(&assets)?)
         }
+        Command::LongSwordHud { dat, output } => save(&output, hunter_hud::long_sword(&dat)?),
         Command::DualBladesHud { output } => save(&output, hunter_hud::dual_blades()?),
         Command::DualBladesEffects {
             dat,

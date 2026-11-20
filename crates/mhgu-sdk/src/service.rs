@@ -24,7 +24,7 @@ fn descriptor(name: &CStr) -> *const u32 {
 /// Call on the serialized Forge init thread. The API and its NRO must stay
 /// loaded for the process lifetime.
 #[doc(hidden)]
-pub(crate) unsafe fn publish<T>(name: &'static CStr, magic: u32, api: &'static T) -> bool {
+pub unsafe fn publish<T>(name: &'static CStr, magic: u32, api: &'static T) -> bool {
     use alloc::boxed::Box;
     if !descriptor(name).is_null() {
         return false;
@@ -40,7 +40,11 @@ pub(crate) unsafe fn publish<T>(name: &'static CStr, magic: u32, api: &'static T
     true
 }
 
-pub(crate) fn find<T>(name: &CStr, magic: u32) -> Option<&'static T> {
+/// # Safety
+/// The name and magic must identify the published API type `T`. Call only
+/// on the serialized game thread while the engine's type table is live.
+#[doc(hidden)]
+pub unsafe fn find<T>(name: &CStr, magic: u32) -> Option<&'static T> {
     let ptr = descriptor(name);
     if ptr.is_null() {
         return None;
@@ -59,7 +63,8 @@ pub(crate) fn find<T>(name: &CStr, magic: u32) -> Option<&'static T> {
 }
 
 /// MT service lookup is only performed on the initialized GU startup thread.
-pub(crate) fn on_game_thread() -> bool {
+#[doc(hidden)]
+pub fn on_game_thread() -> bool {
     // GU 1.4: the main module's initializer 7AF404 constructs the process-lifetime
     // default MT allocator at 18A6190. Its constructor 7AAF00 records the startup
     // thread at +56, using this same nn::os::GetCurrentThread import.

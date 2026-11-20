@@ -17,6 +17,9 @@ pub struct Attack {
 }
 
 impl Attack {
+    /// Arm the style registry's deflection check for this blade and contact serial.
+    pub const DEFLECTABLE: u32 = 1 << 27;
+
     /// Use the native second contact slot for a simultaneous paired strike.
     pub const SECONDARY: u32 = 1 << 31;
 

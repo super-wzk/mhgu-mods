@@ -5,8 +5,9 @@
 | 位置 | 职责 |
 | --- | --- |
 | [crates/mhgu-sdk](../crates/mhgu-sdk/README.md) | GU 1.4 引擎绑定、动作与碰撞接口、风格和怪物注册接口。 |
+| [crates/mhfz-sdk](../crates/mhfz-sdk/README.md) | 极型武器共用的 Frontier 动作程序、输入、音效和粒子适配，依赖 mhgu-sdk。 |
 | [plugins/style-registry](../plugins/style-registry/README.md) | 扩展装备箱的原版风格页，按武器保存选择，转接公共动作、狩技、命中、防御和粒子绘制。 |
-| [plugins/great-sword-extreme](../plugins/great-sword-extreme/README.md) / [plugins/dual-blades-extreme](../plugins/dual-blades-extreme/README.md) | 动作程序、风格输入与派生、专属音效和特效。双剑还提供刃打和火焰槽 HUD。 |
+| [plugins/great-sword-extreme](../plugins/great-sword-extreme/README.md) / [plugins/dual-blades-extreme](../plugins/dual-blades-extreme/README.md) / [plugins/long-sword-extreme](../plugins/long-sword-extreme/README.md) | 动作程序、风格输入与派生、专属音效和特效。双剑还提供刃打和火焰槽 HUD。 |
 | [plugins/monster-registry](../plugins/monster-registry/README.md) / [plugins/monster-espinas](../plugins/monster-espinas/README.md) | 独立物种、任务和怪物行为的接入实例。 |
 | [tools](../tools/) | 宿主资源转换 CLI。`mhf-resource` 读 FZ 格式，`mhgu-resource` 读写 GU 格式，`src/hunter.rs` 等负责具体移植映射。 |
 
@@ -29,6 +30,7 @@ export MHGU_ROMFS="${MHGU_ROMFS:?请指定包含 nativeNX 的 GU RomFS 根目录
 python3 plugins/style-registry/package.py
 python3 plugins/great-sword-extreme/package.py "$MHFZ_DAT"
 python3 plugins/dual-blades-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
+python3 plugins/long-sword-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 ```
 
 打包脚本先把源数据转换到 `target/assets/`，再构建 NRO 并组装 `dist/<插件名>/romfs/nativeNX`。动作程序由 `include_bytes!` 编入 NRO。资源已经生成且本次只改 Rust 时，可以用 `(cd plugins/dual-blades-extreme && cargo forge build --release)` 增量构建，产物在插件目录的 `dual_blades_extreme.nro`。安装时取这次生成的 NRO，或先把它同步到 `dist` 中的同名文件。

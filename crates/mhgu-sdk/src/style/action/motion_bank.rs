@@ -3,17 +3,17 @@ use core::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
-/// Three paired Frontier motion groups, with one set of resources per sex.
-pub struct MotionBanks {
-    paths: [[&'static CStr; 3]; 2],
-    resources: [[AtomicU32; 3]; 2],
+/// GU hunter LMT resources indexed by the caller's group and the hunter's model sex.
+pub struct MotionBanks<const GROUPS: usize> {
+    paths: [[&'static CStr; GROUPS]; 2],
+    resources: [[AtomicU32; GROUPS]; 2],
 }
 
-impl MotionBanks {
-    pub const fn new(paths: [[&'static CStr; 3]; 2]) -> Self {
+impl<const GROUPS: usize> MotionBanks<GROUPS> {
+    pub const fn new(paths: [[&'static CStr; GROUPS]; 2]) -> Self {
         Self {
             paths,
-            resources: [const { [const { AtomicU32::new(0) }; 3] }; 2],
+            resources: [const { [const { AtomicU32::new(0) }; GROUPS] }; 2],
         }
     }
 
@@ -21,14 +21,8 @@ impl MotionBanks {
     ///
     /// # Safety
     /// The actor must be a live GU hunter with equipped gear on the game thread.
-    pub unsafe fn encode(&self, actor: u32, source: u16) -> Option<u16> {
-        let group = match source / 100 {
-            10 => 0,
-            12 => 1,
-            14 => 2,
-            _ => return None,
-        };
-        let slot = u32::from(source % 100);
+    pub unsafe fn encode(&self, actor: u32, group: usize, slot: u8) -> Option<u16> {
+        let slot = u32::from(slot);
         unsafe {
             let equipment = ((actor + 5060) as *const u32).read();
             if equipment == 0 {
@@ -54,11 +48,11 @@ impl MotionBanks {
         }
     }
 
-    /// Resolve a packed motion ID only when the bank belongs to this style.
+    /// Resolve the caller's group from a packed GU motion ID.
     ///
     /// # Safety
     /// The actor must be a live GU hunter on the game thread.
-    pub unsafe fn decode(&self, actor: u32, packed: u16) -> Option<u16> {
+    pub unsafe fn group(&self, actor: u32, packed: u16) -> Option<usize> {
         let bank = u32::from(packed >> 8);
         if !(8..16).contains(&bank) {
             return None;
@@ -67,17 +61,15 @@ impl MotionBanks {
         if resource == 0 {
             return None;
         }
-        (0..3)
-            .find(|&group| {
-                self.resources
-                    .iter()
-                    .any(|sex| sex[group].load(Ordering::Acquire) == resource)
-            })
-            .map(|group| 1000 + 200 * group as u16 + (packed & 255))
+        (0..GROUPS).find(|&group| {
+            self.resources
+                .iter()
+                .any(|sex| sex[group].load(Ordering::Acquire) == resource)
+        })
     }
 
     unsafe fn resource(&self, sex: usize, group: usize, slot: u32) -> Option<u32> {
-        let cache = &self.resources.get(sex)?[group];
+        let cache = self.resources.get(sex)?.get(group)?;
         let path = self.paths[sex][group];
         unsafe {
             let has_clip: unsafe extern "C" fn(u32, u32) -> u32 =

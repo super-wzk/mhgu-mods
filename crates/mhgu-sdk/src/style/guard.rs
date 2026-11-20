@@ -39,3 +39,28 @@ pub unsafe fn take(actor: u32) -> Option<Contact> {
         _ => None,
     }
 }
+
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+mod impact {
+    use crate::service;
+    const NAME: &core::ffi::CStr = c"mhgu::GuardImpactV1";
+    const MAGIC: u32 = u32::from_le_bytes(*b"GIP1");
+    #[doc(hidden)]
+    #[repr(C)]
+    pub struct Impact(pub unsafe extern "C" fn(u32, *mut [f32; 3]) -> bool);
+
+    /// # Safety
+    /// Only the registry may publish this service during game-thread initialization.
+    pub unsafe fn publish_impact(api: &'static Impact) -> bool {
+        unsafe { service::publish(NAME, MAGIC, api) }
+    }
+    /// # Safety
+    /// Call inside the policy for the hunter currently resolving a guard.
+    pub unsafe fn impact_position(actor: u32) -> Option<[f32; 3]> {
+        let api = unsafe { service::find::<Impact>(NAME, MAGIC) }?;
+        let mut position = [0.; 3];
+        unsafe { (api.0)(actor, &mut position) }.then_some(position)
+    }
+}
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub use impact::{Impact, impact_position, publish_impact};

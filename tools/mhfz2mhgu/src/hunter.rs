@@ -83,20 +83,19 @@ fn merge(rig: &Rig, layers: [Vec<Track>; 2], frames: usize) -> Result<Vec<Track>
     Ok(tracks)
 }
 
-pub fn great_sword(dat: &Path, female: bool) -> Result<Vec<u8>> {
-    motions(dat, female, false)
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Weapon {
+    GreatSword = 0,
+    DualBlades = 6,
+    LongSword = 7,
 }
 
-pub fn dual_blades(dat: &Path, female: bool) -> Result<Vec<u8>> {
-    motions(dat, female, true)
-}
-
-fn motions(dat: &Path, female: bool, dual_blades: bool) -> Result<Vec<u8>> {
+pub fn motions(dat: &Path, female: bool, weapon: Weapon) -> Result<Vec<u8>> {
     let sex = if female { "f" } else { "m" };
-    let (source, stem, last) = if dual_blades {
-        ("w06", "frontier_db", 60)
-    } else {
-        ("w00", "frontier_gs", 80)
+    let (source, stem, last) = match weapon {
+        Weapon::GreatSword => ("w00", "frontier_gs", 80),
+        Weapon::DualBlades => ("w06", "frontier_db", 60),
+        Weapon::LongSword => ("w07", "frontier_ls", 60),
     };
     let model = pac::decode(read(&dat.join(format!("parts/{sex}00/{sex}_editpl.bin")))?)?;
     let rig = Rig::parse(&pac::member(&model, 1)?)?;
@@ -113,6 +112,22 @@ fn motions(dat: &Path, female: bool, dual_blades: bool) -> Result<Vec<u8>> {
             .eq([100, 100, 15, 15, last, last, 0]),
         "unrecognized Frontier {source} motion directory"
     );
+    let instant_travel = if weapon == Weapon::LongSword {
+        let data = pac::decode(read(&dat.join("mhfdat.bin"))?)?;
+        let directory = u32::from_le_bytes(
+            data.get(1836..1840)
+                .context("missing Frontier parameter directory")?
+                .try_into()?,
+        ) as usize;
+        let at = directory + 173 * 32 + 4;
+        f32::from_le_bytes(
+            data.get(at..at + 4)
+                .context("missing instant travel")?
+                .try_into()?,
+        )
+    } else {
+        0.
+    };
     let mut assets = Vec::new();
     for group in [0, 2, 4] {
         let slots = mot.groups[group].motion_offsets.len();
@@ -120,7 +135,8 @@ fn motions(dat: &Path, female: bool, dual_blades: bool) -> Result<Vec<u8>> {
             mot.groups[group + 1].motion_offsets.len() == slots,
             "mismatched hunter layers"
         );
-        let mut w = Writer::new(slots)?;
+        let stepping_slash = weapon == Weapon::LongSword && group == 4;
+        let mut w = Writer::new(slots + usize::from(stepping_slash))?;
         for slot in 0..slots {
             let pair = (mot.motion(group, slot)?, mot.motion(group + 1, slot)?);
             let (lower, upper) = match pair {
@@ -132,7 +148,15 @@ fn motions(dat: &Path, female: bool, dual_blades: bool) -> Result<Vec<u8>> {
                 .with_context(|| format!("{source} lower {group}:{slot}"))?;
             let (hi, b) = bake(&upper, &rig, Some(1), Some(0))
                 .with_context(|| format!("{source} upper {}:{slot}", group + 1))?;
-            let frames = lo.max(hi);
+            // FZ 8173208A plays the last sample of the Shining Sword loop
+            // for one 30 Hz tick. GU 951A80 wraps as soon as it reaches the
+            // end, so hold that pose for two motion frames in the LMT.
+            let frames = lo.max(hi)
+                + if weapon == Weapon::GreatSword && group == 4 && slot == 65 {
+                    2
+                } else {
+                    0
+                };
             let loop_frame = match (lower.metadata_present, upper.metadata_present) {
                 (0, 0) => None,
                 (1, 1) if lower.metadata == upper.metadata => {
@@ -145,18 +169,45 @@ fn motions(dat: &Path, female: bool, dual_blades: bool) -> Result<Vec<u8>> {
                 }
                 _ => anyhow::bail!("unmatched hunter loop points at {group}:{slot}"),
             };
-            w.clip_with_loop(
-                slot,
-                frames,
-                &merge(&rig, [a, b], frames as usize)?,
-                loop_frame,
-            )?;
+            let mut tracks = merge(&rig, [a, b], frames as usize)?;
+            if weapon == Weapon::LongSword && group == 4 && slot == 51 {
+                // FZ 811F9916 scales the horizontal root delta on 30 Hz ticks
+                // ending in [28,46). Apply it to both GU samples of each tick.
+                let root = tracks
+                    .iter_mut()
+                    .find(|t| t.usage == Usage::RootTranslation)
+                    .context("instant slash lacks a root translation track")?;
+                let mut extra = Vec4::ZERO;
+                let mut previous = root.samples[0];
+                for (frame, sample) in root.samples.iter_mut().enumerate() {
+                    let authored = *sample;
+                    if (28..46).contains(&frame.next_multiple_of(2)) {
+                        let delta = authored - previous;
+                        extra += Vec4::new(delta.x, 0., delta.z, 0.) * instant_travel;
+                    }
+                    previous = authored;
+                    *sample += extra;
+                }
+            }
+            w.clip_with_loop(slot, frames, &tracks, loop_frame)?;
+            if stepping_slash && slot == 1 {
+                // 811F98BC adds 7.5 forward on ticks 40..56 in state 12 only.
+                // Private clip 1460 lets GU apply this movement against terrain.
+                let root = tracks.iter_mut().find(|t| t.usage == Usage::RootTranslation)
+                    .context("stepping slash lacks a root translation track")?;
+                root.samples.resize(frames as usize, *root.samples.last().unwrap());
+                for (frame, point) in root.samples.iter_mut().enumerate() {
+                    point.z += 7.5 * ((frame.saturating_sub(38) as f32 * 0.5).min(8.));
+                }
+                w.clip_with_loop(slots, frames, &tracks, loop_frame)?;
+                long_sword_equipment(&mut w, slots, 1401)?;
+            }
             if frames > 1 {
                 let motion = 1000 + 100 * group + slot;
-                if dual_blades {
-                    dual_blades_equipment(&mut w, slot, motion, frames)?;
-                } else {
-                    equipment(&mut w, slot, motion)?;
+                match weapon {
+                    Weapon::DualBlades => dual_blades_equipment(&mut w, slot, motion, frames)?,
+                    Weapon::GreatSword => equipment(&mut w, slot, motion)?,
+                    Weapon::LongSword => long_sword_equipment(&mut w, slot, motion)?,
                 }
             }
         }
@@ -167,6 +218,29 @@ fn motions(dat: &Path, female: bool, dual_blades: bool) -> Result<Vec<u8>> {
         });
     }
     arc::encode(&assets)
+}
+
+// Vita 819070E2, weapon 7, integer playback frames. GU w07's equipment
+// events 1, 3 and 2 select the right wrist, left wrist and back respectively.
+fn long_sword_equipment(w: &mut Writer, slot: usize, clip: usize) -> Result<()> {
+    let runs: &[(u32, u32)] = match clip {
+        1002 => &[(4, 16), (1, 40), (2, 0)],
+        1003 => &[(1, 52), (4, 0)],
+        1005 => &[(1, 44), (4, 0)],
+        1212 => &[(1, 94), (2, 0)],
+        1412 => &[(1, 70), (4, 0)],
+        1415 => &[(4, 8), (1, 20), (2, 0)],
+        1426 => &[(4, 4), (1, 0)],
+        1437 => &[(2, 2), (1, 216), (4, 0)],
+        1441 | 1446 => &[(2, 4), (1, 0)],
+        1442 => &[(2, 10), (1, 0)],
+        1443 => &[(1, 0)],
+        1447 => &[(4, 2), (1, 0)],
+        1448 => &[(2, 40), (1, 162), (2, 0)],
+        1452 => &[(2, 24), (1, 94), (2, 0)],
+        _ => &[(2, 0)],
+    };
+    w.equipment_timeline(slot, &[1, 3, 2], runs)
 }
 
 fn dual_blades_equipment(w: &mut Writer, slot: usize, motion: usize, frames: u32) -> Result<()> {
@@ -207,14 +281,6 @@ fn equipment(w: &mut Writer, slot: usize, motion: usize) -> Result<()> {
 // The Vita player dispatcher at 81815D60, 81815F30 and 81816422 reads these
 // same three arrays. Repack the GS records, retaining every field, including
 // the unknown ones. Stored addresses are offsets from the start of this file.
-pub fn actions(dat: &Path) -> Result<Vec<u8>> {
-    action_program(dat, false)
-}
-
-pub fn dual_blades_actions(dat: &Path) -> Result<Vec<u8>> {
-    action_program(dat, true)
-}
-
 pub fn dual_blades_parameters(data: &[u8]) -> Result<&[u8]> {
     ensure!(data.starts_with(b"mhf\x1a"), "expected decoded mhfdat.bin");
     let pointer = data
@@ -226,7 +292,60 @@ pub fn dual_blades_parameters(data: &[u8]) -> Result<&[u8]> {
         .context("truncated Frontier dual-blades parameters")
 }
 
-fn action_program(dat: &Path, dual_blades: bool) -> Result<Vec<u8>> {
+/// GU HTS group zero, built from the standard-reach column of the FZ shape directory.
+pub fn long_sword_shapes(dat: &Path, output: &Path) -> Result<()> {
+    let data = pac::decode(read(&dat.join("mhfdat.bin"))?)?;
+    let word = |at| -> Result<usize> {
+        Ok(u32::from_le_bytes(
+            data.get(at..at + 4)
+                .context("short shape pointer")?
+                .try_into()?,
+        ) as usize)
+    };
+    let directory = word(216)?;
+    // These are all the selectors used by w07 Extreme's reachable blade strikes.
+    for selector in [0, 32, 33] {
+        let mut at = word(directory + 32 * selector)?;
+        let mut rows = Vec::new();
+        loop {
+            let node = u16::from_le_bytes(
+                data.get(at..at + 2)
+                    .context("short shape node")?
+                    .try_into()?,
+            );
+            if node == u16::MAX {
+                break;
+            }
+            let shape = data.get(at..at + 40).context("short blade capsule")?;
+            let joint = node
+                .checked_sub(2)
+                .and_then(|id| BONES.get(usize::from(id)))
+                .context("unknown blade joint")?;
+            ensure!(shape[2..4] == [1, 0], "expected a blade capsule");
+            rows.extend(u16::from(*joint).to_le_bytes());
+            rows.extend([0, 0, 1, 0, 0, 0]);
+            rows.extend(0f32.to_le_bytes());
+            rows.extend(&shape[12..28]);
+            rows.extend(0f32.to_le_bytes());
+            rows.extend(&shape[28..40]);
+            rows.extend(0f32.to_le_bytes());
+            at += 40;
+        }
+        ensure!(
+            rows.len() == 3 * 48,
+            "unexpected blade capsule count in group {selector}"
+        );
+        let mut hts = b"HTS\0".to_vec();
+        for field in [0x20131015u32, 1, 0, (rows.len() / 48) as u32, 24] {
+            hts.extend(field.to_le_bytes());
+        }
+        hts.extend(rows);
+        super::save(&output.join(format!("blade_{selector}.hts")), hts)?;
+    }
+    Ok(())
+}
+
+pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
     let motion_data = pac::decode(read(&dat.join("mhfdat.bin"))?)?;
     let data = &motion_data[..];
     let sdt = pac::decode(read(&dat.join("mhfsdt.bin"))?)?;
@@ -238,14 +357,16 @@ fn action_program(dat: &Path, dual_blades: bool) -> Result<Vec<u8>> {
     }
     ensure!(data.starts_with(b"mhf\x1a"), "expected decoded mhfdat.bin");
     // First entry: 大剣. Entry 3 is ランス, not the great sword.
-    let weapon = word(data, 0x614)? + if dual_blades { 6 * 8 } else { 0 };
+    let weapon = word(data, 0x614)? + kind as usize * 8;
+    let (states, magic) = match kind {
+        Weapon::GreatSword => (74, b"FGSA"),
+        Weapon::DualBlades => (89, b"FDBA"),
+        Weapon::LongSword => (85, b"FLSA"),
+    };
     let n = word(data, weapon)?;
-    ensure!(
-        n == if dual_blades { 89 } else { 74 },
-        "unrecognized Frontier state table: {n} states"
-    );
+    ensure!(n == states, "unrecognized Frontier state table: {n} states");
     let records = word(data, weapon + 4)?;
-    let mut out = if dual_blades { b"FDBA" } else { b"FGSA" }.to_vec();
+    let mut out = magic.to_vec();
     out.extend(2u16.to_le_bytes());
     out.extend((n as u16).to_le_bytes());
     // The first SDT bank is the hunter melee bank (selector 0). FZ copies one
@@ -282,7 +403,64 @@ fn action_program(dat: &Path, dual_blades: bool) -> Result<Vec<u8>> {
             out.extend_from_slice(src);
         }
     }
-    if dual_blades {
+    if kind == Weapon::LongSword {
+        // 817C3E88 indexes 32-byte parameter groups. 811FA43E and 81847470
+        // use groups 173/174 for the cut gauge, sprint and successful parry.
+        let start = word(data, 1836)? + 32 * 173;
+        // 81E93F44 selects family 85 in the 28-byte SDT directory. The
+        // executable uses rows 1..4 for the two projectiles created at 128.
+        let family = sdt
+            .get(4 * 28..5 * 28)
+            .context("missing long sword discharge bank")?;
+        ensure!(
+            family[..6] == [0, 0, 85, 0, 5, 0],
+            "unexpected discharge bank"
+        );
+        let contacts = word(family, 8)? + 40;
+        let bank = 8 * 28;
+        ensure!(
+            sdt.get(bank + 2..bank + 8) == Some(&[108, 0, 19, 0, 4, 0]),
+            "missing instant slash bank"
+        );
+        let strike = word(&sdt, bank + 8)? + 4 * 40;
+        let record = sdt
+            .get(strike..strike + 40)
+            .context("short instant slash contact")?;
+        let selector = usize::from(u16::from_le_bytes(record[16..18].try_into()?));
+        ensure!(selector < 4, "invalid instant slash shape selector");
+        let pos = word(&sdt, word(&sdt, bank + 16)? + 32 * selector)?;
+        let shape = sdt
+            .get(pos..pos + 40)
+            .context("short instant slash shape")?;
+        ensure!(shape[..4] == [126, 0, 0, 0], "unknown instant slash shape");
+        out.extend(b"LS04");
+        out.extend(record);
+        out.extend(&shape[12..16]);
+        out.extend(b"LS85");
+        out.extend(
+            sdt.get(contacts..contacts + 4 * 40)
+                .context("truncated discharge contacts")?,
+        );
+        let reach = word(data, word(data, 216)?)?;
+        for offset in [64, 104, 92, 116] {
+            out.extend(
+                data.get(reach + offset..reach + offset + 4)
+                    .context("short standard reach row")?,
+            );
+        }
+        let common = word(data, 0x660)?;
+        out.extend(
+            data.get(common + 240..common + 242)
+                .context("missing full spirit timer")?,
+        );
+        out.extend(b"LSPR");
+        out.extend(
+            data.get(start..start + 64)
+                .context("short long sword parameters")?,
+        );
+        return Ok(out);
+    }
+    if kind == Weapon::DualBlades {
         out.extend(b"DBPR");
         out.extend(dual_blades_parameters(data)?);
         return Ok(out);

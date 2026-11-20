@@ -11,7 +11,7 @@ mod battle;
 mod combat;
 #[cfg(target_arch = "arm")]
 mod fx;
-#[cfg(any(test, target_arch = "arm"))]
+#[cfg(target_arch = "arm")]
 mod program;
 #[cfg(target_arch = "arm")]
 mod sound;
@@ -52,7 +52,9 @@ mod entry {
             return;
         }
         motion::install();
-        super::combat::install();
-        super::fx::install();
+        if !unsafe { mhgu_sdk::style::world_contact::bind(EXTREME.id, super::combat::expand) } {
+            forge::log::prelude::warn!("Extreme GS: world contact service unavailable");
+        }
+        super::fx::install(EXTREME.id);
     }
 }

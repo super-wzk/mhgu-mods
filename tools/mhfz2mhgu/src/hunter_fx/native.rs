@@ -71,6 +71,30 @@ fn sample(keys: &[(u32, V3)], t: u32) -> V3 {
     prev.1
 }
 
+fn wide_curves(def: &[u8], life: u16, mut size: V3, velocity_curve: &[(u32, V3)]) -> (Keys, Keys) {
+    let mut position = [0.; 3];
+    let mut velocity = vec(def, 20);
+    let growth = vec(def, 68);
+    let gravity = f32::from_bits(word(def, 92));
+    let mut movement = vec![(0, position)];
+    let mut scale = vec![(0, size)];
+    // FZ HD 113D2190 and 113D2700 integrate once per two bank frames.
+    for frame in (0..u32::from(life)).step_by(2) {
+        let multiplier = sample(velocity_curve, frame);
+        for axis in 0..3 {
+            position[axis] += velocity[axis];
+            size[axis] = (size[axis] + growth[axis]).max(0.);
+        }
+        velocity[1] -= gravity;
+        for (speed, multiplier) in velocity.iter_mut().zip(multiplier) {
+            *speed *= multiplier;
+        }
+        movement.push((frame + 2, position));
+        scale.push((frame + 2, size));
+    }
+    (movement, scale)
+}
+
 // Keep scale and colour at zero until the delayed emission starts.
 fn delay_visible_keys<T: Default + Copy>(keys: &mut Vec<(u32, T)>, delay: u32) {
     if delay == 0 {
@@ -93,9 +117,10 @@ fn primary_uv(
     model: &mut Vec<u8>,
     sheet: Option<&Sheet>,
     speed: [f32; 2],
+    origin: [f32; 2],
     delay: u32,
 ) -> Result<()> {
-    if sheet.is_none() && speed == [0.; 2] {
+    if sheet.is_none() && speed == [0.; 2] && origin == [0.; 2] {
         return Ok(());
     }
     let mut uv = [0; 64];
@@ -116,7 +141,7 @@ fn primary_uv(
     } else {
         // A6B824 initializes primary UVs; A6BC0C advances them per EFL frame.
         for (axis, speed) in speed.into_iter().enumerate() {
-            float(&mut uv, axis * 8, -(delay as f32) * speed);
+            float(&mut uv, axis * 8, origin[axis] - (delay as f32) * speed);
             float(&mut uv, 16 + axis * 8, speed);
         }
     }
@@ -125,12 +150,35 @@ fn primary_uv(
     Ok(())
 }
 
+// A9958C copies this selector into each particle. B007FC selects the
+// corresponding blend state instead of using the material's blend state.
+#[repr(u32)]
+#[derive(Clone, Copy)]
+enum Blend {
+    Additive = 0,
+    Alpha = 1,
+    ReverseSubtract = 6, // BSBlendRevSubBlendAlpha
+}
+
+impl Blend {
+    fn from_frontier(mode: u8) -> Self {
+        // FZ HD 113CEBFA / 113D3329 use the same alpha factors for modes
+        // 0 and 2. Mode 2 changes the blend operation to reverse subtract.
+        match mode {
+            1 => Self::Additive,
+            2 => Self::ReverseSubtract,
+            _ => Self::Alpha,
+        }
+    }
+}
+
 #[repr(u32)]
 #[derive(Clone, Copy)]
 enum Facing {
     World = 0,
     Camera = 1,
     CameraYaw = 3,
+    CameraPosition = 13,
 }
 
 impl Facing {
@@ -147,10 +195,11 @@ impl Facing {
     }
 }
 
+#[derive(Clone)]
 struct Layer {
     mesh: u16,
     frames_per_second: f32,
-    blend: u8,
+    blend: Blend,
     delay: u16,
     life: u16,
     count: u16,
@@ -158,11 +207,13 @@ struct Layer {
     spread: V3,
     rotation: Keys,
     rotation_range: V3,
+    proportional_rotation: bool,
     scale: Keys,
     scale_range: V3,
     movement: Keys,
     color: Vec<(u32, [u8; 4])>,
     uv_speed: [f32; 2],
+    uv_origin: [f32; 2],
     pulse: bool,
     facing: Facing,
     camera_depth: Keys,
@@ -174,7 +225,7 @@ impl Layer {
         Self {
             mesh,
             frames_per_second: 30.,
-            blend: 0,
+            blend: Blend::Additive,
             delay: 0,
             life,
             count: 1,
@@ -182,11 +233,13 @@ impl Layer {
             spread: [0.; 3],
             rotation: vec![(0, [0.; 3])],
             rotation_range: [0.; 3],
+            proportional_rotation: false,
             scale: vec![(0, [1.; 3])],
             scale_range: [0.; 3],
             movement: vec![(0, [0.; 3])],
             color: vec![(0, [255; 4])],
             uv_speed: [0.; 2],
+            uv_origin: [0.; 2],
             pulse: false,
             facing: Facing::World,
             camera_depth: Vec::new(),
@@ -289,13 +342,7 @@ impl Compiler {
         }
         particle_block(&mut data, 0, 0, &common);
         let mut model = vec![0; 320];
-        // A9958C copies this selector into each particle; B007FC then chooses
-        // the native blend state, overriding the MRL. 0 = AddAlpha, 1 = BlendAlpha.
-        put(
-            &mut model,
-            0,
-            self.model_flags | u32::from(layer.blend) << 24,
-        );
+        put(&mut model, 0, self.model_flags | (layer.blend as u32) << 24);
         float(&mut model, 28, 1.);
         float(&mut model, 32, 1.);
         float(&mut model, 40, 1.);
@@ -336,7 +383,7 @@ impl Compiler {
             &layer.rotation,
             layer.rotation_range,
             false,
-            false,
+            layer.proportional_rotation,
         )?;
         short(&mut model, 304, rot);
         delay_visible_keys(&mut layer.scale, delay);
@@ -365,7 +412,13 @@ impl Compiler {
             model.extend(rgba);
         }
         short(&mut model, 66, col);
-        primary_uv(&mut model, sheet.as_ref(), layer.uv_speed, delay)?;
+        primary_uv(
+            &mut model,
+            sheet.as_ref(),
+            layer.uv_speed,
+            layer.uv_origin,
+            delay,
+        )?;
         self.sheets.extend(sheet);
         particle_block(&mut data, 4, 5, &model);
         // Native lifetime envelope; the authored colour curve supplies alpha.
@@ -456,13 +509,59 @@ impl Compiler {
         self.rows.extend(proof);
         Ok(())
     }
+    fn mesh_track(&mut self, mut layer: Layer, keys: &[(u32, u16)], seed: u32) -> Result<()> {
+        ensure!(
+            layer.count == 1,
+            "animated mesh emitter has multiple particles"
+        );
+        // Each EFL holds a single model. Bake one transform for the source
+        // emitter so successive models cannot jump between random positions.
+        let mut noise = seed;
+        let mut signed_sample = || {
+            noise = noise.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (noise >> 8) as f32 * (2. / 16_777_216.) - 1.
+        };
+        for index in 0..3 {
+            layer.position[index] += layer.spread[index] * signed_sample();
+            let rotation = layer.rotation_range[index] * signed_sample();
+            let scale = 1. + layer.scale_range[index] * signed_sample();
+            for (_, key) in &mut layer.rotation {
+                key[index] += rotation;
+            }
+            for (_, key) in &mut layer.scale {
+                key[index] *= scale;
+            }
+        }
+        layer.spread = [0.; 3];
+        layer.rotation_range = [0.; 3];
+        layer.scale_range = [0.; 3];
+
+        let life = u32::from(layer.life);
+        for (i, &(start, mesh)) in keys.iter().enumerate() {
+            let end = keys.get(i + 1).map_or(life, |&(time, _)| time);
+            let mut window = layer.clone();
+            window.mesh = mesh;
+            window.life = end.try_into()?;
+            if start != 0 {
+                let scale = sample(&window.scale, start);
+                window.scale.retain(|&(time, _)| time > start);
+                window.scale.insert(0, (start, scale));
+                if start > 1 {
+                    window.scale.insert(0, (start - 1, [0.; 3]));
+                }
+                window.scale.insert(0, (0, [0.; 3]));
+            }
+            self.layer(window, None)?;
+        }
+        Ok(())
+    }
+
     fn route(&mut self, start: u16) {
         self.routes.extend(start.to_le_bytes());
         self.routes.extend((self.count - start).to_le_bytes());
     }
     pub fn bank(&mut self, data: &[u8], bank: u16, selectors: &[u16]) -> Result<()> {
         ensure!(half(data, 0)? >= 4, "unsupported Frontier effect bank");
-        let radiance = bank == 4022;
         let mut tail = data.get(28..).context("short effect bank")?;
         let mut tables = [&[][..]; 6];
         for (i, stride) in [112, 24, 16, 16, 56, 140].into_iter().enumerate() {
@@ -485,7 +584,7 @@ impl Compiler {
         };
         for &selector in selectors {
             let first = self.count;
-            for row in emitters.chunks_exact(112) {
+            for (emitter, row) in emitters.chunks_exact(112).enumerate() {
                 if half(row, 80)? != selector {
                     continue;
                 }
@@ -509,33 +608,23 @@ impl Compiler {
                         continue;
                     }
                     ensure!(half(def, 6)? == 0, "effect requires a private object bank");
-                    let mesh_key = half(def, 10)?;
-                    for key in mesh_keys.chunks_exact(16) {
-                        if half(key, 6)? == mesh_key {
-                            let id = i32::from_le_bytes(key[8..12].try_into()?);
-                            if let Ok(id) = usize::try_from(id) {
-                                self.meshes.insert(id);
-                            }
+                    // 113CFE32 evaluates the short definition's local rotation
+                    // curve in degrees. Other rotation curves use radians.
+                    let local_rotation_id = if wide { 0 } else { half(def, 38)? };
+                    let rotation_id = if local_rotation_id != 0 {
+                        local_rotation_id
+                    } else {
+                        half(def, 16)?
+                    };
+                    let mut rotation = vector_curve(rotation_id, [0.; 3], time_scale);
+                    for (_, angles) in &mut rotation {
+                        if local_rotation_id != 0 {
+                            *angles = angles.map(f32::to_radians);
+                        }
+                        for (angle, offset) in angles.iter_mut().zip(rotation_offset) {
+                            *angle += offset;
                         }
                     }
-                    // 113CFE32 evaluates short definitions' local rotation in degrees.
-                    let local_rotation = radiance && !wide && half(def, 38)? != 0;
-                    let rotation_id = half(def, if local_rotation { 38 } else { 16 })?;
-                    let rotation = vector_curve(rotation_id, [0.; 3], time_scale)
-                        .into_iter()
-                        .map(|(t, v)| {
-                            let v = if local_rotation {
-                                v.map(f32::to_radians)
-                            } else {
-                                v
-                            };
-                            (t, core::array::from_fn(|i| v[i] + rotation_offset[i]))
-                        })
-                        .collect();
-                    let scale = vector_curve(half(def, 18)?, [1.; 3], time_scale)
-                        .into_iter()
-                        .map(|(t, v)| (t, core::array::from_fn(|i| v[i] * base_scale[i])))
-                        .collect();
                     let ck = half(def, if wide { 110 } else { 32 })?;
                     let mut color: Vec<_> = colors
                         .chunks_exact(16)
@@ -553,65 +642,163 @@ impl Compiler {
                     if color.is_empty() {
                         color.push((0, [255; 4]));
                     }
-                    let mut uv_speed = [0.; 2];
-                    if !wide {
-                        // 113D0690 advances U/V once per two bank frames.
-                        let axes = match def[22] {
-                            0 => [false, false],
-                            1 => [true, true],
-                            2 => [true, false],
-                            3 => [false, true],
-                            mode => anyhow::bail!("unsupported Frontier UV mode {mode}"),
-                        };
-                        for (axis, enabled) in axes.into_iter().enumerate() {
-                            if enabled {
-                                let period = word(def, 24 + 4 * axis) as i32;
-                                ensure!(period != 0, "zero UV scroll period");
-                                uv_speed[axis] = 0.5 / (period as f32 * time_scale);
-                            }
+                    // 113D1B30 / 113D0690 advance UV once per two bank frames.
+                    let uv_mode = def[if wide { 108 } else { 22 }];
+                    let mut uv_origin = [0.; 2];
+                    let scroll_axes = match uv_mode {
+                        0 => [false, false],
+                        1 => [true, true],
+                        2 => [true, false],
+                        3 => [false, true],
+                        7 if !wide => {
+                            // 113D0A17 samples a vector offset. The water emitters
+                            // use a constant tile within the splash atlas.
+                            let id = word(def, 24).try_into()?;
+                            let keys = vector_curve(id, [0.; 3], time_scale);
+                            let [u, v, _] = keys[0].1;
+                            ensure!(
+                                keys.iter().all(|(_, p)| p[..2] == [u, v]),
+                                "animated UV offset curve {id}"
+                            );
+                            uv_origin = [u, v];
+                            [false, false]
                         }
+                        mode if wide => anyhow::bail!("unsupported wide Frontier UV mode {mode}"),
+                        mode => anyhow::bail!("unsupported Frontier UV mode {mode}"),
+                    };
+                    let mut uv_speed = [0.; 2];
+                    for (axis, enabled) in scroll_axes.into_iter().enumerate() {
+                        if !enabled {
+                            continue;
+                        }
+                        let period = if wide {
+                            let period = half(def, 112 + 2 * axis)?;
+                            ensure!(period != 0, "zero wide UV scroll period");
+                            f32::from(period)
+                        } else {
+                            let period = word(def, 24 + 4 * axis) as i32;
+                            ensure!(period != 0, "zero UV scroll period");
+                            period as f32
+                        };
+                        uv_speed[axis] = 0.5 / (period * time_scale);
                     }
                     let mesh = half(def, 8)?;
                     let life = ((f32::from(half(def, 12)?) * time_scale).ceil() as u16).max(1);
-                    let sheet =
-                        radiance.then(|| Sheet::new(self.count, mesh, life, &color, uv_speed));
-                    let camera_depth = if radiance && !wide {
+                    let flags = word(def, 0);
+                    let movement_id = half(def, 14)?;
+                    let short_ground = !wide && bank == 4035;
+                    // 113D05F0 (short) and 113D20E0 (wide) replace RGB with
+                    // the map dust colour. Use the same map 0 tint for both.
+                    if (wide || matches!(bank, 4006 | 4035)) && flags & 0x40 != 0 {
+                        for (_, [r, g, b, _]) in &mut color {
+                            [*r, *g, *b] = [126, 118, 109];
+                        }
+                    }
+                    let (movement, scale) = if wide {
+                        let velocity = vector_curve(movement_id, [1.; 3], time_scale);
+                        wide_curves(def, life, base_scale, &velocity)
+                    } else {
+                        let scale = vector_curve(half(def, 18)?, [1.; 3], time_scale)
+                            .into_iter()
+                            .map(|(t, v)| (t, core::array::from_fn(|i| v[i] * base_scale[i])))
+                            .collect();
+                        (vector_curve(movement_id, [0.; 3], time_scale), scale)
+                    };
+                    let mut position = vec(row, 0);
+                    if short_ground {
+                        // 113CF31B samples the absolute offset. GU travel
+                        // integrates deltas, so seed the emitter at its first key.
+                        for (origin, offset) in position.iter_mut().zip(movement[0].1) {
+                            *origin += offset;
+                        }
+                    }
+                    // Keep the existing shockwave and ready atlases. The other
+                    // bank layers use native colour keys like the other weapons.
+                    let sheet = (bank == 4022 && matches!(selector, 5 | 6 | 10 | 16 | 21))
+                        .then(|| Sheet::new(self.count, mesh, life, &color, uv_speed));
+                    let facing = match Facing::from_frontier(flags) {
+                        // The particle inherits actor yaw for travel while its
+                        // billboard separately faces the camera.
+                        Facing::Camera
+                            if (wide || short_ground)
+                                && movement.iter().any(|(_, p)| *p != [0.; 3]) =>
+                        {
+                            Facing::CameraPosition
+                        }
+                        facing => facing,
+                    };
+                    let camera_depth = if !wide {
                         vector_curve(half(def, 34)?, [0.; 3], time_scale)
                     } else {
                         Vec::new()
                     };
-                    self.layer(
-                        Layer {
-                            mesh,
-                            // 113CE033 advances two bank frames per 30 Hz simulation tick.
-                            frames_per_second: 60.,
-                            // Frontier HD 113CEBFA/113CEC69: byte 21 selects the
-                            // destination blend factor. A mesh can use both modes.
-                            blend: u8::from(def[21] != 1),
-                            delay: half(row, 78)?,
-                            life,
-                            count: half(row, 88)?,
-                            position: vec(row, 0),
-                            spread: vec(row, 12),
-                            rotation,
-                            rotation_range: vec(row, 36),
-                            scale,
-                            scale_range: core::array::from_fn(|i| {
-                                if base_scale[i] == 0. {
-                                    0.
-                                } else {
-                                    scale_spread[i] / base_scale[i]
-                                }
-                            }),
-                            movement: vector_curve(half(def, 14)?, [0.; 3], time_scale),
-                            color,
-                            uv_speed,
-                            pulse: false,
-                            facing: Facing::from_frontier(word(def, 0)),
-                            camera_depth,
-                        },
-                        sheet,
-                    )?;
+                    let layer = Layer {
+                        mesh,
+                        // 113CE033 advances two bank frames per 30 Hz simulation tick.
+                        frames_per_second: 60.,
+                        blend: Blend::from_frontier(def[if wide { 107 } else { 21 }]),
+                        delay: half(row, 78)?,
+                        life,
+                        count: half(row, 88)?,
+                        position,
+                        spread: vec(row, 12),
+                        rotation,
+                        rotation_range: vec(row, 36),
+                        proportional_rotation: false,
+                        scale,
+                        scale_range: core::array::from_fn(|i| {
+                            if base_scale[i] == 0. {
+                                0.
+                            } else {
+                                scale_spread[i] / base_scale[i]
+                            }
+                        }),
+                        movement,
+                        color,
+                        uv_speed,
+                        uv_origin,
+                        pulse: false,
+                        facing,
+                        camera_depth,
+                    };
+                    let mesh_key = half(def, 10)?;
+                    let mut keys = vec![(0, mesh)];
+                    for key in mesh_keys.chunks_exact(16) {
+                        if half(key, 6)? != mesh_key {
+                            continue;
+                        }
+                        let id = word(key, 8) as i32;
+                        if bank != 4023 {
+                            if let Ok(id) = usize::try_from(id) {
+                                self.meshes.insert(id);
+                            }
+                            continue;
+                        }
+                        let frame = (word(key, 0) as f32 * time_scale) as u32;
+                        let Ok(id) = u16::try_from(id) else { continue };
+                        if frame >= u32::from(life) {
+                            continue;
+                        }
+                        let last = keys.last_mut().unwrap();
+                        if frame == last.0 {
+                            last.1 = id;
+                        } else if last.1 != id {
+                            ensure!(frame > last.0, "mesh keys out of order");
+                            keys.push((frame, id));
+                        }
+                    }
+                    if keys.len() > 1 {
+                        ensure!(sheet.is_none(), "animated mesh with an atlas");
+                        self.mesh_track(layer, &keys, (u32::from(bank) << 16) | emitter as u32)?;
+                    } else {
+                        self.layer(
+                            Layer {
+                                mesh: keys[0].1,
+                                ..layer
+                            },
+                            sheet,
+                        )?;
+                    }
                 }
                 ensure!(
                     self.count > before,
@@ -633,10 +820,11 @@ impl Compiler {
                     Layer {
                         mesh: [CHARGE_AURA_MESH, 72][kind],
                         uv_speed: [0.; 2],
+                        uv_origin: [0.; 2],
                         frames_per_second: 30.,
                         // Limit the combined brightness of the overlapping auras
                         // before GU's HDR and bloom passes.
-                        blend: 1,
+                        blend: Blend::Alpha,
                         delay: 0,
                         life: 600,
                         count: 1,
@@ -644,6 +832,7 @@ impl Compiler {
                         spread: [0.; 3],
                         rotation: vec![(0, [0., y, 0.]), (600, [0., y, 600. * rate])],
                         rotation_range: [0., 0., core::f32::consts::PI],
+                        proportional_rotation: false,
                         scale: if kind == 0 {
                             vec![(0, [2., 2., 1.]), (2, [3., 3., 1.]), (4, [2., 2., 1.])]
                         } else {
@@ -682,14 +871,16 @@ impl Compiler {
                     Layer {
                         mesh: [CHARGE_AURA_MESH, 88][kind],
                         uv_speed: [0.; 2],
+                        uv_origin: [0.; 2],
                         frames_per_second: 30.,
-                        blend: 1,
+                        blend: Blend::Alpha,
                         delay: 0,
                         life: [12, 8][kind],
                         count: 1,
                         position: [0.; 3],
                         spread: [0.; 3],
                         rotation: vec![(0, [0.; 3])],
+                        proportional_rotation: false,
                         rotation_range: if kind == 0 {
                             [0., 0., core::f32::consts::PI]
                         } else {
@@ -718,37 +909,64 @@ impl Compiler {
         Ok(())
     }
 
-    // FZ 81FC9E0A type 4: the first three layers track node 10.
-    // The fourth starts at that node's X/Z but stays on the floor.
+    // FZ family 41. Types 0, 4 and 17 use meshes 827BFD4C, lifetimes
+    // 827BFD58 and delays 827BFD64. Type 4 omits layers 3 and 5–7.
     pub fn charged_slash(&mut self) -> Result<()> {
+        self.sword_flash(4)
+    }
+
+    pub fn sword_flash(&mut self, kind: u8) -> Result<()> {
+        let blue = kind == 17;
+        let bright = if blue { [128, 128, 255, 255] } else { [255; 4] };
+        let fade = |mut color: [u8; 4]| {
+            color[3] = 0;
+            color
+        };
+        let middle = if blue {
+            [128, 0, 255, 16]
+        } else {
+            [255, 0, 0, 16]
+        };
+        let dark = if blue { [128, 0, 0, 16] } else { middle };
         let first = self.count;
-        let white = [255; 4];
-        let red = [255, 0, 0, 16];
         for (mesh, delay, life, scales, colors) in [
             (
                 81,
                 0,
                 6,
                 &[(0, 1.), (6, 5.)][..],
-                &[(0, white), (6, [255, 255, 255, 0])][..],
+                &[(0, bright), (6, fade(bright))][..],
             ),
             (
                 81,
                 2,
                 12,
                 &[(0, 2.), (12, 0.5)][..],
-                &[(0, white), (4, red), (12, [0; 4])][..],
+                &[(0, bright), (4, middle), (12, [0; 4])][..],
             ),
             (
                 66,
                 4,
                 10,
                 &[(0, 10.), (4, 4.), (10, 1.)][..],
-                &[(0, white), (6, red), (10, [0; 4])][..],
+                &[(0, bright), (6, dark), (10, [0; 4])][..],
+            ),
+            (
+                88,
+                2,
+                6,
+                &[(0, 0.5), (6, 1.2)][..],
+                &[(0, [0, 0, 0, 255]), (4, [0, 0, 0, 255]), (6, [0; 4])][..],
             ),
         ] {
+            if kind == 4 && mesh == 88 {
+                continue;
+            }
             let mut flash = Layer::legacy(mesh, life);
             flash.delay = delay;
+            if mesh == 88 {
+                flash.blend = Blend::Alpha;
+            }
             flash.facing = Facing::Camera;
             flash.scale = scales.iter().map(|&(t, s)| (t, [s, s, 1.])).collect();
             flash.color = colors.to_vec();
@@ -760,24 +978,107 @@ impl Compiler {
         self.route(first);
         let first = self.count;
         let mut ring = Layer::legacy(42, 4);
-        ring.delay = 2;
+        ring.delay = if kind == 4 { 2 } else { 5 };
         ring.scale = vec![(0, [4., 1., 4.]), (4, [12., 1., 12.])];
-        ring.color = vec![(0, [255, 255, 255, 128]), (4, [255, 255, 255, 0])];
+        ring.color = vec![
+            (0, [bright[0], bright[1], bright[2], 128]),
+            (4, fade(bright)),
+        ];
         self.layer(ring, None)?;
         self.route(first);
+        if kind != 4 {
+            for delay in [5, 9, 13] {
+                for direction in [1., -1.] {
+                    let first = self.count;
+                    let mut streak = Layer::legacy(38, 8);
+                    streak.delay = delay;
+                    // Source 81FC9E0A truncates (5461 + rand12) / 8, giving a
+                    // speed of 682..1194 angle units/tick, with a separate sign bit.
+                    let mean = 938. * core::f32::consts::TAU / 65536.;
+                    streak.rotation.push((8, [0., 0., 8. * direction * mean]));
+                    streak.proportional_rotation = true;
+                    streak.rotation_range[2] = direction * 256. / 938.;
+                    streak.scale = vec![(0, [4., 4., 1.]), (8, [6., 6., 1.])];
+                    streak.color = vec![
+                        (
+                            0,
+                            if blue {
+                                [0, 0, 255, 128]
+                            } else {
+                                [255, 0, 0, 128]
+                            },
+                        ),
+                        (8, [0; 4]),
+                    ];
+                    self.layer(streak, None)?;
+                    self.route(first);
+                }
+            }
+        }
         Ok(())
     }
 
-    pub fn ground_impacts(&mut self) -> Result<()> {
+    pub fn parry_impact(&mut self) -> Result<()> {
+        // 81F86288 starts at -4, advances two units/tick, and draws meshes
+        // 1..15 once each after crossing zero (81F867C0, subtype 13).
+        let first = self.count;
+        for mesh in 1..=15 {
+            let mut layer = Layer::legacy(mesh, 1);
+            layer.delay = mesh + 1;
+            layer.scale = vec![(0, [1.5; 3])];
+            layer.color = vec![(0, [255, 128, 128, 255])];
+            layer.facing = Facing::Camera;
+            self.layer(layer, None)?;
+        }
+        // 81FA1032 subtype 17 chooses a spark variant again on each of two
+        // ticks. Runtime selects one route per tick. The ray is independent.
+        let mut ray = Layer::legacy(21, 5);
+        ray.scale = vec![
+            (0, [0.; 3]),
+            (1, [1.5; 3]),
+            (2, [4.5, 4.5, 1.5]),
+            (5, [6., 6., 1.5]),
+        ];
+        ray.color = vec![
+            (0, [255, 128, 128, 0]),
+            (1, [255, 128, 128, 255]),
+            (2, [255, 128, 128, 255]),
+            (5, [255, 128, 128, 51]),
+        ];
+        ray.camera_depth = vec![(0, [0., 0., 20.])];
+        ray.position[1] = 10.;
+        ray.spread = [2.; 3];
+        self.layer(ray, None)?;
+        self.route(first);
+        for delay in 0..2 {
+            for mesh in 32..=34 {
+                let first = self.count;
+                let mut spark = Layer::legacy(mesh, 1);
+                spark.delay = delay;
+                spark.facing = Facing::Camera;
+                spark.rotation_range[2] = core::f32::consts::PI;
+                let size = 1.5 * f32::from(delay + 1);
+                spark.scale = vec![(0, [size, size, 1.5])];
+                spark.color = vec![(0, [255, 128, 128, 255])];
+                spark.camera_depth = vec![(0, [0., 0., 15.])];
+                spark.position[1] = 10.;
+                spark.spread = [2.; 3];
+                self.layer(spark, None)?;
+                self.route(first);
+            }
+        }
+        Ok(())
+    }
+
+    fn surface_spray(&mut self, size: f32) -> Result<()> {
         let white = [255; 4];
         // 81F90ADA type 5: six surface sprites, alternating a four-tick delay.
-        let first = self.count;
         for i in 0..6 {
             let mut surface = Layer::legacy(26, 20);
             surface.facing = Facing::Camera;
-            surface.blend = 1;
+            surface.blend = Blend::Alpha;
             surface.delay = 4 * (i % 2);
-            surface.spread = [10.24 * f32::from(i), 0., 10.24 * f32::from(i)];
+            surface.spread = [5.12 * size * f32::from(i), 0., 5.12 * size * f32::from(i)];
             surface.scale = [
                 (0, 1.3, 0.7),
                 (1, 1.3, 0.7),
@@ -786,18 +1087,107 @@ impl Compiler {
                 (13, 3.46, 2.9),
                 (20, 3.9, 2.75),
             ]
-            .map(|(t, x, y)| (t, [2. * x, 2. * y, 2.]))
+            .map(|(t, x, y)| (t, [size * x, size * y, size]))
             .to_vec();
             surface.color = vec![(0, white), (9, white), (20, [255, 255, 255, 25])];
             self.layer(surface, None)?;
         }
+        Ok(())
+    }
+
+    pub fn footfalls(&mut self) -> Result<()> {
+        let first = self.count;
+        self.surface_spray(0.45)?;
+        self.route(first);
+        // 81F9A86C uses common mesh 74. Normal contacts create one
+        // particle, while type 7 (a full-body slide) creates five.
+        for slide in [false, true] {
+            let first = self.count;
+            let mut dust = Layer::legacy(74, 16);
+            dust.count = if slide { 5 } else { 1 };
+            dust.blend = Blend::Alpha;
+            dust.spread = if slide { [30., 0., 30.] } else { [0.; 3] };
+            dust.facing = Facing::Camera;
+            dust.scale = vec![(0, [0.55; 3]), (16, [1.5; 3])];
+            dust.color = vec![(0, [255, 255, 255, 130]), (16, [255, 255, 255, 0])];
+            dust.movement.push((16, [0., 32., 0.]));
+            self.layer(dust, None)?;
+            self.route(first);
+        }
+        Ok(())
+    }
+
+    pub fn spirit_full(&mut self) -> Result<()> {
+        // 81F8F096 draws meshes 84, 37 and 88 for type 0. Type 1
+        // overlays four instances of 38, spaced by three FZ ticks.
+        let first = self.count;
+        for (mesh, life, peak, alpha) in [(84, 30, 1.4, 176), (37, 36, 2., 144), (88, 30, 1.2, 96)]
+        {
+            let mut flash = Layer::legacy(mesh, life);
+            flash.facing = Facing::Camera;
+            if mesh == 88 {
+                flash.blend = Blend::Alpha;
+            }
+            flash.scale = vec![(0, [0.4; 3]), (4, [peak; 3]), (u32::from(life), [0.9; 3])];
+            flash.color = vec![
+                (0, [255, 210, 210, alpha]),
+                (6, [255, 96, 96, alpha]),
+                (u32::from(life), [255, 64, 64, 0]),
+            ];
+            self.layer(flash, None)?;
+        }
+        self.route(first);
+        let first = self.count;
+        for delay in [0, 3, 6, 9] {
+            let mut streak = Layer::legacy(38, 22);
+            streak.delay = delay;
+            streak.facing = Facing::Camera;
+            streak.rotation_range = [0., 0., core::f32::consts::PI];
+            streak.scale = vec![(0, [0.5; 3]), (22, [1.5; 3])];
+            streak.color = vec![(0, [255, 88, 88, 128]), (22, [255, 88, 88, 0])];
+            self.layer(streak, None)?;
+        }
+        self.route(first);
+        Ok(())
+    }
+
+    pub fn discharge_water(&mut self) -> Result<()> {
+        // 811F6460 invokes common types 4 and 5 with scale 2.5.
+        let first = self.count;
+        let mut ring = Layer::legacy(93, 25);
+        ring.rotation_range[1] = core::f32::consts::PI;
+        ring.rotation
+            .push((25, [0., 25. * 128. * core::f32::consts::TAU / 65536., 0.]));
+        ring.scale = [(0, 1.14), (7, 2.), (25, 3.5)]
+            .map(|(t, v)| (t, [2.5 * v, 2.5, 2.5 * v]))
+            .to_vec();
+        ring.color = vec![(0, [255; 4]), (13, [255; 4]), (25, [255, 255, 255, 25])];
+        self.layer(ring, None)?;
+        self.surface_spray(2.5)?;
+        self.route(first);
+        self.blade_strip(501)
+    }
+
+    pub fn blade_strip(&mut self, mesh: u16) -> Result<()> {
+        let first = self.count;
+        let mut trail = Layer::legacy(mesh, 2);
+        trail.blend = Blend::Alpha;
+        self.layer(trail, None)?;
+        self.route(first);
+        Ok(())
+    }
+
+    pub fn ground_impacts(&mut self) -> Result<()> {
+        let white = [255; 4];
+        let first = self.count;
+        self.surface_spray(2.)?;
         self.route(first);
         // The dry branch of 81F82A3C throws nine pieces of mesh 43. Use
         // samples from its velocity ranges and its per-tick gravity.
         let first = self.count;
         for i in 0..9 {
             let mut piece = Layer::legacy(43, 30);
-            piece.blend = 1;
+            piece.blend = Blend::Alpha;
             let vx = (6. + 0.6 * ((3 * i + 2) % 10) as f32)
                 * if matches!(i % 4, 1 | 2) { -1. } else { 1. };
             let vz = (6. + 0.6 * ((7 * i + 1) % 10) as f32)
@@ -828,7 +1218,7 @@ impl Compiler {
             flash.color = vec![(0, [255, 255, 255, 128]), (4, [255, 255, 255, 16])];
             self.layer(flash, None)?;
             let mut cloud = Layer::legacy([72, 74, 72][index], 30);
-            cloud.blend = 1;
+            cloud.blend = Blend::Alpha;
             cloud.delay = [2, 4, 6][index];
             cloud.position[2] = distance;
             cloud.facing = Facing::Camera;
@@ -838,7 +1228,7 @@ impl Compiler {
             cloud.rotation_range[2] = core::f32::consts::PI;
             self.layer(cloud, None)?;
             let mut debris = Layer::legacy(141, 30);
-            debris.blend = 1;
+            debris.blend = Blend::Alpha;
             debris.position[2] = distance;
             debris.delay = 5 + delay + [0, 1, 2][index];
             debris.rotation_range[2] = core::f32::consts::PI;
@@ -880,7 +1270,7 @@ impl Compiler {
         let first = self.count;
         let mut flash = Layer::legacy(CHARGE_AURA_MESH, 14);
         flash.count = 4;
-        flash.blend = 1;
+        flash.blend = Blend::Alpha;
         flash.facing = Facing::Camera;
         flash.color = vec![(0, [255, 255, 255, 96]), (14, [255, 255, 255, 0])];
         self.layer(flash, None)?;
@@ -908,7 +1298,7 @@ impl Compiler {
             let mut glow = Layer::legacy(59, 8);
             // Both blades refresh before the previous pair fades. Composite their
             // coverage before GU's bloom pass, as for the sustained charge aura.
-            glow.blend = 1;
+            glow.blend = Blend::Alpha;
             glow.color = vec![(0, glow_color), (6, glow_color), (8, [0; 4])];
             self.layer(glow, None)?;
             self.route(first);
@@ -917,11 +1307,21 @@ impl Compiler {
             for (_, color) in modes {
                 let first = self.count;
                 let mut trail = Layer::legacy(hand, 6);
-                trail.blend = 1;
+                trail.blend = Blend::Alpha;
                 trail.color = vec![(0, color)];
                 self.layer(trail, None)?;
                 self.route(first);
             }
+        }
+        Ok(())
+    }
+
+    pub fn dual_blade_swing(&mut self) -> Result<()> {
+        // 817BCEE4 sends types 1/2 to 81F89FAC for up to 27 logic ticks.
+        for hand in [504, 505] {
+            let first = self.count;
+            self.layer(Layer::legacy(hand, 27), None)?;
+            self.route(first);
         }
         Ok(())
     }

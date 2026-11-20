@@ -13,7 +13,7 @@ const CONTACT_GROUP: Field<u32> = Field::at(136);
 const CONTACT_FLAGS: Field<u32> = Field::at(48);
 
 mod shapes;
-pub use shapes::{ShapeGroup, ShapeGroups};
+pub use shapes::{HitShape, ShapeGroup, ShapeGroups};
 
 #[derive(Clone, Copy)]
 pub struct Contact<'a>(pub(crate) Object<'a>);
@@ -70,7 +70,11 @@ impl<'a> Contact<'a> {
     /// # Safety
     /// Call in the native shape expansion pass for this contact.
     pub unsafe fn submit_world_sphere(self, center: [f32; 3], radius: f32) -> bool {
-        unsafe { self.submit_world_shape(1, center, [0.; 3], radius) }
+        let Some(manager) = (unsafe { self.begin_world_shapes() }) else {
+            return false;
+        };
+        unsafe { Self::submit_world_shape(manager, 1, center, [0.; 3], radius) };
+        true
     }
 
     /// Submit a capsule whose two endpoints are fixed in world space.
@@ -78,30 +82,46 @@ impl<'a> Contact<'a> {
     /// # Safety
     /// Call in the native shape expansion pass for this contact.
     pub unsafe fn submit_world_capsule(self, ends: [[f32; 3]; 2], radius: f32) -> bool {
-        unsafe { self.submit_world_shape(2, ends[0], ends[1], radius) }
+        (unsafe { self.submit_world_capsules(&[ends], radius) }) != 0
+    }
+
+    /// Submit a contiguous group of world-space capsules with a single contact
+    /// serial. The retained HTS group must contain the same number of shapes.
+    ///
+    /// # Safety
+    /// Call once in the native shape expansion pass for this contact.
+    pub unsafe fn submit_world_capsules(self, ends: &[[[f32; 3]; 2]], radius: f32) -> u32 {
+        let Some(manager) = (unsafe { self.begin_world_shapes() }) else {
+            return 0;
+        };
+        for &[start, end] in ends {
+            unsafe { Self::submit_world_shape(manager, 2, start, end, radius) };
+        }
+        ends.len() as u32
+    }
+
+    unsafe fn begin_world_shapes(self) -> Option<Object<'a>> {
+        let manager = unsafe { singleton(0x1857830) }?;
+        self.0
+            .set(Field::at(28), manager.get(Field::<u32>::at(10288)));
+        Some(manager)
     }
 
     unsafe fn submit_world_shape(
-        self,
+        manager: Object<'_>,
         kind: u32,
         start: [f32; 3],
         end: [f32; 3],
         radius: f32,
-    ) -> bool {
+    ) {
+        let mut shape = [0f32; 9];
+        shape[..3].copy_from_slice(&start);
+        shape[4..7].copy_from_slice(&end);
+        shape[8] = radius;
         unsafe {
-            let Some(manager) = singleton(0x1857830) else {
-                return false;
-            };
-            let mut shape = [0f32; 9];
-            shape[..3].copy_from_slice(&start);
-            shape[4..7].copy_from_slice(&end);
-            shape[8] = radius;
-            self.0
-                .set(Field::at(28), manager.get(Field::<u32>::at(10288)));
             let submit: unsafe extern "C" fn(u32, u32, *const f32) -> u32 =
                 core::mem::transmute(entry(0x1706a8));
             submit(manager.addr(), kind, shape.as_ptr());
-            true
         }
     }
 }

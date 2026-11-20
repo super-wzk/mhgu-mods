@@ -34,12 +34,14 @@ VALOR_HUD = 0x639BD0
 FX_RELEASE = 0x32A104
 DRAW_ROUTE = 0x115FCF4
 DB_DRAW_ROUTE = 0x11BA2A0
+LS_DRAW_ROUTE = 0x1198BB4
 EQUIPMENT_GRIP = 0x308834
 CHANGE_ACTION, GS_CHANGE_ACTION = 0x2AB670, 0x1160650
 COMMAND_BIND, COMMAND_CONDITION = 0x2E9B7C, 0x2ECEFC
 COMMAND_UPDATE = 0x2E9D54
 SHARPNESS = 0x2AD288
 HIT_EXPAND, MODEL_DEPTH = 0x1696FC, 0xA957CC
+HUNTER_COLLISION = 0x16BB38
 GUARD_REACTION, DRAW_MODEL = 0x2F4B20, 0xA956D8
 
 
@@ -59,6 +61,58 @@ def api_for(g, identifier, magic):
 def service(g):
     api = api_for(g, b"mhgu::StyleRegistryV1", b"SRG1")
     return g.get(api), g.get(api + 4)
+
+
+def load_registered_style(g, nro):
+    """Load one content NRO and return the descriptor registered at startup."""
+    from unicorn import arm_const
+
+    register, _ = service(g)
+    descriptors = []
+    hook = g.cpu.hook_add(
+        UC_HOOK_CODE,
+        lambda cpu, *_: descriptors.append(cpu.reg_read(arm_const.UC_ARM_REG_R0)),
+        begin=register,
+        end=register,
+    )
+    try:
+        exports = g.load(nro, 0x9200000)
+        for callback in ("forge_onLoad", "forge_onInit"):
+            g.run(exports[callback], MANAGER)
+    finally:
+        g.cpu.hook_del(hook)
+    descriptor, = descriptors
+    return descriptor
+
+
+def setup_controller(g, actor, *, accept_transition=lambda: True):
+    def set_action(group, slot):
+        g.cpu.mem_write(actor + 9478, struct.pack("<H2xH", group, slot))
+        g.cpu.mem_write(actor + 5, b"\0")
+
+    def motion(_, __, request, ___):
+        g.cpu.mem_write(actor + 1204, struct.pack("<H", request & 0xFFFF))
+        return 1
+
+    def transition(*_):
+        table = g.get(actor + 9384)
+        entry = g.get(g.get(table + 20))
+        command = g.get(entry + 8) + 100
+        group = g.half(command)
+        if group & 0x8000 or not accept_transition():
+            return 0
+        set_action(group, g.half(command + 2))
+        return 1
+
+    for addr in (0x282FD8, 0x283238, 0x2A2560, 0x2A25A8, 0x2A5CE4,
+                 0x2E9B7C, 0x2A8458, 0x27E608, 0x27F5D0, 0x2864C4, 0x2A309C):
+        g.stub(addr, lambda *_: 0)
+    g.stub(0x2A2444, lambda *_: 1)
+    g.stub(0x53A06C, motion)
+    g.stub(0x2E9D54, transition)
+
+    return set_action
+
 
 def style_descriptor(g, ident, weapon, encode=0, art_slots=0):
     descriptor = g.alloc(68)
@@ -82,9 +136,11 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         GS_CHANGE_ACTION,
         DRAW_ROUTE,
         DB_DRAW_ROUTE,
+        LS_DRAW_ROUTE,
         FX_RELEASE,
         SHARPNESS,
         HIT_EXPAND,
+        HUNTER_COLLISION,
         MODEL_DEPTH,
         GUARD_REACTION,
         DRAW_MODEL,
@@ -92,6 +148,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         DISPATCH,
         WEAPON_DISPATCH,
         HIT_ROW,
+        0x169548,
     }
     g.originals = {}
     install = g.hook
@@ -141,12 +198,18 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             DISPATCH,
             WEAPON_DISPATCH,
             HIT_ROW,
+            HIT_EXPAND,
+            FX_RELEASE,
+            HUNTER_COLLISION,
+            0x1748A8, 0x178030,  # Both GU melee hitzone resolvers.
+            0x169548,
             CHANGE_ACTION,
             COMMAND_BIND,
             COMMAND_CONDITION,
             GS_CHANGE_ACTION,
             DRAW_ROUTE,
             DB_DRAW_ROUTE,
+            LS_DRAW_ROUTE,
             BLOCK,
             SHARPNESS,
             GUARD_REACTION,
@@ -156,8 +219,12 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         else set()
     )
     if order == ("registry", "sword"):
-        expected.update((FX_RELEASE, EQUIPMENT_GRIP, HIT_EXPAND, MODEL_DEPTH))
-    assert set(g.hooks) == expected
+        expected.update((EQUIPMENT_GRIP, MODEL_DEPTH))
+    actual = set(g.hooks)
+    assert actual == expected, (
+        [hex(addr) for addr in sorted(expected - actual)],
+        [hex(addr) for addr in sorted(actual - expected)],
+    )
     if config is not None:
         assert g.files[CONFIG] == config
     return g
@@ -1058,25 +1125,38 @@ def verify_battle(g, p, remote, resources):
 
     # Give the native command interpreter a pending art. Confirm the request
     # reaches GU's resolver only once the current move allows an art cancel.
-    art_pending = False
     art_prepared = []
+    art_checks = []
 
     def resolve_art(_, group, slot, flags):
         for address, value in ((group, 16), (slot, 54), (flags, 0)):
             g.cpu.mem_write(address, struct.pack("<H", value))
         return 1
 
-    g.stub(0x2A8B34, lambda *_: int(art_pending))
+    def check_art(*_):
+        art_checks.append(True)
+        return int(g.get(p + 10068) < 3 or bool(g.get(p + 5180) & 7))
+
+    g.stub(0x2A8B34, check_art)
     g.stub(0x2ACB60, resolve_art)
     g.stub(0x2ACBEC, lambda *_: art_prepared.append(True))
     neutral()
+    for _ in range(30):
+        tick(0)
+    assert not art_checks
     tick(0, held=0x100, pressed=0x100)
-    art_pending = True
+    g.put(p + 10068, 2)
     tick(40)
     assert g.half(p + 9482) == 0x8000 and not art_prepared
     tick(72)
     assert g.half(p + 9482) == 54 and art_prepared == [True]
-    art_pending = False
+    g.put(p + 10068, 3)
+    for slot in range(3):
+        neutral()
+        g.put(p + 5180, 1 << slot)
+        tick(0)
+        assert g.half(p + 9482) == 54 and len(art_prepared) == 2 + slot
+    g.put(p + 5180, 0)
     # Only an actual landed, drawn, living launch victim can use the two FZ
     # recoveries. A rejected input costs nothing. The attack bank stays bound.
     g.put(p + 3844 + 4 * 10, 0)
@@ -1208,7 +1288,12 @@ def verify_battle(g, p, remote, resources):
     g.put(p + 4076, 0x4000)
     units.clear()
     tick(85)
-    assert whiff() and not units
+    # The blade emits at frames 18/42/68, independently of contact or shockwaves.
+    assert whiff() and [g.get(u + 68) for u in units] == list(routes[23]) * 3
+    assert all(g.get(u + 132) == 0x29 and g.half(u + 194) == 8
+               and struct.unpack("<3f", g.cpu.mem_read(u + 144, 12)) == (10., 0., 50.)
+               for u in units)
+    units.clear()
     tick(86)
     hit = p + 12320
     assert value() == 200 and not whiff() and not units
@@ -1228,12 +1313,27 @@ def verify_battle(g, p, remote, resources):
     assert g.run(HIT_EXPAND, hit) == 1 and g.get(collision + 10288) == 1
     kind, *capsule = struct.unpack("<B3x7f", g.cpu.mem_read(collision + 8240, 32))
     assert kind == 2 and all(abs(a-b) < 0.01 for a,b in zip(capsule, [200,300,270,300,300,70,300])), capsule
-    for frame, expected in [(89, ()), (90, (19, 20)), (90, ()), (92, (21,)), (99, ()), (108, (7, 7))]:
+    for frame, expected in [
+        (89, ()), (90, ()), (91, (19, 20)), (92, ()), (93, (21,)),
+        (99, ()), (109, (7,)),
+    ]:
         units.clear()
         tick(frame)
         layers = [layer for route in expected for layer in routes[route]]
         assert [g.get(u + 68) for u in units] == layers, frame
         assert all(struct.unpack("<3f", g.cpu.mem_read(u + 304, 12)) == (300.,20.,300.) for u in units)
+    assert guard(8, 1, False) == 1
+    tick(20, held=32, pressed=32)
+    tick(90)
+    f(1268, 1.)
+    units.clear()
+    tick(91)
+    assert not units
+    f(1268, 0.)
+    for frame, count in [(99, 0), (101, 1), (108, 0), (109, 1)]:
+        units.clear()
+        tick(frame)
+        assert [g.get(u + 68) for u in units if g.get(u + 68) in routes[7]] == list(routes[7]) * count
     g.put(0x188A0D4, 0)
     for offset in (64, 68, 72):
         f(offset, 0.)
@@ -1255,54 +1355,101 @@ def verify_battle(g, p, remote, resources):
         aura = [u for u in units if g.get(u + 68) in ready]
         assert len(aura) == (len(ready) if block == 3 else 0)
         assert all(g.get(u + 132) == 0x28 and g.half(u + 194) == 12 for u in aura)
+    f(28, 2.)
+
+    def ready_pulse():
+        units.clear()
+        tick()
+        return [g.get(u + 68) for u in units if g.get(u + 68) in ready]
+
+    for _ in range(12):
+        assert not ready_pulse()
+    assert ready_pulse() == list(ready)
+    g.stub(0x2A2444, lambda *_: 0)
+    for _ in range(13):
+        assert not ready_pulse()
+    g.stub(0x2A2444, lambda *_: 1)
+    assert ready_pulse() == list(ready)
+    for _ in range(11):
+        assert not ready_pulse()
+    assert ready_pulse() == list(ready)
     g.put(0x188A0D4, 0)
     tick(20, pressed=0x1000)
     assert clip() == 64
     g.put(0x188A0D4, manager)
-    f(64, 100.)
-    f(68, 20.)
-    f(72, 300.)
-    g.put(p + 4076, 0x4000)
     release = routes[7]
+
     def release_origins():
         return [struct.unpack("<3f", g.cpu.mem_read(u + 304, 12))
                 for u in units if g.get(u + 68) in release]
-    units.clear()
-    tick(82)
-    assert clip() == 65 and whiff() and not release_origins()
-    f(28, 1.)
-    # Simulate four game-time units of hit stop at motion frame 88 on GU 60 Hz.
-    pulses = range(84, 280, 12)
-    for elapsed in range(1, 281):
-        motion_time = elapsed - min(max(elapsed - 88, 0), 4)
-        frame = motion_time if motion_time < 136 else 108 + (motion_time - 136) % 28
+
+    # First run enters from three real guards. Subsequent runs use the same
+    # registered slot. Drive the packaged clip with GU's native layer clock.
+    for delta, pause, interrupt in ((2, 0, False), (1, 0, False), (1, 4, False), (2, 0, True)):
+        f(64, 100.)
+        f(68, 20.)
+        f(72, 300.)
+        g.put(p + 4076, 0x4000)
+        if clip() != 64:
+            action(16, 0x8000 + 59)
+            tick(0)
         units.clear()
-        g.cpu.mem_write(p + 12325, b"\0")
-        g.put(0x188A0D4, 0 if elapsed == 108 else manager)
-        tick(frame)
-        hit = elapsed in pulses
-        origin = (300., 20., 300.) if elapsed == 84 else (100., 20., 500.)
-        assert release_origins() == ([origin] * len(release) if hit and elapsed != 108 else []), elapsed
-        if hit and elapsed != 108:
-            assert all(struct.unpack("<f", g.cpu.mem_read(u + 164, 4))[0] == 90.
-                       for u in units if g.get(u + 68) in release)
-        if elapsed == 84:
-            g.put(p + 4076, 0)
-        assert whiff() == (not hit), elapsed
-        if hit:
-            assert value() == 27 and g.get(p + 12320 + 136) == 0
-            assert hitstop_rates() == (0x3F800000, 0x3F800000), "wave slowed its owner"
-            assert g.get(p + 12320 + 48) & 0x08000000
-            assert struct.unpack("<f", g.cpu.mem_read(p + 12320 + 96, 4))[0] == 12.0
-            g.put(collision + 10288, 0)
-            f(64, -1000.)  # The world capsule stays at the emission origin.
-            assert g.run(HIT_EXPAND, p + 12320) == 1
-            assert g.get(collision + 10288) == 1
-            x, y, z = origin
-            assert struct.unpack("<B3x7f", g.cpu.mem_read(collision + 8240, 32)) == (
-                2, 200., x, y + 150., z, x, y + 50., z
-            )
-            f(64, 100.)
+        tick(82)
+        assert clip() == 65 and whiff() and not release_origins()
+        packed = g.half(p + 1204)
+        bank = g.get(p + 3844 + 4 * (packed >> 8))
+        header = g.run(0xB49E54, bank, packed & 255)
+        g.run(0x952C7C, p, 0, header)
+        f(28, delta)
+        waves = []
+        for elapsed in range(0, 310, delta):
+            # Only the animation pauses. The emitter keeps GU game time.
+            f(1292, 0. if 88 <= elapsed < 88 + pause else 1.)
+            if interrupt and elapsed == 270:
+                g.run(GS_CHANGE_ACTION, p, 64, 1, 0)
+                h(1204, 0x101)
+                break
+            units.clear()
+            g.cpu.mem_write(p + 12325, bytes(1))
+            g.put(0x188A0D4, 0 if elapsed == 108 else manager)
+            g.run(0x951A80, p)
+            tick()
+            hit = not whiff()
+            origin = (300., 20., 300.) if elapsed == 84 else (100., 20., 500.)
+            assert release_origins() == ([origin] * len(release) if hit and elapsed != 108 else []), elapsed
+            if hit and elapsed != 108:
+                assert all(struct.unpack("<f", g.cpu.mem_read(u + 164, 4))[0] == 90.
+                           for u in units if g.get(u + 68) in release)
+            if elapsed == 84:
+                g.put(p + 4076, 0)
+            if hit:
+                waves.append((elapsed, value()))
+                assert g.get(p + 12320 + 136) == 0
+                assert hitstop_rates() == (0x3F800000, 0x3F800000), "wave slowed its owner"
+                assert g.get(p + 12320 + 48) & 0x08000000
+                assert struct.unpack("<f", g.cpu.mem_read(p + 12320 + 96, 4))[0] == 12.
+                g.put(collision + 10288, 0)
+                f(64, -1000.)  # The world capsule stays at the emission origin.
+                assert g.run(HIT_EXPAND, p + 12320) == 1
+                x, y, z = origin
+                assert g.get(collision + 10288) == 1
+                assert struct.unpack("<B3x7f", g.cpu.mem_read(collision + 8240, 32)) == (
+                    2, 200., x, y + 150., z, x, y + 50., z
+                )
+                f(64, 100.)
+            if clip() == 66:
+                break
+        expected = range(84, 270 if interrupt else 288, 12)
+        assert waves == [(frame, 27) for frame in expected], (delta, pause, waves, elapsed)
+        if interrupt:
+            for _ in range(14):
+                units.clear()
+                g.cpu.mem_write(p + 12325, bytes(1))
+                tick()
+                assert whiff() and not release_origins() and g.half(p + 9478) == 64
+        else:
+            assert clip() == 66 and elapsed == 288 + pause, (delta, pause, elapsed)
+    print("GU Shining Sword: 17 x 27 through the last active window at 30/60 Hz; pause and interruption passed")
     f(28, 2.)
     g.put(0x188A0D4, 0)
     # Special can be synthesized by GU with no physical 0x1000 edge. Reject
@@ -1332,8 +1479,10 @@ def verify_battle(g, p, remote, resources):
     } <= queued
     assert (iron, 12) not in queued
     # Dash: use the occupied hunter's normal movement state and stick.
-    ledge = False
-    g.stub(0x2A8458, lambda *_: int(ledge))
+    def unexpected_probe(*_):
+        raise AssertionError("the sprint controller polled the forward ledge probe")
+
+    g.stub(0x2A8458, unexpected_probe)
     action(1, 0)
     h(1204, g.run(g.hooks[ENCODE], p, 5004))
     phase(1)
@@ -1359,18 +1508,7 @@ def verify_battle(g, p, remote, resources):
     assert value() == 60 and not whiff()
     g.cpu.hook_del(g.traps.pop(0x2831E0))
     verify_dash_climb(g, p, tick, phase)
-    # The next drop uses GU's drawn roll-off action and preserves the run on landing.
-    ledge = True
-    tick(2, held=32, pressed=32)
-    assert (g.half(p + 9478), g.half(p + 9482)) == (4, 14)
-    assert g.get(p + 5280) == g.get(p + 4076)
-    ledge = False
-    g.stub(g.get(0x1749A88 + 828), lambda *_: 0)
-    action(4, 3)
-    tick(0)
-    neutral()
-    tick(0)
-    assert clip() == 30 and g.half(p + 9482) == 0x8000 + 200
+    verify_dash_drop(g, p, tick, action, neutral)
     # A normal B roll has no run to resume. The landing buffers its own flick.
     for landing in ((4, 3), (1, 138)):
         neutral()
@@ -1431,7 +1569,7 @@ def verify_dash_climb(g, p, tick, phase):
     g.stub(0x27FF28, lambda *_: 1)  # hunter faces the climbable edge
     g.run(CHANGE_ACTION, p, 16, 0x8000 + 200, 0)
     tick(0)
-    assert g.get(p + 9488) & 0x180 == 0x180
+    assert g.get(p + 9488) & 0x1180 == 0x1180
     bound = g.get(p + 9384)
     assert bound != table and g.get(bound + 8) == 1
     assert g.get(g.get(bound + 20)) == entry
@@ -1456,6 +1594,50 @@ def verify_dash_climb(g, p, tick, phase):
     tick(0)
     assert g.half(p + 9482) == 0x8000 + 200
     assert g.half(p + 1204) & 255 == 30
+
+
+def verify_dash_drop(g, p, tick, action, neutral):
+    # Feed GU cached terrain from a scene with a ledge. The action fixture
+    # supplies the later landing frames to the controller.
+    g.stub(g.get(0x1749A88 + 828), lambda *_: 0)
+    original_height = g.get(p + 68)
+    original_ground = g.get(p + 4336)
+    original_terrain = bytes(g.cpu.mem_read(p + 11936, 52))
+    for mode, drop, landing, stick, stamina, resume in (
+        (0, 14, (4, 3), 120, 900., True),
+        (1, 23, (1, 138), 120, 900., True),
+        (1, 23, (4, 3), 0, 900., False),
+        (0, 14, (4, 3), 120, 0., False),
+        (0, 14, (64, 1), 120, 900., False),
+    ):
+        g.cpu.mem_write(p + 5136, struct.pack("<H", 120))
+        g.cpu.mem_write(p + 5088, struct.pack("<f", 900.))
+        g.run(CHANGE_ACTION, p, 16, 0x8000 + 200, 0)
+        tick(0)
+        tick(2)
+        assert (g.half(p + 9478), g.half(p + 9482)) == (16, 0x8000 + 200)
+        assert g.get(p + 5280) == g.get(p + 4076) == 0x1234
+        g.put(p + 68, struct.unpack("<I", struct.pack("<f", 80. if mode == 0 else 20.))[0])
+        g.put(p + 4336, 0)
+        g.cpu.mem_write(p + 11936, bytes(g.cpu.mem_read(p + 64, 12)))
+        g.cpu.mem_write(p + 11984, bytes((1, 0, mode)))
+        g.run(0x2E846C, p)
+        assert (g.half(p + 9478), g.half(p + 9482)) == (4, drop)
+        tick(0)
+        action(*landing)
+        tick(0)
+        g.cpu.mem_write(p + 5136, struct.pack("<H", stick))
+        g.cpu.mem_write(p + 5088, struct.pack("<f", stamina))
+        neutral()
+        tick(0)
+        assert (g.half(p + 9478), g.half(p + 9482)) == (
+            (16, 0x8000 + 200) if resume else (1, 0)
+        ), (mode, landing, stick, stamina)
+    g.put(p + 68, original_height)
+    g.put(p + 4336, original_ground)
+    g.cpu.mem_write(p + 11936, original_terrain)
+    g.cpu.mem_write(p + 5136, struct.pack("<H", 120))
+    print("GU native sprint drops: both terrain routes, landing resume, stick release, depletion and interruption passed")
 
 
 def verify_jump_slash(g, p, tick, neutral):

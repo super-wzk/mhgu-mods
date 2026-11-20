@@ -1,12 +1,12 @@
 //! Carry one accepted style block through GU collision, cost and recoil.
 use super::local_style;
 use core::sync::atomic::{
-    AtomicU32,
+    AtomicPtr, AtomicU32,
     Ordering::{Acquire, Relaxed, Release},
 };
 use mhgu_sdk::style::{
     action,
-    guard::{Decision, GuardResult},
+    guard::{self, Decision, GuardResult},
 };
 
 const GROUP: u16 = 32;
@@ -14,6 +14,37 @@ static ACTOR: AtomicU32 = AtomicU32::new(0);
 static INVULNERABILITY: AtomicU32 = AtomicU32::new(0);
 static RECOIL_TIER: AtomicU32 = AtomicU32::new(0);
 static SHARPNESS_POWER: AtomicU32 = AtomicU32::new(0);
+
+// GU writes the solved intersection to hit+32 in both branches of 16BB38
+// before invoking the style's block policy. Keep the borrow scoped to that pass.
+struct IncomingHit {
+    actor: u32,
+    hit: u32,
+}
+static INCOMING: AtomicPtr<IncomingHit> = AtomicPtr::new(core::ptr::null_mut());
+static IMPACT: guard::Impact = guard::Impact(impact_position);
+
+#[forge::hook(offset = 0x16bb38)]
+unsafe fn hunter_collision(manager: u32, hit: u32, actor: u32) -> u32 {
+    let mut context = IncomingHit { actor, hit };
+    let previous = INCOMING.swap(&mut context, Relaxed);
+    let value = original!(manager, hit, actor);
+    INCOMING.store(previous, Relaxed);
+    value
+}
+
+unsafe extern "C" fn impact_position(actor: u32, out: *mut [f32; 3]) -> bool {
+    unsafe {
+        let Some(&IncomingHit { actor: owner, hit }) = INCOMING.load(Relaxed).as_ref() else {
+            return false;
+        };
+        if actor != owner || hit == 0 || ((hit + 176) as *const u32).read() != actor {
+            return false;
+        }
+        out.write(((hit + 32) as *const [f32; 3]).read_unaligned());
+        true
+    }
+}
 
 fn pending(actor: u32) -> bool {
     actor != 0 && ACTOR.load(Acquire) == actor
@@ -40,7 +71,8 @@ unsafe fn block(actor: u32, angle: u32) -> u32 {
         let Some(policy) = local_style(actor).and_then(|s| s.guard) else {
             return accepted;
         };
-        if action::current(actor).0 != GROUP {
+        let (group, slot) = action::current(actor);
+        if group != GROUP && !action::custom(group, slot) {
             return accepted;
         }
         clear(actor);
@@ -121,6 +153,9 @@ pub(super) unsafe extern "C" fn take(actor: u32) -> u32 {
 }
 
 pub(super) fn install(base: u32) {
+    if unsafe { guard::publish_impact(&IMPACT) } {
+        forge::install_hook!(base, hunter_collision);
+    }
     forge::install_hook!(base, block);
     forge::install_hook!(base, reaction);
     forge::install_hook!(base, sharpness);

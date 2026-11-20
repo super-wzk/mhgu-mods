@@ -101,3 +101,6 @@ pub fn dual_blades() -> Result<Vec<u8>> {
     }
     mhgu_resource::tex::rgba8_unmipped(WIDTH as u32, HEIGHT as u32, &rgba)
 }
+
+mod long_sword;
+pub use long_sword::convert as long_sword;

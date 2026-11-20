@@ -53,13 +53,8 @@ fn local_actor() -> Option<u32> {
         return None;
     }
     unsafe {
-        let base = forge::mem::text_addr();
-        let manager = read::<u32>(base, 0x1885b58);
-        if manager == 0 {
-            return None;
-        }
-        let actor = native!(0x276278, manager);
-        (actor != 0 && read::<u32>(actor, 0) == base + 0x174f2b4).then_some(actor)
+        let actor = mhgu_sdk::style::hunter::local()?;
+        (read::<u32>(actor, 0) == forge::mem::text_addr() + 0x174f2b4).then_some(actor)
     }
 }
 
@@ -96,7 +91,7 @@ mod entry {
             return;
         }
         battle::install();
-        super::fx::install();
+        super::fx::install(EXTREME.id);
         super::hud::install();
     }
 }

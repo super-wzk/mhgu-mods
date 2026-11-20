@@ -3,29 +3,35 @@
 use crate::{
     combat,
     fx::{self, ChargeEffect},
-    motion,
-    program::{self, Cursor, Step},
+    motion, program, sound,
 };
 use core::{
     cell::UnsafeCell,
     sync::atomic::{AtomicBool, Ordering},
 };
+use mhfz_sdk::{
+    action::{Cursor, Step},
+    effects::MotionClock,
+    sound::Clock,
+    sprint::{self, Flick},
+};
 use mhgu_sdk::style::{
     ActionRequest, Input, NATIVE_ACTION, PASS, action,
-    action::command::{BufferedCommand, CommandInput, CommandSet, MAX_COMMAND_FRAME},
-    guard,
+    action::{
+        MotionFrame,
+        command::{BufferedCommand, CommandInput, CommandSet, MAX_COMMAND_FRAME},
+    },
+    guard, movement,
 };
 const DASH: u8 = 200;
 const DASH_SLOT: u16 = action::slot(DASH);
 const BRAKE: u8 = 201;
 const IDLE: u8 = 255;
+const DEFLECTION: u8 = 3;
 pub(super) const ACTIONS: action::Actions = action::Actions::new(74).with(DASH).with(BRAKE);
 const GUARD_GROUP: u16 = 32;
 const GUARD_MOTION: u32 = 5005;
 const GUARD_CANCEL_FRAME: i16 = 56;
-const LEDGE_CLIMBS: &[u16] = &[137, 138, 139];
-const ROLL_OFF_LEDGE: (u16, u16) = (4, 14);
-const LEDGE_LANDING: (u16, u16) = (4, 3);
 const SHEATHED_JUMP_SLASH: u16 = 38;
 const DRAWN_JUMP_SLASH: u16 = 67;
 const JUMP_COMBO_START: i16 = 54;
@@ -57,7 +63,7 @@ static FORWARD_ROLL: CommandSet = CommandSet::new(&roll_commands(26, 54));
 static LEFT_ROLL: CommandSet = CommandSet::new(&roll_commands(26, 64));
 static RIGHT_ROLL: CommandSet = CommandSet::new(&roll_commands(27, 64));
 // The retail drawn GS table has three ledge routes with drawn animations.
-static DASH_TERRAIN: CommandSet = CommandSet::new(&[]).retaining_native(1, LEDGE_CLIMBS);
+static DASH_TERRAIN: CommandSet = CommandSet::new(&[]).retaining_native(1, movement::CLIMBS);
 static GUARD_RECOVERY: CommandSet = CommandSet::new(&[BufferedCommand {
     group: 1,
     slot: 6,
@@ -90,6 +96,9 @@ static JUMP_LANDING: CommandSet = CommandSet::new(&[
 const RADIANCE_CLIP: u16 = 1465;
 const RADIANCE_START: f32 = 84.;
 const RADIANCE_INTERVAL: f32 = 12.;
+const RADIANCE_READY_INTERVAL: f32 = 24.;
+// Frames 84 through 276, with the final contact expiring at recovery (288).
+const RADIANCE_PULSES: u8 = 17;
 const fn synthetic(clip: u16, op: u16) -> Step {
     Step {
         op,
@@ -100,7 +109,7 @@ const fn synthetic(clip: u16, op: u16) -> Step {
         loops: 1,
     }
 }
-fn instruction(c: Cursor) -> Option<Step> {
+fn instruction(c: &Cursor) -> Option<Step> {
     match (c.state, c.time.step) {
         (DASH, 0) => Some(synthetic(1030, 5)),
         (BRAKE, 0) => Some(synthetic(1031, 3)),
@@ -147,46 +156,14 @@ pub(super) unsafe fn local(p: u32) -> bool {
         if p == 0 || read::<u32>(p, 0) != forge::mem::text_addr() + 0x1749a88 {
             return false;
         }
-        let mgr = read::<u32>(forge::mem::text_addr(), 0x1885b58);
-        let eq = read::<u32>(p, 5060);
-        mgr != 0
-            && eq != 0
-            && read::<u8>(eq, 1236) == 0
-            && native!(0x276278, mgr) == p
+        mhgu_sdk::style::hunter::local() == Some(p)
+            && mhgu_sdk::style::hunter::equipped_weapon(p) == Some(0)
             && mhgu_sdk::style::selected(0) == 1
     }
 }
-core::arch::global_asm!(
-    ".syntax unified",
-    ".arm",
-    ".fpu vfpv3",
-    ".text",
-    ".align 2",
-    ".global extreme_stamina",
-    ".hidden extreme_stamina",
-    ".type extreme_stamina,%function",
-    "extreme_stamina:",
-    "vmov s0,r1",
-    "mov r1,#0",
-    "bx r2"
-);
-unsafe extern "C" {
-    fn extreme_stamina(p: u32, amount: u32, entry: u32);
-}
-unsafe fn drain_stamina(p: u32, rate: f32) {
-    unsafe {
-        extreme_stamina(p, rate.to_bits(), forge::mem::text_addr() + 0x2a5ce4);
-    }
-}
-unsafe fn spend_stamina(p: u32, cost: f32) {
-    unsafe {
-        // Discrete costs use GU's Constitution/evade path, without multiplying
-        // by the frame delta as continuous sprint drain does.
-        extreme_stamina(p, (-cost).to_bits(), forge::mem::text_addr() + 0x2a5ebc);
-    }
-}
 struct Battle {
-    audio: crate::sound::Clock,
+    audio: Clock,
+    motion_fx: MotionClock,
     owner: u32,
     equip: u32,
     guard: u8,
@@ -199,14 +176,16 @@ struct Battle {
     draw_released: bool,
     level: u8,
     hit: bool,
+    deflected: bool,
     radiance_delay: Option<f32>,
+    radiance_pulses_left: u8,
     radiance_yaw: u16,
     radiance_contact: Option<([f32; 3], u32)>,
     aura_time: f32,
-    flick: program::Flick,
-    terrain_dash_pending: bool,
+    flick: Flick,
+    resume_sprint: sprint::Resume,
     guard_dash: bool,
-    roll_side: Option<u32>,
+    roll_yaw: Option<u16>,
     poise: f32,
     sustain_poise: bool,
 }
@@ -214,10 +193,11 @@ impl Battle {
     fn fresh(p: u32, equip: u32) -> Self {
         Self {
             audio: Default::default(),
+            motion_fx: Default::default(),
             owner: p,
             equip,
             guard: 0,
-            cursor: Cursor::new(IDLE),
+            cursor: program::cursor(IDLE),
             packed: 0xffff,
             charge: 0.,
             charge_interval: 20.,
@@ -226,14 +206,16 @@ impl Battle {
             draw_released: false,
             level: 0,
             hit: false,
+            deflected: false,
             radiance_delay: None,
+            radiance_pulses_left: 0,
             radiance_yaw: 0,
             radiance_contact: None,
             aura_time: 0.,
             flick: Default::default(),
-            terrain_dash_pending: false,
+            resume_sprint: sprint::Resume::default(),
             guard_dash: false,
-            roll_side: None,
+            roll_yaw: None,
             poise: 0.,
             sustain_poise: false,
         }
@@ -243,11 +225,13 @@ impl Battle {
         // latch. Do not clear it here after a guard/damage state has taken over.
         self.charge_effect = None;
         self.radiance_contact = None;
-        self.cursor = Cursor::new(IDLE);
+        self.cursor = program::cursor(IDLE);
+        self.motion_fx.seek(0, 0.);
         self.packed = 0xffff;
         self.charging = false;
         self.hit = false;
-        self.roll_side = None;
+        self.deflected = false;
+        self.roll_yaw = None;
     }
     unsafe fn cancel_attack(&mut self, p: u32) {
         self.cancel();
@@ -261,11 +245,9 @@ impl Battle {
     }
     unsafe fn evade(&mut self, p: u32) -> bool {
         unsafe {
-            motion::remember_roll(
+            motion::ROLL.remember(
                 p,
-                self.roll_side
-                    .take()
-                    .unwrap_or_else(|| motion::roll_side(p)),
+                self.roll_yaw.take().unwrap_or_else(|| motion::roll_yaw(p)),
             );
             self.cancel_attack(p);
             // Stock drawn roll: 2CBFCC case 6 -> 2CF8A4, including its stamina,
@@ -276,7 +258,7 @@ impl Battle {
     }
     unsafe fn start_step(&mut self, p: u32, frame: Option<u16>) -> bool {
         unsafe {
-            let Some(s) = instruction(self.cursor) else {
+            let Some(s) = instruction(&self.cursor) else {
                 self.finish(p);
                 return true;
             };
@@ -295,12 +277,14 @@ impl Battle {
                     };
                     self.packed = id;
                     let start = f32::from(start);
-                    self.audio.update(p, Some(s.clip), start, Some(start));
+                    sound::update(&mut self.audio, p, Some(s.clip), start, Some(start));
+                    self.motion_fx.seek(s.clip, start);
                     self.cursor.time.cycles = 0;
                     self.cursor.time.frame = start;
                     self.cursor.time.blend = f32::from(blend / 2);
                     if s.clip == RADIANCE_CLIP {
                         self.radiance_delay = None;
+                        self.radiance_pulses_left = RADIANCE_PULSES;
                     }
                     self.events(p);
                     true
@@ -317,27 +301,29 @@ impl Battle {
     }
     unsafe fn begin_at(&mut self, p: u32, state: u8, frame: Option<u16>) -> bool {
         unsafe {
-            self.terrain_dash_pending = false;
-            self.charge_effect = None;
-            self.radiance_contact = None;
-            self.cursor = Cursor::new(state);
-            self.roll_side = None;
-            let Some(s) = instruction(self.cursor) else {
-                self.cancel();
-                return false;
-            };
-            if motion::physical(p, s.clip).is_none() {
-                self.cancel();
-                return false;
-            }
             // An accepted GU request has already run the common transition.
             let requested =
                 action::current(p) == (action::GROUP, action::slot(state)) && read::<u8>(p, 5) == 0;
+            let cursor = program::cursor(state);
+            if instruction(&cursor)
+                .and_then(|s| motion::physical(p, s.clip))
+                .is_none()
+            {
+                if requested {
+                    self.finish(p);
+                }
+                return requested;
+            }
             if !requested && !action::enter(p, state) {
-                self.cancel();
                 return false;
             }
+            self.resume_sprint.set(false);
+            self.charge_effect = None;
+            self.radiance_contact = None;
+            self.cursor = cursor;
+            self.roll_yaw = None;
             self.hit = false;
+            self.deflected = false;
             self.charging = false;
             self.draw_released = false;
             if charge_state(state) {
@@ -345,15 +331,10 @@ impl Battle {
                 self.charge = 0.;
                 // GU's own GS charge timer (11681DC) checks these Focus and
                 // Slow Charge equipment skills. FZ changes 40/20 to 32/16 or 48/24.
-                self.charge_interval = if [152, 266, 284, 293]
-                    .iter()
-                    .any(|&id| native!(0x2864c4, p, id) != 0)
-                {
-                    16.
-                } else if native!(0x2864c4, p, 153) != 0 {
-                    24.
-                } else {
-                    20.
+                self.charge_interval = match action::ChargeSkill::equipped(p) {
+                    action::ChargeSkill::Focus => 16.,
+                    action::ChargeSkill::Slow => 24.,
+                    action::ChargeSkill::Normal => 20.,
                 };
             }
             self.poise = 0.;
@@ -361,15 +342,20 @@ impl Battle {
             write(p, 12325, 0u8);
             write(p, 12320 + 176, 0u32);
             write(p, 5, 1u8);
-            native!(0x282fd8, p, 0, u32::from(state != DASH), 0);
+            native!(
+                0x282fd8,
+                p,
+                0,
+                u32::from(!matches!(state, DASH | DEFLECTION)),
+                0
+            );
             native!(0x2a2560, p, 1);
             if matches!(state, 13 | 20 | 38 | 47) {
                 native!(0x2a264c, p, 1); // GU draw-attack bookkeeping/skills
             }
             if state == DASH {
-                // Match GU sprint collision flags and use its shared terrain
-                // commands for mounting a ledge while the run clip is active.
-                native!(0x283238, p, 0, 0x180, 0);
+                // GU's ground collision (2A9098) uses the roll bit for ledge drops.
+                native!(0x283238, p, 0, 0x1180, 0);
                 native!(0x2e9b7c, p, 2000, 0);
                 native!(0x2a25a8, p, 1);
             }
@@ -395,7 +381,7 @@ impl Battle {
                         let remaining = (f32::from(param) * 2. - late).max(0.);
                         write(p, 11072, remaining.max(read::<f32>(p, 11072)));
                     }
-                    12 => spend_stamina(p, 150.),
+                    12 => movement::stamina(p, -150., false),
                     4 => {
                         let dir = read::<u32>(p, 4076).wrapping_add(u32::from(param)) & 0xffff;
                         write(p, 4076, dir);
@@ -407,13 +393,15 @@ impl Battle {
                     }
                     14 => self.level = param as u8,
                     16 | 17 => {
-                        combat::emit(p, param, late);
+                        // 811D84FE passes the deflection flag to 811D83CE in these states.
+                        let deflectable = matches!(self.cursor.state, 0..=2 | 5..=18 | 29..=32 | 37..=39 | 68 | 69);
+                        combat::emit(p, param, late, deflectable);
                     }
                     18 => {
-                        combat::emit(p, program::charged_row(self.level), late);
+                        combat::emit(p, program::charged_row(self.level), late, false);
                     }
                     19 => {
-                        combat::emit(p, 110 + u16::from(self.level.min(5)), late);
+                        combat::emit(p, 110 + u16::from(self.level.min(5)), late, false);
                     }
                     24..=26 if !self.hit => fx::ground_strike(p, kind, self.level),
                     28 if param == 4 && self.level >= 2 => fx::charged_slash(p),
@@ -443,21 +431,19 @@ impl Battle {
         unsafe {
             let next = match branch {
                 65 => {
-                    if action::transition_to(p, GUARD_GROUP, 0) {
-                        self.cancel();
+                    if !action::transition_to(p, GUARD_GROUP, 0) {
+                        return false;
                     }
+                    self.cancel();
                     return true;
                 }
                 74 => {
-                    motion::remember_roll(
-                        p,
-                        self.roll_side.unwrap_or_else(|| motion::roll_side(p)),
-                    );
-                    if action::transition_to(p, 1, 6) {
-                        self.cancel_attack(p);
-                    } else {
-                        motion::forget_roll(p);
+                    motion::ROLL.remember(p, self.roll_yaw.unwrap_or_else(|| motion::roll_yaw(p)));
+                    if !action::transition_to(p, 1, 6) {
+                        motion::ROLL.clear_for(p);
+                        return false;
                     }
+                    self.cancel_attack(p);
                     return true;
                 }
                 75 => DASH,
@@ -479,28 +465,32 @@ impl Battle {
                 87 => 68,
                 88 | 89 => 69,
                 n if n < 74 => n as u8,
-                _ => return true,
+                _ => return false,
             };
-            if action::transition_to(p, action::GROUP, action::slot(next)) {
-                motion::aim(p, branch);
-                self.begin(p, next)
-            } else {
-                true
+            if !action::transition_to(p, action::GROUP, action::slot(next)) {
+                return false;
             }
+            motion::aim(p, branch);
+            self.begin(p, next)
         }
     }
     unsafe fn advance(&mut self, p: u32, input: &Input, dash_input: bool) -> bool {
         unsafe {
             let state = self.cursor.state;
+            self.deflected |= action::melee::take_deflection(p);
+            if self.deflected && action::transition_to(p, action::GROUP, action::slot(DEFLECTION)) {
+                self.level = 0;
+                action::melee::clear_hitstop(p);
+                self.begin(p, DEFLECTION);
+                return true;
+            }
             let uppercut_charge = matches!(state, 47..=53 | 70);
-            let Some(s) = instruction(self.cursor) else {
+            let Some(s) = instruction(&self.cursor) else {
                 return false;
             };
-            let frame = read::<f32>(p, 1280);
-            let end = read::<f32>(p, 1284);
+            let sample = MotionFrame::sample(p);
+            let frame = sample.frame;
             let previous = self.cursor.time.frame;
-            let wrapped = frame < previous;
-            let ended = read::<u8>(p, 1206) & 4 != 0;
             if state == 20 && self.cursor.time.step == 0 {
                 // GU's draw-charge dispatcher latches a release during the
                 // first ten motion frames (1161A14..1161A34). Use its mapped
@@ -516,18 +506,14 @@ impl Battle {
                     return self.begin_at(p, 13, Some(frame.min(36.) as u16));
                 }
             }
-            if wrapped {
-                self.cursor.time.cycles = self.cursor.time.cycles.saturating_add(1)
-            }
+            let wrapped = self.cursor.time.observe(frame, sample.blend);
             let delta = if wrapped {
                 read::<f32>(p, 28).max(0.)
             } else {
                 (frame - previous).max(0.)
             };
             write(p, 9472, read::<u32>(p, 9472) & !1);
-            self.cursor.time.frame = frame;
-            self.cursor.time.blend = read(p, 1268);
-            fx::motion_events(p, s.clip, previous, frame);
+            fx::motion_events(&mut self.motion_fx, p, s.clip, previous, sample);
             // 169D44 records the actual target and its type in this sword's
             // volume. Type 1 is a monster, type 0 is a hunter. The allocator
             // clears the record on each swing. No shared DPS hook is needed.
@@ -536,8 +522,8 @@ impl Battle {
             let was_charging = self.charging;
             self.events(p);
             if state < 74
-                && self.cursor.hunter_art_window(self.hit)
-                && action::transition(p, action::Transition::HUNTER_ART)
+                && program::hunter_art_window(&self.cursor, self.hit)
+                && action::activate_hunter_art(p)
             {
                 self.cancel_attack(p);
                 return true;
@@ -549,13 +535,13 @@ impl Battle {
             // The extra shoulder has no GU combat command; the registry uses
             // GU's own binding query for Frontier's additional brace action.
             let brace = self.poise > 0.
-                && state != 3
+                && state != DEFLECTION
                 && state < 74
                 && input.auxiliary_pressed != 0
                 && read::<f32>(p, 5088) >= 150.
                 && read::<f32>(p, 10296) <= 0.;
             if brace {
-                spend_stamina(p, 150.);
+                movement::stamina(p, -150., false);
                 crate::sound::play(p, false, 1);
                 fx::emit(p, 4, Some(0));
                 let duration = if charge_state(state) {
@@ -592,32 +578,19 @@ impl Battle {
                         // manual release during the fourth tier still uses row 168.
                         self.level = 2;
                     }
-                    return self.begin_branch(p, branch);
-                }
-            }
-            if state == DASH {
-                let has_direction = native!(0x27e608, p, 0) > 0;
-                if has_direction {
-                    let yaw = native!(0x27f678, p) & 0xffff;
-                    write(p, 4076, yaw);
-                    // GU's sprint probe feeds the drawn roll-off action used
-                    // by the native roll's terrain handler (2A9098).
-                    if native!(0x2a8458, p) == 1 {
-                        self.cancel();
-                        self.terrain_dash_pending = true;
-                        write(p, 5280, yaw);
-                        let (group, slot) = ROLL_OFF_LEDGE;
-                        native!(0x2831e0, p, u32::from(group), u32::from(slot), 0xc);
+                    if self.begin_branch(p, branch) {
                         return true;
                     }
                 }
+            }
+            if state == DASH {
+                let has_direction = movement::steer(p);
                 if delta > 0. {
                     // The native continuous drain already multiplies by GU's
                     // frame delta. Disable recovery and supply the rate once.
-                    native!(0x2a25a8, p, 1);
-                    drain_stamina(p, -1.);
+                    movement::drain_running_stamina(p);
                 }
-                if frame >= 30. || self.cursor.time.cycles > 0 {
+                if sprint::can_brake(frame, self.cursor.time.cycles) {
                     if input.command(13) {
                         self.cancel();
                         native!(0x2ab670, p, 1, 2, 0); // shared sheathe and equipment change
@@ -685,6 +658,14 @@ impl Battle {
                         cmd |= 1 << 14;
                     }
                 }
+                // w00 command 19 accepts any new blade attack during recoil.
+                if state == DEFLECTION
+                    && (input.weapon_command(12)
+                        || input.weapon_command(1)
+                        || input.weapon_command(2))
+                {
+                    cmd |= 1 << 19;
+                }
                 if !input.weapon_command(5) {
                     cmd |= 1 << 6
                 }
@@ -708,24 +689,24 @@ impl Battle {
                     7 => guard >= 3,
                     _ => false,
                 });
-                if input.command(3) && self.roll_side.is_none() && self.cursor.buffered_roll() {
-                    self.roll_side = Some(motion::roll_side(p));
+                if self.cursor.pending_action() == Some(74) {
+                    self.roll_yaw.get_or_insert_with(|| motion::roll_yaw(p));
+                } else {
+                    self.roll_yaw = None;
                 }
-                if let Some(branch) = branch {
-                    return self.begin_branch(p, branch);
+                if let Some(branch) = branch
+                    && self.begin_branch(p, branch)
+                {
+                    return true;
                 }
             }
-            let cycles = self
-                .cursor
-                .time
-                .cycles
-                .saturating_add(u16::from(ended && !wrapped));
-            let next = match s.op {
-                3 => ended || (end > 0. && frame >= end),
-                4 => cycles >= s.loops && (frame >= f32::from(s.until) || ended),
-                _ => false,
+            // For the six-loop emitter, GU's layer-end flag leads the displayed
+            // wrap by one tick. Keep its last active window through that tick.
+            let completion = MotionFrame {
+                ended: s.clip != RADIANCE_CLIP && sample.ended,
+                ..sample
             };
-            if next {
+            if s.complete(self.cursor.time, completion, wrapped) {
                 self.cursor.time.step += 1;
                 return self.start_step(p, None);
             }
@@ -750,6 +731,9 @@ impl Battle {
         }
     }
     unsafe fn radiance(&mut self, p: u32, previous: f32, frame: f32) {
+        if self.radiance_pulses_left == 0 {
+            return;
+        }
         unsafe {
             let yaw = read(p, 4076);
             let late = if let Some(delay) = self.radiance_delay {
@@ -768,9 +752,10 @@ impl Battle {
                 return;
             };
             self.radiance_delay = Some(RADIANCE_INTERVAL - late);
+            self.radiance_pulses_left -= 1;
             let origin = fx::shockwave_origin(p, yaw);
             self.radiance_contact =
-                combat::emit(p, program::RADIANCE, late).map(|shapes| (origin, shapes));
+                combat::emit(p, program::RADIANCE, late, false).map(|shapes| (origin, shapes));
             fx::radiance(p, origin, self.radiance_yaw);
         }
     }
@@ -778,44 +763,36 @@ impl Battle {
         unsafe {
             let current = action::current(p);
             let (group, act) = current;
-            let climbing = group == 1 && LEDGE_CLIMBS.contains(&act);
             let jump_slash =
                 group == action::GROUP && matches!(act, SHEATHED_JUMP_SLASH | DRAWN_JUMP_SLASH);
             // With the stick held, GU's drawn climb exits directly to walk 2:30.
-            let ground_movement = matches!(current, (1, 0 | 46) | (2, 0 | 30));
+            let ground_movement = movement::ground_idle(current);
             if current != (1, 6) {
-                motion::forget_roll(p);
+                motion::ROLL.clear_for(p);
             }
             let phase: u8 = read(p, 5);
             let physical: u16 = read(p, 1204);
-            if self.guard == 3 && native!(0x2a2444, p) != 0 {
-                self.aura_time += read::<f32>(p, 28).max(0.);
-                if self.aura_time >= 24. {
-                    self.aura_time %= 24.;
+            if self.guard != 3 {
+                self.aura_time = 0.;
+            } else if native!(0x2a2444, p) == 0 {
+                // FZ 8115B4D0 primes the next pulse while the sword is sheathed.
+                self.aura_time = RADIANCE_READY_INTERVAL;
+            } else {
+                if self.aura_time >= RADIANCE_READY_INTERVAL {
+                    self.aura_time %= RADIANCE_READY_INTERVAL;
                     fx::radiance_ready(p);
                 }
-            } else {
-                self.aura_time = 0.;
+                self.aura_time += read::<f32>(p, 28).max(0.);
             }
-            self.audio
-                .update(p, motion::source_clip(p, physical), read(p, 1280), None);
-            let dash_input = self.flick.sample(
-                input.stick_strength,
-                input.stick_angle,
-                read::<f32>(p, 28).max(0.) * 0.5,
+            sound::update(
+                &mut self.audio,
+                p,
+                motion::source_clip(p, physical),
+                read(p, 1280),
+                None,
             );
-            // GU can land a short roll-off directly in 1:138.
-            let buffered_roll_dash = dash_input
-                && matches!(current, LEDGE_LANDING | (1, 138))
-                && (read(p, 9480), read(p, 9484)) == ROLL_OFF_LEDGE
-                && native!(0x2a2444, p) != 0;
-            let keeps_terrain_dash = climbing
-                || jump_slash
-                || ground_movement
-                || matches!(current, ROLL_OFF_LEDGE | LEDGE_LANDING);
-            self.terrain_dash_pending = buffered_roll_dash
-                || (climbing && self.cursor.state == DASH)
-                || (self.terrain_dash_pending && keeps_terrain_dash);
+            let dash_input = self.flick.update(input, read::<f32>(p, 28).max(0.));
+            let was_sprinting = self.cursor.state == DASH;
             if self.cursor.state != IDLE {
                 if current == (action::GROUP, action::slot(self.cursor.state))
                     && physical == self.packed
@@ -825,6 +802,20 @@ impl Battle {
                     return self.advance(p, input, dash_input);
                 }
                 self.cancel(); // damage, sheathing, warp or another GU action took ownership
+            }
+            // Preserve a pending run through the native jump slash and its landing window.
+            if !jump_slash {
+                let drawn = native!(0x2a2444, p) != 0;
+                self.resume_sprint
+                    .on_native(p, current, ground_movement, drawn, was_sprinting);
+                // A normal roll off a ledge can buffer a fresh run on landing.
+                if drawn
+                    && dash_input
+                    && matches!(current, (4, 3) | (1, 138))
+                    && matches!(action::previous(p), (4, 14 | 23))
+                {
+                    self.resume_sprint.set(true);
+                }
             }
             if let Some(id) = action::custom_id(group, act) {
                 if phase == 0 {
@@ -900,8 +891,11 @@ impl Battle {
             {
                 return self.begin(p, if act == 6 { 63 } else { 62 });
             }
-            let terrain_dash_ready =
-                self.terrain_dash_pending && ground_movement && native!(0x2a2444, p) != 0;
+            let has_stamina = read::<f32>(p, 5088) > 0.;
+            let terrain_dash_ready = ground_movement
+                && self
+                    .resume_sprint
+                    .ready(native!(0x27e608, p, 0) > 0, has_stamina);
             let accepts_ground_input = terrain_dash_ready
                 || (phase != 0
                     && matches!(group, 1 | 2)
@@ -909,8 +903,8 @@ impl Battle {
             if !accepts_ground_input {
                 return false;
             }
-            let resume_dash = core::mem::take(&mut self.terrain_dash_pending);
-            if action::transition(p, action::Transition::HUNTER_ART) {
+            self.resume_sprint.set(false);
+            if action::activate_hunter_art(p) {
                 return true;
             }
             if input.command(13) {
@@ -933,9 +927,8 @@ impl Battle {
             if input.weapon_command(2) {
                 return self.begin(p, SWEEP);
             }
-            let wants_dash =
-                dash_input || (resume_dash && !input.command(3) && native!(0x27e608, p, 0) > 0);
-            wants_dash && read::<f32>(p, 5088) > 0. && self.begin(p, DASH)
+            let wants_dash = dash_input || (terrain_dash_ready && !input.command(3));
+            wants_dash && has_stamina && self.begin(p, DASH)
         }
     }
 }
@@ -1010,7 +1003,7 @@ pub(super) unsafe extern "C" fn dispatch(p: u32, input: *const Input) -> u32 {
                     battle.finish(p);
                 }
             }
-            motion::forget_roll(p);
+            motion::ROLL.clear_for(p);
             false
         }
     };

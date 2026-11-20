@@ -1,4 +1,5 @@
-use mhgu_sdk::style::sound::{Bank, Clock};
+use mhfz_sdk::sound::Clock;
+use mhgu_sdk::style::sound::Bank;
 
 static BANKS: [Bank; 3] = [
     Bank::new(c"sound\\se\\pl\\frontier_db\\blade"),

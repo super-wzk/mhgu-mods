@@ -7,12 +7,15 @@ use core::{
 };
 mod attack;
 mod commands;
+mod deflection;
 mod effect;
 mod guard;
 mod menu;
+mod physical;
 mod weapon;
+mod world_contact;
 use mhgu_sdk::style::{
-    ActionRequest, Input, PASS, Style, action,
+    ActionRequest, Input, PASS, Style, action, hunter, movement,
     registry::{self, ServiceV1},
 };
 
@@ -21,6 +24,10 @@ struct Entry {
     name: CString,
     details: CString,
     next: *mut Entry,
+    remote: AtomicU32,
+    physical: AtomicPtr<mhgu_sdk::style::physical::Rule>,
+    world_contact: AtomicU32,
+    particle_release: AtomicU32,
 }
 
 // Published entries live until exit. Zero selections skip the list entirely.
@@ -44,12 +51,9 @@ unsafe extern "C" fn register(
     }
     let mut head = HEAD.load(Ordering::Acquire);
     loop {
-        let mut cur = head;
-        while let Some(entry) = unsafe { cur.as_ref() } {
-            if entry.style.id == style.id {
-                return if ptr::eq(entry.style, style) { 0 } else { 2 };
-            }
-            cur = entry.next;
+        let mut entries = unsafe { entries_from(head) };
+        if let Some(entry) = entries.find(|entry| entry.style.id == style.id) {
+            return if ptr::eq(entry.style, style) { 0 } else { 2 };
         }
         let name = if name.is_null() {
             CString::new(format!("Style {}", style.id)).unwrap()
@@ -66,6 +70,10 @@ unsafe extern "C" fn register(
             name,
             details,
             next: head,
+            remote: AtomicU32::new(0),
+            physical: AtomicPtr::new(ptr::null_mut()),
+            world_contact: AtomicU32::new(0),
+            particle_release: AtomicU32::new(0),
         }));
         match HEAD.compare_exchange(head, node, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => return 0,
@@ -77,10 +85,22 @@ unsafe extern "C" fn register(
     }
 }
 
-fn entries(weapon: u32) -> impl Iterator<Item = &'static Entry> {
-    let first = unsafe { HEAD.load(Ordering::Acquire).as_ref() };
+// The head must be null or a node already published in HEAD.
+unsafe fn entries_from(head: *mut Entry) -> impl Iterator<Item = &'static Entry> {
+    let first = unsafe { head.as_ref() };
     core::iter::successors(first, |e| unsafe { e.next.as_ref() })
-        .filter(move |e| e.style.weapon == weapon)
+}
+
+fn registered_entries() -> impl Iterator<Item = &'static Entry> {
+    unsafe { entries_from(HEAD.load(Ordering::Acquire)) }
+}
+
+fn registered_entry(id: u32) -> Option<&'static Entry> {
+    registered_entries().find(|entry| entry.style.id == id)
+}
+
+fn entries(weapon: u32) -> impl Iterator<Item = &'static Entry> {
+    registered_entries().filter(move |entry| entry.style.weapon == weapon)
 }
 
 fn choose(weapon: u32, entry: Option<&Entry>) {
@@ -108,28 +128,14 @@ extern "C" fn selected(weapon: u32) -> u32 {
 }
 
 unsafe fn local_hunter() -> u32 {
-    let base = forge::mem::text_addr();
-    unsafe {
-        let mgr = *((base + 0x1885b58) as *const u32);
-        if mgr == 0 {
-            return 0;
-        }
-        let local: unsafe extern "C" fn(u32) -> u32 = core::mem::transmute(base + 0x276278);
-        local(mgr)
-    }
+    unsafe { hunter::local() }.unwrap_or(0)
 }
 
 unsafe fn actor_entry(actor: u32) -> Option<&'static Entry> {
     if actor == 0 {
         return None;
     }
-    unsafe {
-        let equipment = ((actor + 5060) as *const u32).read();
-        if equipment == 0 {
-            return None;
-        }
-        active(u32::from(((equipment + 1236) as *const u8).read()))
-    }
+    active(u32::from(unsafe { hunter::equipped_weapon(actor) }?))
 }
 
 unsafe fn local_style(actor: u32) -> Option<&'static Style> {
@@ -139,13 +145,49 @@ unsafe fn local_style(actor: u32) -> Option<&'static Style> {
     unsafe { actor_entry(actor) }.map(|e| e.style)
 }
 
+static REMOTE: mhgu_sdk::style::remote::Service = mhgu_sdk::style::remote::Service(bind_remote);
+
+unsafe extern "C" fn bind_remote(id: u32, tick: mhgu_sdk::style::remote::Tick) {
+    if let Some(entry) = registered_entry(id) {
+        entry.remote.store(tick as u32, Ordering::Release);
+    }
+}
+
+// GU's netPlAction carries the weapon action (1FED90 / 1FF308), independent
+// of the receiver's equipment-box selection. V1 private IDs are per weapon.
+unsafe fn peer_entry(actor: u32) -> Option<&'static Entry> {
+    unsafe {
+        use mhgu_sdk::style::remote::Roster;
+        // World contacts also call here with monster or object owners.
+        Roster::current()?.peer_index(actor)?;
+        let mut candidates = entries(u32::from(hunter::equipped_weapon(actor)?))
+            .filter(|entry| entry.remote.load(Ordering::Acquire) != 0);
+        let entry = candidates.next()?;
+        candidates.next().is_none().then_some(entry)
+    }
+}
+
+unsafe fn playback_style(actor: u32) -> Option<&'static Style> {
+    if actor == 0 {
+        return None;
+    }
+    unsafe {
+        local_style(actor).or_else(|| {
+            let style = peer_entry(actor)?.style;
+            let (group, slot) = action::current(actor);
+            let id = action::custom_id(group, slot)?;
+            style.actions.contains(id).then_some(style)
+        })
+    }
+}
+
 unsafe fn independent(actor: u32) -> bool {
     unsafe { local_style(actor) }.is_some_and(|style| style.independent)
 }
 
 #[forge::hook(offset = 0x27c6a0)]
 unsafe fn encode(actor: u32, request: u32) -> u32 {
-    if let Some(f) = unsafe { local_style(actor) }.and_then(|s| s.encode) {
+    if let Some(f) = unsafe { playback_style(actor) }.and_then(|s| s.encode) {
         let out = unsafe { f(actor, request) };
         if out != PASS {
             return out;
@@ -156,7 +198,7 @@ unsafe fn encode(actor: u32, request: u32) -> u32 {
 
 #[forge::hook(offset = 0x27c6d4)]
 unsafe fn decode(actor: u32, packed: u32) -> u32 {
-    if let Some(f) = unsafe { local_style(actor) }.and_then(|s| s.decode) {
+    if let Some(f) = unsafe { playback_style(actor) }.and_then(|s| s.decode) {
         let out = unsafe { f(actor, packed) };
         if out != PASS {
             return out;
@@ -196,13 +238,14 @@ unsafe fn controller_frame(actor: u32, custom_id: Option<u8>) -> u32 {
         let prev = LAST_ENTRY.swap(entry, Ordering::Relaxed);
         let owner = LAST_ACTOR.swap(actor, Ordering::Relaxed);
         if prev != entry || actor != owner {
+            deflection::clear(owner);
             guard::clear(owner);
             if let Some(stop) = prev.as_ref().and_then(|e| e.style.controller) {
                 // A previous scene's actor may already have been destroyed.
                 stop(if owner == actor { owner } else { 0 }, ptr::null());
             }
         }
-        let Some((_, tick)) = controller else {
+        let Some((entry, tick)) = controller else {
             return PASS;
         };
         let (group, slot) = action::current(actor);
@@ -214,15 +257,27 @@ unsafe fn controller_frame(actor: u32, custom_id: Option<u8>) -> u32 {
         if *((actor + 9493) as *const u8) & 4 != 0 {
             return PASS;
         }
+        if group == 1 && matches!(slot, 1 | 2 | 6) && matches!(entry.style.weapon, 0 | 11) {
+            weapon::finish_ground_motion(actor, entry.style, slot);
+        }
         *((actor + 9472) as *mut u32) &= !1;
         let auxiliary: unsafe extern "C" fn() -> u32 =
             core::mem::transmute(forge::mem::text_addr() + 0x65fa04);
+        let pressed = if movement::sheathed_movement((group, slot))
+            && *((actor + 10057) as *const u8) & 1 == 0
+        {
+            // 2A79CC saves the press in +5124 before its sprint filter
+            // reduces +5112 to the dash shoulder. Recover only the extra key.
+            *((actor + 5124) as *const u32)
+        } else {
+            u32::from(*((actor + 5112) as *const u16))
+        };
         let input = Input {
             common: *((actor + 5140) as *const [u32; 4]),
             weapon: *((actor + 5156) as *const [u32; 4]),
             stick_angle: *((actor + 5132) as *const u16),
             stick_strength: *((actor + 5136) as *const i16),
-            auxiliary_pressed: u32::from(*((actor + 5112) as *const u16)) & auxiliary(),
+            auxiliary_pressed: pressed & auxiliary(),
         };
         let result = tick(actor, &input);
         if result == PASS {
@@ -250,6 +305,14 @@ unsafe fn weapon_dispatch(actor: u32) -> u32 {
     let Some(id) = action::custom_id(group, slot) else {
         return original!(actor);
     };
+    if let Some(entry) = unsafe { peer_entry(actor) } {
+        if entry.style.actions.contains(id) {
+            let tick: mhgu_sdk::style::remote::Tick =
+                unsafe { core::mem::transmute(entry.remote.load(Ordering::Acquire)) };
+            unsafe { tick(actor, id) };
+        }
+        return 0;
+    }
     match unsafe { controller_frame(actor, Some(id)) } {
         // Custom IDs have no entry in the retail weapon tables.
         PASS => 0,
@@ -272,6 +335,11 @@ unsafe fn change_action(actor: u32, group: u32, slot: u32, flags: u32) -> u32 {
         slot
     };
     let out = original!(actor, group, slot, flags);
+    if unsafe { action::current(actor) } == (group as u16, slot as u16)
+        && unsafe { *((actor + 5) as *const u8) } == 0
+    {
+        deflection::clear(actor);
+    }
     unsafe { guard::after_change(actor, group, slot) };
     out
 }
@@ -279,7 +347,11 @@ unsafe fn change_action(actor: u32, group: u32, slot: u32, flags: u32) -> u32 {
 unsafe fn resolve_weapon_slot(actor: u32, slot: u16, flags: u16) -> Option<u16> {
     let style = unsafe { local_style(actor) };
     if let Some(id) = action::custom_id(action::GROUP, slot) {
-        return style?.actions.contains(id).then_some(slot);
+        return style
+            .or_else(|| unsafe { peer_entry(actor) }.map(|e| e.style))?
+            .actions
+            .contains(id)
+            .then_some(slot);
     }
     let Some(style) = style.filter(|style| style.controller.is_some()) else {
         return Some(slot);
@@ -404,7 +476,11 @@ fn start() {
     forge::install_hook!(base, dispatch);
     forge::install_hook!(base, weapon_dispatch);
     forge::install_hook!(base, change_action);
+    unsafe { mhgu_sdk::style::remote::publish(&REMOTE) };
     attack::install(base);
+    deflection::install(base);
+    world_contact::install(base);
+    unsafe { physical::install(base) };
     commands::install(base);
     effect::install(base);
     guard::install(base);

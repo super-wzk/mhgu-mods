@@ -1,4 +1,5 @@
 //! Frontier's great sword action program. All clocks here are motion frames.
+use mhfz_sdk::action::{BranchRules, Cursor, Step};
 pub const DATA: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/target/assets/great_sword.fgsa"
@@ -38,212 +39,76 @@ pub fn radiance_capsule() -> (f32, [[f32; 3]; 2]) {
         ],
     )
 }
-#[derive(Clone, Copy, Debug)]
-pub struct Step {
-    pub op: u16,
-    pub clip: u16,
-    pub start: u16,
-    pub blend: u16,
-    pub until: u16,
-    pub loops: u16,
-}
 pub fn step(state: u8, index: u8) -> Option<Step> {
-    let s = records(state, 0, 12).chunks_exact(12).nth(index.into())?;
-    Some(Step {
-        op: half(s, 0),
-        clip: half(s, 2),
-        start: half(s, 4),
-        blend: half(s, 6),
-        until: half(s, 8),
-        loops: half(s, 10),
-    })
-}
-#[derive(Default, Clone, Copy)]
-pub struct Time {
-    pub step: u8,
-    pub cycles: u16,
-    pub frame: f32,
-    pub blend: f32,
-}
-impl Time {
-    fn reached(self, s: &[u8]) -> bool {
-        let step = half(s, 0);
-        if u16::from(self.step) != step {
-            return u16::from(self.step) > step;
-        }
-        match s[2] {
-            1 => true,
-            2 => false,
-            0 if (s[3] as i8) > 0 => self.blend <= f32::from(s[3]),
-            0 => {
-                self.cycles > half(s, 6)
-                    || (self.cycles == half(s, 6) && self.frame >= f32::from(half(s, 4)))
-            }
-            _ => false,
-        }
-    }
-}
-#[derive(Default, Clone, Copy)]
-pub struct Cursor {
-    pub state: u8,
-    pub time: Time,
-    pub event: u16,
-    buffer: Option<u8>,
-}
-impl Cursor {
-    pub fn new(state: u8) -> Self {
-        Self {
-            state,
-            ..Self::default()
-        }
-    }
-    pub fn buffered_roll(&self) -> bool {
-        self.buffer
-            .is_some_and(|i| half(records(self.state, 1, 40), usize::from(i) * 40 + 22) == 74)
-    }
-    pub fn hunter_art_window(&self, hit: bool) -> bool {
-        // GU Hunter Art policy for the port. The step and frame ranges preserve
-        // the previous cancel timings. An end of zero keeps the current step open.
-        let time = self.time;
-        let frame = if time.cycles == 0 {
-            time.frame
-        } else {
-            f32::INFINITY
-        };
-        let (step, start, end) = match self.state {
-            0 => (0, 72., 0.),
-            2 | 13 | 16 | 30..=32 => (1, 48., 0.),
-            5..=8 => (1, 72., 0.),
-            14 | 15 | 17 | 18 => (2, 48., 0.),
-            19 => (0, 58., 0.),
-            20 | 21 | 25..=28 | 71 => (1, 58., 0.),
-            22 => (0, 24., 0.),
-            24 => (0, 26., 0.),
-            29 => (0, 48., 0.),
-            33 => (0, 120., 0.),
-            34..=36 => (1, 120., 0.),
-            37 | 38 => (1, 72., if hit { 104. } else { 98. }),
-            40 | 43 | 44 if frame < 74. => (1, 32., 74.),
-            40 | 43 | 44 => (1, 136., 0.),
-            41 | 45 => (1, 78., 0.),
-            42 | 46 => (1, 68., 0.),
-            47 | 49..=52 | 70 => (1, 54., 0.),
-            48 | 53 => (0, 54., 0.),
-            54 => (0, 68., 0.),
-            55..=58 => (0, 76., 0.),
-            59 => {
-                return time.step == 1
-                    && (time.cycles > 1 || time.cycles == 1 && time.frame >= 20.)
-                    && (time.cycles < 4 || time.cycles == 4 && time.frame < 134.);
-            }
-            61 | 65 => (0, 56., 0.),
-            62 | 63 => (0, 64., 0.),
-            64 => (0, 86., 0.),
-            66 | 72 => (0, 20., 0.),
-            67 | 73 => (0, 0., 0.),
-            68 => (0, 128., 0.),
-            69 => (0, 84., 0.),
-            _ => return false,
-        };
-        time.step == step && frame >= start && (end == 0. || frame < end)
-    }
-    pub fn next_event(&mut self) -> Option<(u16, u16, f32)> {
-        let e = records(self.state, 2, 12)
-            .chunks_exact(12)
-            .nth(self.event.into())?;
-        if !self.time.reached(e) {
-            return None;
-        }
-        self.event += 1;
-        let late = if half(e, 0) == u16::from(self.time.step)
-            && e[2] == 0
-            && e[3] == 0
-            && self.time.cycles == half(e, 6)
-        {
-            (self.time.frame - f32::from(half(e, 4))).max(0.)
-        } else {
-            0.
-        };
-        Some((half(e, 8), half(e, 10), late))
-    }
-    // The original buffers the highest priority accepted input separately from
-    // its execution window. A predicate is checked again before the branch.
-    pub fn branch(&mut self, commands: u32, predicate: impl Fn(u16) -> bool) -> Option<u16> {
-        let table = records(self.state, 1, 40);
-        let previous = self.buffer.map(|i| half(table, usize::from(i) * 40));
-        // 811D4978 chooses one available command before the state scheduler
-        // compares branch priorities. A direction must win over its neutral alias.
-        const ORDER: [u8; 32] = [
-            0, 1, 31, 2, 6, 17, 8, 9, 7, 11, 12, 10, 24, 25, 23, 4, 5, 3, 27, 26, 14, 13, 29, 30,
-            28, 16, 15, 18, 21, 22, 20, 19,
-        ];
-        let mut candidate = None;
-        let mut rank = ORDER.len();
-        for (index, b) in table.chunks_exact(40).enumerate() {
-            if previous.is_some_and(|p| p >= half(b, 0))
-                || !predicate(half(b, 2))
-                || commands & (1u32 << half(b, 4)) == 0
-                || !self.time.reached(&b[6..])
-                || self.time.reached(&b[14..])
-            {
-                continue;
-            }
-            let order = ORDER.iter().position(|&c| u16::from(c) == half(b, 4))?;
-            if order < rank
-                || (order == rank
-                    && candidate.is_none_or(|i: usize| half(table, i * 40) <= half(b, 0)))
-            {
-                candidate = Some(index);
-                rank = order;
-            }
-        }
-        if let Some(i) = candidate {
-            self.buffer = Some(i as u8);
-        }
-        let i = usize::from(self.buffer?) * 40;
-        let b = &table[i..i + 40];
-        (predicate(half(b, 2)) && self.time.reached(&b[24..]) && !self.time.reached(&b[32..]))
-            .then(|| half(b, 22))
-    }
-}
-pub fn charged_row(level: u8) -> u16 {
-    [3, 91, 92, 93][usize::from(level.min(3))]
+    Step::read(records(state, 0, 12), index)
 }
 
-// 81ECC418: pass through neutral, deflect, release, then deflect again in the
-// same direction. Holding the stick or tapping in opposite directions fails.
-#[derive(Default, Clone, Copy)]
-pub struct Flick {
-    phase: u8,
-    direction: u16,
-    remaining: f32,
+// 811D4978 picks a command before comparing authored branch priorities.
+static RULES: BranchRules = BranchRules {
+    order: &[
+        0, 1, 31, 2, 6, 17, 8, 9, 7, 11, 12, 10, 24, 25, 23, 4, 5, 3, 27, 26, 14, 13, 29, 30, 28,
+        16, 15, 18, 21, 22, 20, 19,
+    ],
+    combo_override: None,
+    art_commands: 0,
+};
+
+pub fn cursor(state: u8) -> Cursor {
+    let (branches, events) = if state < 74 {
+        (records(state, 1, 40), records(state, 2, 12))
+    } else {
+        (&[][..], &[][..])
+    };
+    Cursor::new(state, branches, events, &RULES)
 }
-impl Flick {
-    pub fn sample(&mut self, strength: i16, angle: u16, elapsed: f32) -> bool {
-        self.remaining = (self.remaining - elapsed).max(0.);
-        if self.remaining == 0. && self.phase >= 2 {
-            self.phase = 0
+
+pub fn hunter_art_window(cursor: &Cursor, hit: bool) -> bool {
+    // GU Hunter Art policy for the port. The step and frame ranges preserve
+    // the previous cancel timings. An end of zero keeps the current step open.
+    let time = cursor.time;
+    let frame = if time.cycles == 0 {
+        time.frame
+    } else {
+        f32::INFINITY
+    };
+    let (step, start, end) = match cursor.state {
+        0 => (0, 72., 0.),
+        2 | 13 | 16 | 30..=32 => (1, 48., 0.),
+        5..=8 => (1, 72., 0.),
+        14 | 15 | 17 | 18 => (2, 48., 0.),
+        19 => (0, 58., 0.),
+        20 | 21 | 25..=28 | 71 => (1, 58., 0.),
+        22 => (0, 24., 0.),
+        24 => (0, 26., 0.),
+        29 => (0, 48., 0.),
+        33 => (0, 120., 0.),
+        34..=36 => (1, 120., 0.),
+        37 | 38 => (1, 72., if hit { 104. } else { 98. }),
+        40 | 43 | 44 if frame < 74. => (1, 32., 74.),
+        40 | 43 | 44 => (1, 136., 0.),
+        41 | 45 => (1, 78., 0.),
+        42 | 46 => (1, 68., 0.),
+        47 | 49..=52 | 70 => (1, 54., 0.),
+        48 | 53 => (0, 54., 0.),
+        54 => (0, 68., 0.),
+        55..=58 => (0, 76., 0.),
+        59 => {
+            return time.step == 1
+                && (time.cycles > 1 || time.cycles == 1 && time.frame >= 20.)
+                && (time.cycles < 4 || time.cycles == 4 && time.frame < 134.);
         }
-        match self.phase {
-            0 if strength < 48 => self.phase = 1,
-            1 if strength >= 80 => {
-                self.phase = 2;
-                self.direction = angle;
-                self.remaining = 12.;
-            }
-            2 if strength < 48 => {
-                self.phase = 3;
-                self.remaining = 12.;
-            }
-            2 if (angle.wrapping_sub(self.direction) as i16).unsigned_abs() > 0x3000 => {
-                self.phase = 0
-            }
-            3 if strength >= 80 => {
-                self.phase = 0;
-                return (angle.wrapping_sub(self.direction) as i16).unsigned_abs() <= 0x3000;
-            }
-            _ => {}
-        }
-        false
-    }
+        61 | 65 => (0, 56., 0.),
+        62 | 63 => (0, 64., 0.),
+        64 => (0, 86., 0.),
+        66 | 72 => (0, 20., 0.),
+        67 | 73 => (0, 0., 0.),
+        68 => (0, 128., 0.),
+        69 => (0, 84., 0.),
+        _ => return false,
+    };
+    time.step == step && frame >= start && (end == 0. || frame < end)
+}
+
+pub fn charged_row(level: u8) -> u16 {
+    [3, 91, 92, 93][usize::from(level.min(3))]
 }

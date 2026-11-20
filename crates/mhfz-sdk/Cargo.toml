@@ -1,0 +1,13 @@
+[package]
+name = "mhfz-sdk"
+version = "0.1.0"
+edition = "2024"
+description = "Shared Frontier weapon behavior for MHGU ports"
+publish = false
+
+[dependencies]
+libm = "0.2"
+mhgu-sdk = { path = "../mhgu-sdk" }
+
+[target.'cfg(all(target_arch = "arm", target_endian = "little"))'.dependencies]
+mhgu-forge-sys = "1.5.0"

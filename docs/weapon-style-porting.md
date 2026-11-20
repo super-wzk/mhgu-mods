@@ -19,7 +19,7 @@
 
 1. 在 `tools` 的转换器中复用 `mhf-resource` 解包和 `mhgu-resource` 写入。两套武器移植把上下身的 0/1、2/3、4/5 三组轨道分别合成全身 LMT，保留原组内槽位、空槽和循环点。男女模型分别生成。
 2. 核对根轨、坐标和武器挂点事件。先看站立、拔刀、收刀和防御回正，再看活动幅度大的攻击。换手或离背要对齐源动作帧，混合期间也要观察。双剑左右手分别有挂点和接触槽。
-3. 用私有路径加载资源，例如 `player/mot/frontier_db`。经过 [MotionBanks](../crates/mhgu-sdk/src/style/action/motion_bank.rs) 或现有武器的编码器，将源片段映射到 GU 空闲的运行时 bank 和槽。播放通过 `action::play_motion` 进入 GU 的层播放函数。
+3. 用私有路径加载资源，例如 `player/mot/frontier_db`。通过 mhfz-sdk 的 [MotionBanks](../crates/mhfz-sdk/src/motion.rs) 或武器自己的编码器，将源片段映射到 GU 空闲的运行时 bank 和槽。GU 的资源载入和绑定由 mhgu-sdk 提供。播放通过 `action::play_motion` 进入 GU 的层播放函数。
 4. 分别标记动作播放帧、逻辑 tick 和实际经过时间。FZ 的 30 Hz 逻辑计时在 GU 以 60 Hz 单位计时时乘二。受击停顿和变速时用引擎本次实际经过量。动作事件按原片段帧触发，按当前及上一播放位置判断跨帧、循环和已执行事件。
 
 资源生成脚本负责组装 `dist`。源参数最好留在提取的数据或动作程序中，运行时以可辨识的名称取用。新增 GU 派生参数也应注明用途和单位，比如[双剑空中下劈的水平速度](../plugins/dual-blades-extreme/src/program.rs)。

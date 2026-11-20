@@ -35,7 +35,7 @@ impl StyleRegistry {
         if !service::on_game_thread() {
             return None;
         }
-        Some(Self(service::find(NAME, MAGIC)?, PhantomData))
+        Some(Self(unsafe { service::find(NAME, MAGIC) }?, PhantomData))
     }
 
     /// Register a process-lifetime definition with UTF-8 equipment-box labels.

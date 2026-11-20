@@ -1,3 +1,62 @@
+use alloc::boxed::Box;
+use core::{
+    ffi::{CStr, c_char},
+    ptr,
+    sync::atomic::{AtomicPtr, Ordering},
+};
+use mhfz_sdk::trail::{self, Renderer, Sample, Snapshot};
+use mhgu_sdk::style::particle::{self, OnRelease};
+
+// Entries are registered during Forge init and stay valid on the render thread.
+struct Strip {
+    path: &'static CStr,
+    snapshot: Snapshot,
+    renderer: Renderer,
+    next: *mut Strip,
+}
+static STRIPS: AtomicPtr<Strip> = AtomicPtr::new(ptr::null_mut());
+static SERVICE: trail::Service = trail::Service(bind);
+const MODEL_PATH_OFFSET: u32 = 80;
+
+unsafe extern "C" fn bind(path: *const c_char, snapshot: Snapshot) {
+    if path.is_null() {
+        return;
+    }
+    let path = unsafe { CStr::from_ptr(path) };
+    if path.to_bytes_with_nul().len() > 64 {
+        return;
+    }
+    let next = STRIPS.load(Ordering::Acquire);
+    STRIPS.store(
+        Box::into_raw(Box::new(Strip {
+            path,
+            snapshot,
+            renderer: Renderer::new(),
+            next,
+        })),
+        Ordering::Release,
+    );
+}
+
+unsafe fn render_strip(generator: u32, params: u32, draw: impl FnOnce() -> u32) -> u32 {
+    let model_path = (params + MODEL_PATH_OFFSET) as *const u8;
+    let mut cur = STRIPS.load(Ordering::Acquire);
+    while let Some(strip) = unsafe { cur.as_ref() } {
+        let path = strip.path.to_bytes_with_nul();
+        if unsafe { core::slice::from_raw_parts(model_path, path.len()) } == path {
+            let mut sample = Sample::default();
+            let version = unsafe { (strip.snapshot)(&mut sample) };
+            return if version == 0 {
+                0
+            } else {
+                unsafe { strip.renderer.draw(generator, version, &sample, draw) }
+            };
+        }
+        cur = strip.next;
+    }
+    draw()
+}
+
 unsafe fn read<T: Copy>(address: u32, offset: u32) -> T {
     unsafe { ((address + offset) as *const T).read_unaligned() }
 }
@@ -15,8 +74,8 @@ unsafe fn draw_model(generator: u32, context: u32, gain: u32) -> u32 {
         let params: u32 = read(generator, 52);
         if params == 0
             || !matches!(
-                &read::<[u8; 19]>(params, 80),
-                b"effect\\frontier_gs\\" | b"effect\\frontier_db\\"
+                &read::<[u8; 19]>(params, MODEL_PATH_OFFSET),
+                b"effect\\frontier_gs\\" | b"effect\\frontier_db\\" | b"effect\\frontier_ls\\"
             )
         {
             return original!(generator, context, gain);
@@ -26,6 +85,7 @@ unsafe fn draw_model(generator: u32, context: u32, gain: u32) -> u32 {
         if depth > STATE_STACK_CAPACITY {
             return 0;
         }
+        let draw = || render_strip(generator, params, || original!(generator, context, gain));
         if depth == STATE_STACK_CAPACITY {
             // GU 87A7AC/87B778 copy the live bindings at +0xAC. Mirror
             // their full-state copy off-stack, leaving every outer slot
@@ -46,7 +106,7 @@ unsafe fn draw_model(generator: u32, context: u32, gain: u32) -> u32 {
             }
             let saved = snapshot.spare_capacity_mut().as_mut_ptr();
             core::ptr::copy_nonoverlapping(live, saved, length);
-            let result = original!(generator, context, gain);
+            let result = draw();
             core::ptr::copy_nonoverlapping(saved, live, length);
             return result;
         }
@@ -58,12 +118,42 @@ unsafe fn draw_model(generator: u32, context: u32, gain: u32) -> u32 {
             core::mem::transmute(base + 0x87a7ac);
         let restore_state: unsafe extern "C" fn(u32, u32) = core::mem::transmute(base + 0x87b778);
         save_state(context, FULL_STATE);
-        let result = original!(generator, context, gain);
+        let result = draw();
         restore_state(context, FULL_STATE);
         result
     }
 }
 
+static RELEASE_SERVICE: particle::ReleaseService = particle::ReleaseService(bind_release);
+
+extern "C" fn bind_release(id: u32, released: OnRelease) -> bool {
+    let Some(entry) = super::registered_entry(id) else {
+        return false;
+    };
+    entry
+        .particle_release
+        .store(released as u32, Ordering::Release);
+    true
+}
+
+#[forge::hook(offset = 0x32a104)]
+unsafe fn release_unit(unit: u32) -> u32 {
+    for entry in crate::runtime::registered_entries() {
+        let callback = entry.particle_release.load(Ordering::Acquire);
+        if callback != 0 {
+            let released: OnRelease = unsafe { core::mem::transmute(callback) };
+            released(unit);
+        }
+    }
+    original!(unit)
+}
+
 pub(super) fn install(base: u32) {
+    unsafe {
+        trail::publish(&SERVICE);
+    }
+    if unsafe { particle::publish_release(&RELEASE_SERVICE) } {
+        forge::install_hook!(base, release_unit);
+    }
     forge::install_hook!(base, draw_model);
 }

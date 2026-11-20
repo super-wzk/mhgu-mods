@@ -12,6 +12,8 @@ mod motion_bank;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub use motion_bank::MotionBanks;
 pub mod command;
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub mod melee;
 
 pub const GROUP: u16 = 16;
 pub const FIRST: u16 = 0x8000;
@@ -32,6 +34,65 @@ pub const fn custom_id(group: u16, slot: u16) -> Option<u8> {
     }
 }
 
+/// Timing of the hunter's currently playing motion layer.
+#[derive(Clone, Copy)]
+pub struct MotionFrame {
+    pub frame: f32,
+    pub end: f32,
+    pub restart: f32,
+    pub blend: f32,
+    pub ended: bool,
+}
+
+impl MotionFrame {
+    /// # Safety
+    /// The actor must be a live GU hunter.
+    #[cfg(all(target_arch = "arm", target_endian = "little"))]
+    pub unsafe fn sample(actor: u32) -> Self {
+        unsafe {
+            Self {
+                frame: ((actor + 1280) as *const f32).read(),
+                end: ((actor + 1284) as *const f32).read(),
+                restart: ((actor + 1288) as *const f32).read(),
+                blend: ((actor + 1268) as *const f32).read(),
+                ended: ((actor + 1206) as *const u8).read() & 4 != 0,
+            }
+        }
+    }
+
+    pub fn complete(self) -> bool {
+        self.ended || (self.end > 0. && self.frame >= self.end)
+    }
+}
+
+/// GU 11681DC tests the active skill and its compound-skill equivalents.
+#[derive(Clone, Copy)]
+pub enum ChargeSkill {
+    Normal,
+    Focus,
+    Slow,
+}
+
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+impl ChargeSkill {
+    /// # Safety
+    /// The actor must be a live hunter on the game thread.
+    pub unsafe fn equipped(actor: u32) -> Self {
+        let has: unsafe extern "C" fn(u32, u32) -> u32 =
+            unsafe { core::mem::transmute(crate::memory::entry(0x2864c4)) };
+        if [152, 266, 284, 293]
+            .into_iter()
+            .any(|id| unsafe { has(actor, id) } != 0)
+        {
+            Self::Focus
+        } else if unsafe { has(actor, 153) } != 0 {
+            Self::Slow
+        } else {
+            Self::Normal
+        }
+    }
+}
+
 /// Read the hunter's current action group and slot.
 ///
 /// # Safety
@@ -42,6 +103,20 @@ pub unsafe fn current(actor: u32) -> (u16, u16) {
         (
             ((actor + 9478) as *const u16).read(),
             ((actor + 9482) as *const u16).read(),
+        )
+    }
+}
+
+/// Read the previous native action from GU's transition history.
+///
+/// # Safety
+/// The actor must be a live GU hunter.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn previous(actor: u32) -> (u16, u16) {
+    unsafe {
+        (
+            ((actor + 9480) as *const u16).read(),
+            ((actor + 9484) as *const u16).read(),
         )
     }
 }
@@ -110,6 +185,27 @@ pub unsafe fn play_motion(actor: u32, request: u32, start: f32, blend: f32) -> O
             crate::memory::entry(0x53a06c),
         );
         (ok != 0).then(|| ((actor + 1204) as *const u16).read())
+    }
+}
+
+/// Restore the layer-end signal GU reads at 950BCC after both playheads
+/// have stopped at the last frame (951A80). The native action handles its exit.
+///
+/// # Safety
+/// The caller must verify the active action, phase and clip expect this signal.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn signal_stopped_motion(actor: u32) {
+    unsafe {
+        let flags = (actor + 1206) as *mut u8;
+        let end = *((actor + 1284) as *const f32);
+        if flags.read() & 4 == 0
+            && end > 0.
+            && *((actor + 28) as *const f32) > 0.
+            && *((actor + 1276) as *const f32) == end
+            && *((actor + 1280) as *const f32) == end
+        {
+            flags.write(flags.read() | 4);
+        }
     }
 }
 
@@ -197,6 +293,26 @@ impl Transition {
 pub unsafe fn transition_to(actor: u32, group: u16, slot: u16) -> bool {
     unsafe {
         transition(actor, Transition::accepted(group, slot)) && current(actor) == (group, slot)
+    }
+}
+
+/// Run GU's Hunter Art branch once the controller opens an activation window.
+///
+/// # Safety
+/// The actor must be the selected local hunter on the game thread.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn activate_hunter_art(actor: u32) -> bool {
+    unsafe {
+        // 2A8B34 checks queued slot 0..2 or commands 64..66. 285EE8
+        // reads the current command bank at +5172. Preserve custom readers.
+        if *((actor + 10068) as *const u32) == 3 && *((actor + 5180) as *const u32) & 7 == 0 {
+            let vtable = *(actor as *const *const usize);
+            if *vtable.add(744 / 4) == crate::memory::entry(0x285ee8) {
+                return false;
+            }
+        }
+        let previous = current(actor);
+        transition(actor, Transition::HUNTER_ART) && current(actor) != previous
     }
 }
 

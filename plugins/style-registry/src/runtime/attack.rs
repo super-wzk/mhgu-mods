@@ -2,7 +2,7 @@ use core::{
     ptr,
     sync::atomic::{AtomicPtr, Ordering},
 };
-use mhgu_sdk::style::action::{self, Attack};
+use mhgu_sdk::style::action::{self, Attack, melee::BLADE_CONTACT_OFFSETS};
 
 struct HitData {
     actor: u32,
@@ -27,7 +27,7 @@ pub(super) unsafe extern "C" fn submit(actor: u32, attack: *const Attack) -> u32
         let Some(attack) = attack.as_ref() else {
             return 0;
         };
-        let Some(style) = super::local_style(actor) else {
+        let Some(style) = super::playback_style(actor) else {
             return 0;
         };
         let (group, slot) = action::current(actor);
@@ -73,9 +73,13 @@ pub(super) unsafe extern "C" fn submit(actor: u32, attack: *const Attack) -> u32
             hit_shape.write(attack.shape);
         }
         let previous = HIT_DATA.swap(ptr::from_mut(&mut data), Ordering::AcqRel);
-        let hit = actor + 12320 + 184 * u32::from(attack.flags & Attack::SECONDARY != 0);
-        let mut flags =
-            attack.flags & !(Attack::SECONDARY | Attack::NO_MOUNT | Attack::NO_ATTACKER_HITSTOP);
+        let hand = usize::from(attack.flags & Attack::SECONDARY != 0);
+        let hit = actor + BLADE_CONTACT_OFFSETS[hand];
+        let mut flags = attack.flags
+            & !(Attack::DEFLECTABLE
+                | Attack::SECONDARY
+                | Attack::NO_MOUNT
+                | Attack::NO_ATTACKER_HITSTOP);
         if ((actor + 10057) as *const u8).read() & 8 != 0 {
             flags |= 0x10;
         }
@@ -102,6 +106,9 @@ pub(super) unsafe extern "C" fn submit(actor: u32, attack: *const Attack) -> u32
                 adjust(actor, hit, 1, index, flags);
             }
         });
+        let serial = (attack.flags & Attack::DEFLECTABLE != 0)
+            .then(|| super::deflection::contact_serial(hit));
+        super::deflection::submitted(actor, slot, hand, serial);
         1
     }
 }
