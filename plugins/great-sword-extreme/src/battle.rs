@@ -44,7 +44,7 @@ const fn roll_commands(slash: u8, accept_until: i16) -> [BufferedCommand; 2] {
     let uppercut = BufferedCommand {
         group: action::GROUP,
         slot: action::slot(53),
-        input: CommandInput::Weapon(1),
+        input: CommandInput::AttackChord(1),
         accept_from: 30,
         execute_from: 44,
         accept_until,
@@ -53,17 +53,20 @@ const fn roll_commands(slash: u8, accept_until: i16) -> [BufferedCommand; 2] {
         uppercut,
         BufferedCommand {
             slot: action::slot(slash),
-            input: CommandInput::Weapon(5),
+            input: CommandInput::WeaponAfterCombo(5),
             ..uppercut
         },
     ]
 }
 
-static FORWARD_ROLL: CommandSet = CommandSet::new(&roll_commands(26, 54));
-static LEFT_ROLL: CommandSet = CommandSet::new(&roll_commands(26, 64));
-static RIGHT_ROLL: CommandSet = CommandSet::new(&roll_commands(27, 64));
+// GU table 2011 tries 16:41 before these rows when a staggered chord also sets weapon 12.
+static FORWARD_ROLL: CommandSet = CommandSet::new(&roll_commands(26, 54)).replacing_weapon(41);
+static LEFT_ROLL: CommandSet = CommandSet::new(&roll_commands(26, 64)).replacing_weapon(41);
+static RIGHT_ROLL: CommandSet = CommandSet::new(&roll_commands(27, 64)).replacing_weapon(41);
 // The retail drawn GS table has three ledge routes with drawn animations.
 static DASH_TERRAIN: CommandSet = CommandSet::new(&[]).retaining_native(1, movement::CLIMBS);
+// GU table 2010 contains an immediate 1:6 roll and a stock guard attack.
+// Keep its Hunter Art command and use the Frontier window for B.
 static GUARD_RECOVERY: CommandSet = CommandSet::new(&[BufferedCommand {
     group: 1,
     slot: 6,
@@ -71,7 +74,8 @@ static GUARD_RECOVERY: CommandSet = CommandSet::new(&[BufferedCommand {
     accept_from: GUARD_CANCEL_FRAME,
     execute_from: GUARD_CANCEL_FRAME,
     accept_until: MAX_COMMAND_FRAME,
-}]);
+}])
+.retaining_native(0x8010, &[241]);
 
 // GU's 2008 landing table gives the jump slash a 54..158 combo window.
 const JUMP_FINISHER: BufferedCommand = BufferedCommand {
@@ -123,6 +127,11 @@ fn charge_state(state: u8) -> bool {
 fn charge_cap(state: u8) -> u8 {
     if matches!(state, 47..=53 | 70) { 4 } else { 3 }
 }
+
+fn charge_animation_rate(cap: u8) -> f32 {
+    if cap == 3 { 0.5 } else { 1. }
+}
+
 unsafe fn read<T: Copy>(p: u32, n: u32) -> T {
     unsafe { ((p + n) as *const T).read_unaligned() }
 }
@@ -197,10 +206,17 @@ struct Battle {
     sustain_poise: bool,
 }
 impl Battle {
-    fn charge_level(&mut self, was_charging: bool, motion_delta: f32, cap: u8) -> u8 {
+    fn charge_level(&mut self, was_charging: bool, delta: f32, cap: u8, wrapped: bool) -> u8 {
         // A newly armed charge already counted the trigger tick in event 30.
         if was_charging {
-            self.charge += motion_delta * 0.5;
+            // The wrap fallback already uses GU elapsed time. Otherwise undo
+            // the vertical charge's animation multiplier before counting FZ ticks.
+            let rate = if wrapped {
+                1.
+            } else {
+                charge_animation_rate(cap)
+            };
+            self.charge += delta * 0.5 / rate;
         }
         ((self.charge / self.charge_interval) as u8)
             .saturating_sub(1)
@@ -435,6 +451,10 @@ impl Battle {
                         self.charging = true;
                         // 811D84FE increments +2852 on the tick that event 30 arms it.
                         self.charge = 1. + late * 0.5;
+                        let rate = charge_animation_rate(charge_cap(self.cursor.state));
+                        if rate != 1. {
+                            action::set_motion_rate(p, rate);
+                        }
                     }
                     31 => {
                         crate::sound::play(p, false, if self.guard < 2 { 2 } else { 3 });
@@ -580,7 +600,7 @@ impl Battle {
             }
             if self.charging && delta > 0. {
                 let old = self.level;
-                self.level = self.charge_level(was_charging, delta, cap);
+                self.level = self.charge_level(was_charging, delta, cap, wrapped);
                 if self.level > old && self.level == 4 {
                     fx::emit(p, 0, Some(8));
                     crate::sound::play(p, true, 210);

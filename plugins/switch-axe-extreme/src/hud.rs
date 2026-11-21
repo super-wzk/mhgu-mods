@@ -8,6 +8,12 @@ const fn plate(id: u32) -> GaugePlate {
 }
 static PLATES: [GaugePlate; 2] = [plate(BASE), plate(BASE + 1)];
 
+pub(super) unsafe fn preload() {
+    for plate in &PLATES {
+        unsafe { plate.preload() };
+    }
+}
+
 fn pointer(value: u32) -> Option<u32> {
     (value != 0 && value & 3 == 0).then_some(value)
 }

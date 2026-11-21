@@ -53,6 +53,13 @@ impl GaugePlate {
         self
     }
 
+    /// Prepare the texture and descriptor before the first HUD update.
+    /// # Safety
+    /// Call on the game thread while the resource manager is active.
+    pub unsafe fn preload(&self) {
+        unsafe { self.atlas() };
+    }
+
     unsafe fn atlas(&self) -> Option<u32> {
         let cached = self.atlas.load(Ordering::Acquire);
         if cached != 0 {
@@ -112,14 +119,14 @@ impl GaugePlate {
             if sprite == 0 {
                 return;
             }
-            self.show_sprite(sprite,frame,self.stock);
+            self.show_sprite(sprite, frame, self.stock);
         }
     }
 
     /// Apply a private cell to a known weapon sprite, or restore its captured native crop.
     /// # Safety
     /// The sprite must be live on the GUI thread and owned by this gauge.
-    pub unsafe fn show_sprite(&self,sprite:u32,frame:Option<u32>,stock:[f32;4]){
+    pub unsafe fn show_sprite(&self, sprite: u32, frame: Option<u32>, stock: [f32; 4]) {
         unsafe {
             let id = read::<u32>(sprite, 256);
             let rect = if let Some(frame) = frame {

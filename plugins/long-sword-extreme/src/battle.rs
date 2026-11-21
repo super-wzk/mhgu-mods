@@ -3,8 +3,8 @@ use crate::{
     collision, discharge, fx, instant, motion, native,
     peer::{LOCAL, Slot},
     program::{
-        self, BRAKE, CMD_A, CMD_EVADE_BACK, CMD_EVADE_LEFT, CMD_EVADE_RIGHT, CMD_EVADE_SLASH,
-        CMD_PARRY, CMD_RELEASE, CMD_SPRINT, CMD_STEP_X, CMD_X, SPRINT,
+        self, BRAKE, CMD_A, CMD_DISCHARGE, CMD_EVADE_BACK, CMD_EVADE_LEFT, CMD_EVADE_RIGHT,
+        CMD_EVADE_SLASH, CMD_PARRY, CMD_RELEASE, CMD_SPIRIT, CMD_SPRINT, CMD_STEP_X, CMD_X, SPRINT,
     },
     read, release, sound, write,
 };
@@ -17,42 +17,27 @@ use core::{
 };
 use mhfz_sdk::{
     action::Cursor,
-    combat::HitWindow,
+    combat::{HitWindow, evade_bonus_frames},
     sound::Clock,
     sprint::{self, Flick, Resume, STICK_DEADZONE},
 };
-use mhgu_sdk::combat::collision::HitShape;
 use mhgu_sdk::style::{
     ActionRequest, Input, NATIVE_ACTION, PASS,
     action::{
         self, Attack,
-        command::{BufferedCommand, CommandInput, CommandSet, MAX_COMMAND_FRAME},
+        command::CommandSet,
         melee::{BLADE_CONTACT_OFFSETS, take_deflection},
     },
     guard,
+    input::attack_chord_with_shoulder,
     movement::{self, CLIMBS, stamina},
 };
 
-static SPRINT_TERRAIN: CommandSet = CommandSet::new(&[]).retaining_native(1, CLIMBS);
+static TERRAIN_COMMANDS: CommandSet = CommandSet::new(&[]).retaining_native(1, CLIMBS);
 const BLADE_CONTACT: u32 = BLADE_CONTACT_OFFSETS[0];
 // 811FA9FE uses the same gates for the forward and both lateral rolls.
-const ROLL_X: BufferedCommand = BufferedCommand {
-    group: action::GROUP,
-    slot: action::slot(0),
-    input: CommandInput::Weapon(0),
-    accept_from: 6,
-    execute_from: 36,
-    accept_until: MAX_COMMAND_FRAME,
-};
-static ROLL_ATTACKS: CommandSet = CommandSet::new(&[
-    ROLL_X,
-    BufferedCommand {
-        slot: action::slot(20),
-        input: CommandInput::Weapon(2),
-        ..ROLL_X
-    },
-])
-.retaining_native(1, CLIMBS);
+const ROLL_INPUT_FRAME: f32 = 6.;
+const ROLL_EXECUTE_FRAME: f32 = 36.;
 
 static OWNER: AtomicU32 = AtomicU32::new(0);
 static CUT: AtomicU32 = AtomicU32::new(0);
@@ -65,9 +50,9 @@ static STRIKE: AtomicU32 = AtomicU32::new(0);
 pub(super) unsafe extern "C" fn bind_commands(actor: u32, table: u32) -> *const CommandSet {
     let (group, slot) = unsafe { action::current(actor) };
     if table == 2000 && matches!(action::custom_id(group, slot), Some(SPRINT | 71 | 82)) {
-        &SPRINT_TERRAIN
+        &TERRAIN_COMMANDS
     } else if (group, slot, table) == (1, 6, 2023) && unsafe { native!(0x2a2444, actor) } != 0 {
-        &ROLL_ATTACKS
+        &TERRAIN_COMMANDS
     } else {
         core::ptr::null()
     }
@@ -110,6 +95,7 @@ fn add_cut(gain: u32) {
         CUT_FLASH.store(60f32.to_bits(), Relaxed);
     }
 }
+
 #[derive(Default)]
 pub(super) struct Battle {
     slot: Slot,
@@ -155,20 +141,6 @@ fn side(yaw: i16) -> i16 {
 
 fn discharge_state(spirit: i32, chain: u16) -> u8 {
     54 + 3 * chain as u8 + u8::from(spirit >= 75) + u8::from(spirit >= 100)
-}
-
-unsafe fn turn(actor: u32, offset: u16) {
-    unsafe {
-        let yaw = read::<u16>(actor, 4076).wrapping_add(offset);
-        face(actor, yaw);
-    }
-}
-
-unsafe fn face(actor: u32, yaw: u16) {
-    unsafe {
-        write(actor, 4076, u32::from(yaw));
-        write(actor, 5280, u32::from(yaw));
-    }
 }
 
 unsafe fn relative(actor: u32, input: &Input) -> i16 {
@@ -238,8 +210,10 @@ impl Battle {
             if self.sprint_buffer > 0. && read::<f32>(actor, 5088) > 0. {
                 bits |= 1 << CMD_SPRINT;
             }
-            // GU w07 1199114 resolves X, A and the X+A chord into distinct weapon commands.
-            if input.weapon_command(1) {
+            // GU w07 1199114 maps X+A but omits 27CA28's shoulder chord.
+            let shoulder_chord = attack_chord_with_shoulder(actor);
+            let chord = input.weapon_command(1) || shoulder_chord;
+            if chord {
                 bits |= 1 << CMD_EVADE_SLASH;
                 if yaw.unsigned_abs() > 0x6000 {
                     bits |= 1 << CMD_EVADE_BACK;
@@ -265,21 +239,27 @@ impl Battle {
                     bits |= 1 << 13;
                 }
             }
-            if input.weapon_command(0) || input.weapon_command(1) || input.weapon_command(2) {
+            if input.weapon_command(0) || chord || input.weapon_command(2) {
                 bits |= 1 << 20;
             }
-            if input.command(70) {
+            if shoulder_chord {
+                self.spirit_hold = None;
+            } else if input.command(70) {
                 self.spirit_hold = Some(0.);
             }
             if let Some(held) = self.spirit_hold.as_mut() {
                 if input.command(27) {
                     *held += dt;
                     if *held >= 28. {
-                        bits |= 1 << if spirit(actor) >= 50 { 15 } else { 14 };
+                        let (group, slot) = action::current(actor);
+                        // 811F1A4A falls back to Spirit when the move has no discharge row.
+                        let discharge = spirit(actor) >= 50
+                            && action::custom_id(group, slot).is_none_or(program::allows_discharge);
+                        bits |= 1 << if discharge { CMD_DISCHARGE } else { CMD_SPIRIT };
                         self.spirit_hold = None;
                     }
                 } else {
-                    bits |= 1 << 14;
+                    bits |= 1 << CMD_SPIRIT;
                     self.spirit_hold = None;
                 }
             }
@@ -300,6 +280,8 @@ impl Battle {
         self.dash_charge_effect = None;
         self.dash_slash = None;
         self.stab_fx = None;
+        self.ground_clock = 0.;
+        self.ground_sound_frames = 30.;
     }
 
     fn clear_action(&mut self) {
@@ -327,6 +309,10 @@ impl Battle {
     }
 
     unsafe fn begin(&mut self, actor: u32, state: u8) -> bool {
+        unsafe { self.begin_facing(actor, state, None) }
+    }
+
+    unsafe fn begin_facing(&mut self, actor: u32, state: u8, facing: Option<u16>) -> bool {
         unsafe {
             if !program::ACTIONS.contains(state) {
                 return false;
@@ -342,11 +328,11 @@ impl Battle {
             } else {
                 0
             };
-            if !(action::current(actor) == (action::GROUP, action::slot(state))
-                && read::<u8>(actor, 5) == 0)
-                && !action::transition_to(actor, action::GROUP, action::slot(state))
-            {
+            if !action::accept_custom_start(actor, state) {
                 return false;
+            }
+            if let Some(yaw) = facing {
+                movement::set_facing(actor, yaw);
             }
             if (54..=65).contains(&state) {
                 // 811F2206 applies one signed 1/16-turn to the pre-transition facing.
@@ -373,7 +359,6 @@ impl Battle {
             } else {
                 1
             };
-            self.ground_sound_frames = 0.;
             if matches!(state, 47 | 71 | 82) {
                 let skill = action::ChargeSkill::equipped(actor);
                 self.charge_limit = if state == 47 {
@@ -399,7 +384,7 @@ impl Battle {
                 native!(0x283238, actor, 0, 0x1180, 0);
                 native!(0x2e9b7c, actor, 2000, 0);
                 native!(0x2a25a8, actor, 1);
-                face(actor, aim(actor));
+                movement::set_facing(actor, aim(actor));
                 self.sprint_buffer = 0.;
                 self.spirit_hold = None;
             }
@@ -445,7 +430,7 @@ impl Battle {
                         0
                     };
                     if self.begin(actor, next) && heading != 0 {
-                        turn(actor, (heading * -8192) as u16);
+                        movement::turn(actor, (heading * -8192) as u16);
                     }
                     return;
                 } else if matches!(step.op, 3..=5)
@@ -464,7 +449,7 @@ impl Battle {
                     self.pending_blade = None;
                     self.motion_fx.seek(step.clip, f32::from(step.start));
                     if (54..=65).contains(&c.state) {
-                        face(actor, self.discharge_yaw);
+                        movement::set_facing(actor, self.discharge_yaw);
                     }
                     if step.clip == 1437 {
                         self.discharge_frame = -1.;
@@ -513,25 +498,19 @@ impl Battle {
                     2 => {
                         native!(0x2a2560, actor, u32::from(param != 0));
                     }
-                    3 => turn(actor, param),
+                    3 => movement::turn(actor, param),
                     4 => {
                         self.poise = false;
                         write(actor, 10288, frames);
                     }
                     5 => self.poise = true,
-                    6..=8 => {
-                        let extra = match native!(0x2a69dc, actor) as i32 {
-                            2.. => 10.,
-                            1 => 6.,
-                            _ => 0.,
-                        };
-                        let inv = match kind {
-                            6 => frames,
-                            7 => frames + extra,
-                            _ => (14. + extra - late).max(0.),
-                        };
-                        write(actor, 11072, inv);
-                    }
+                    6 => write(actor, 11072, frames),
+                    7 => write(actor, 11072, frames + evade_bonus_frames(actor)),
+                    8 => write(
+                        actor,
+                        11072,
+                        (14. + evade_bonus_frames(actor) - late).max(0.),
+                    ),
                     10 => {
                         let active = match param {
                             3 => true,
@@ -557,9 +536,10 @@ impl Battle {
                         };
                         change_spirit(actor, -cost);
                     }
-                    // The vertical slash and thrust arm the blade on clip entry,
-                    // including when the clip starts partway through its motion.
-                    17 if matches!(param, 57 | 75) => self.pending_blade = Some(param),
+                    // Vertical slash, thrust and both Spirit I rows are queued
+                    // on clip entry. Wait for the authored frame because GU's
+                    // collision clock can advance faster than the hunter's clip.
+                    17 if matches!(param, 57 | 69 | 75 | 79) => self.pending_blade = Some(param),
                     17 => strike(self.slot, actor, param, c.time.frame, late),
                     // 817C426E's extra dodge and the +996 attack modifier
                     // require Frontier equipment effects (816D6482/816D699A).
@@ -634,18 +614,17 @@ impl Battle {
                 102 => 70,
                 107..=110 => discharge_state(gauge, id - 107),
                 111 => program::release(cut(actor)),
-                112 => {
-                    turn(actor, (yaw as u16).wrapping_neg());
-                    77
-                }
+                112 => instant::ACTION,
                 113 => 78,
                 _ => return false,
             };
-            let accepted = self.begin(actor, to);
-            if accepted && matches!(id, 87..=102 | 113) {
-                turn(actor, (side(yaw) * -4096) as u16);
-            }
-            accepted
+            let offset = match id {
+                112 => (yaw as u16).wrapping_neg(),
+                87..=102 | 113 => (side(yaw) * -4096) as u16,
+                _ => 0,
+            };
+            let facing = (offset != 0).then(|| read::<u16>(actor, 4076).wrapping_add(offset));
+            self.begin_facing(actor, to, facing)
         }
     }
 
@@ -668,7 +647,7 @@ impl Battle {
     unsafe fn discharge_hits(&mut self, actor: u32, state: u8, clip: u16, frame: f32) {
         unsafe {
             if (54..=65).contains(&state) && clip == 1437 {
-                face(actor, self.discharge_yaw);
+                movement::set_facing(actor, self.discharge_yaw);
                 let last = self.discharge_frame;
                 self.discharge_frame = last.max(frame);
                 if last < 122. && frame >= 122. {
@@ -748,6 +727,22 @@ impl Battle {
                         .pulse(actor, state >= 51, index);
                 }
             }
+        }
+    }
+
+    unsafe fn dash_ground(&mut self, actor: u32, state: u8, sample: action::MotionFrame, dt: f32) {
+        if !matches!(state, 71 | 82) || dt <= 0. {
+            return;
+        }
+        self.ground_clock = (self.ground_clock + dt) % 4.;
+        self.ground_sound_frames += dt;
+        let charged = state == 71 && self.charge >= self.charge_limit;
+        // The uncharged phase requires the clip to pass frame 28 outside a blend.
+        if (charged || (sample.blend <= 0. && sample.frame >= 28.))
+            && self.ground_clock < dt
+            && unsafe { fx::dash_ground(actor, charged, self.ground_sound_frames > 30.) }
+        {
+            self.ground_sound_frames = 0.;
         }
     }
 
@@ -834,8 +829,10 @@ impl Battle {
             let frame = sample.frame;
             let last = c.time.frame;
             let wrapped = c.time.observe(frame, sample.blend);
+            let dt = read::<f32>(actor, 28).max(0.);
+            self.dash_ground(actor, state, sample, dt);
             if state == 71 {
-                self.charge += read::<f32>(actor, 28).max(0.);
+                self.charge += dt;
             }
             sound::update(&mut self.audio, actor, Some(step.clip), frame, None);
             self.events(actor);
@@ -884,7 +881,7 @@ impl Battle {
                 let start = if state >= 51 { 12. } else { 0. };
                 let ticks = |f: f32| ((f - start).clamp(0., 8.) * 512.) as u16;
                 let angle = ticks(frame).saturating_sub(ticks(last));
-                turn(
+                movement::turn(
                     actor,
                     if matches!(state, 48 | 51) {
                         angle
@@ -917,6 +914,7 @@ impl Battle {
                 9 => cut(actor) > 0,
                 _ => false,
             };
+            self.dash_ground(actor, state, sample, dt);
             let c = self.cursor.as_mut().unwrap();
             if (state == SPRINT || c.art_window(eligible)) && self.activate_art(actor) {
                 return true;
@@ -970,7 +968,8 @@ impl Battle {
                     return action::transition_to(actor, 1, 2);
                 }
                 if bits & (1 << 1) != 0 {
-                    return self.evade(actor, relative(actor, input) as u16);
+                    // The w07 sprint dispatcher (811FA7A2) selects the common forward roll.
+                    return self.evade(actor, 0);
                 }
             }
             if is_sprinting(state) {
@@ -1001,17 +1000,6 @@ impl Battle {
             if !self.thrust_released {
                 self.charge += dt;
             }
-            if matches!(state, 71 | 82) {
-                let charged = state == 71 && self.charge >= self.charge_limit;
-                self.ground_sound_frames += dt;
-                if (charged || frame >= 28.)
-                    && self.ground_clock < dt
-                    && dt > 0.
-                    && fx::dash_ground(actor, charged, self.ground_sound_frames >= 32.)
-                {
-                    self.ground_sound_frames = 0.;
-                }
-            }
             self.blade_effects(actor, state, last, frame);
             self.dash_hit(actor, last, frame);
             if !self.advance_step(actor, step, sample, wrapped)
@@ -1027,18 +1015,32 @@ impl Battle {
         }
     }
 
-    unsafe fn after_roll(&mut self, actor: u32, bits: u32) -> bool {
+    unsafe fn after_roll(&mut self, actor: u32, input: &Input, bits: u32) -> bool {
         unsafe {
             let frame = read::<f32>(actor, 1280);
-            let can_execute = frame >= f32::from(ROLL_X.execute_from);
-            if self.roll_command.is_none() && frame >= f32::from(ROLL_X.accept_from) {
+            let can_execute = frame >= ROLL_EXECUTE_FRAME;
+            if self.roll_command.is_none() && frame >= ROLL_INPUT_FRAME {
+                // All follow-ups share the first accepted input (FZ 811FA9FE).
                 self.roll_command = [CMD_SPRINT, CMD_X, CMD_A, CMD_PARRY, CMD_RELEASE]
                     .into_iter()
-                    .find(|&cmd| bits & (1 << cmd) != 0 && (cmd != CMD_PARRY || can_execute));
+                    .find(|&cmd| {
+                        bits & (1 << cmd) != 0
+                            && match cmd {
+                                CMD_PARRY => can_execute,
+                                CMD_RELEASE => cut(actor) > 0,
+                                _ => true,
+                            }
+                    });
             }
             if can_execute {
                 match self.roll_command {
                     Some(CMD_SPRINT) => return self.begin(actor, SPRINT),
+                    Some(cmd @ (CMD_X | CMD_A)) => {
+                        let offset = side(relative(actor, input)) * -4096;
+                        let facing = read::<u16>(actor, 4076).wrapping_add_signed(offset);
+                        let state = if cmd == CMD_X { 0 } else { 20 };
+                        return self.begin_facing(actor, state, Some(facing));
+                    }
                     Some(CMD_PARRY) => return self.begin(actor, 78),
                     Some(CMD_RELEASE) if cut(actor) > 0 => {
                         return self.begin(actor, program::release(cut(actor)));
@@ -1046,7 +1048,7 @@ impl Battle {
                     _ => {}
                 }
             }
-            // GU handles movement, terrain and the bound X/A branches.
+            // GU handles movement and terrain.
             false
         }
     }
@@ -1059,13 +1061,16 @@ impl Battle {
             HUD_CLOCK.store(clock.to_bits(), Relaxed);
             let flash = (f32::from_bits(CUT_FLASH.load(Relaxed)) - dt).max(0.);
             CUT_FLASH.store(flash.to_bits(), Relaxed);
-            self.ground_clock = (self.ground_clock + dt) % 4.;
             let left = (f32::from_bits(FULL_TIME.load(Relaxed)) - dt).max(0.);
             FULL_TIME.store(left.to_bits(), Relaxed);
             self.trail.tick(actor, dt);
             let current = action::current(actor);
-            if current != (1, 6) {
+            let rolling = current == (1, 6);
+            let roll_active = rolling && read::<u8>(actor, 5) != 0;
+            if !rolling {
                 motion::ROLL.clear();
+            }
+            if !roll_active {
                 self.roll_command = None;
             }
             let custom = action::custom_id(current.0, current.1);
@@ -1127,9 +1132,6 @@ impl Battle {
                 {
                     return self.advance(actor, input, bits, dt);
                 }
-                if matches!(state, 0 | 20) && action::previous(actor) == (1, 6) {
-                    turn(actor, (side(relative(actor, input)) * -4096) as u16);
-                }
                 return self.begin(actor, state);
             }
             let was_sprinting = self.cursor.as_ref().is_some_and(|c| is_sprinting(c.state));
@@ -1151,8 +1153,8 @@ impl Battle {
             } else {
                 self.motion_fx.seek(0, 0.);
             }
-            if current == (1, 6) && drawn && read::<u8>(actor, 5) != 0 {
-                return self.after_roll(actor, bits);
+            if roll_active && drawn {
+                return self.after_roll(actor, input, bits);
             }
             if matches!(current, (64, 6 | 7))
                 && read::<u8>(actor, 5) == 2
@@ -1191,9 +1193,9 @@ impl Battle {
                 program::release(cut(actor))
             } else if bits & (1 << CMD_SPRINT) != 0 {
                 SPRINT
-            } else if bits & (1 << 15) != 0 {
+            } else if bits & (1 << CMD_DISCHARGE) != 0 {
                 discharge_state(gauge, 0)
-            } else if bits & (1 << 14) != 0 {
+            } else if bits & (1 << CMD_SPIRIT) != 0 {
                 if gauge >= 15 { 7 } else { 18 }
             } else if bits & (1 << CMD_EVADE_SLASH) != 0 && enough_evade(actor) {
                 32
@@ -1233,13 +1235,13 @@ unsafe fn strike(slot: Slot, actor: u32, id: u16, frame: f32, late: f32) {
         else {
             return;
         };
-        let path = match row.shape {
-            0 => cr"player\hit\frontier_ls\blade_0",
-            32 => cr"player\hit\frontier_ls\blade_32",
-            33 => cr"player\hit\frontier_ls\blade_33",
+        let shape = match row.shape {
+            0 => &collision::BLADES[0],
+            32 => &collision::BLADES[1],
+            33 => &collision::BLADES[2],
             _ => return,
         };
-        let Some(shape) = HitShape::load(path) else {
+        let Some(shape) = shape.load() else {
             return;
         };
         if shape.rows_in_first_group(3).is_none() {

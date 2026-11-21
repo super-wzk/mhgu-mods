@@ -8,6 +8,10 @@ const FLIP_Y: u32 = 1 << 22;
 static PLATE: GaugePlate = GaugePlate::new(ID, c"GUI\\frontier_ls\\gauge", [368., 32., 496., 56.])
     .with_cells(16, [192, 32]);
 
+pub(super) unsafe fn preload() {
+    unsafe { PLATE.preload() };
+}
+
 fn frame(cut: u32, tick: u32, flash: u32) -> u32 {
     if cut < crate::program::CUT_MAX {
         return 60 * cut / crate::program::CUT_MAX;

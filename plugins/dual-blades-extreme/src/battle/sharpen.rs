@@ -1,7 +1,10 @@
 //! Frontier blade-polish stacks and their bonus at GU's melee physical-attack lookup.
 use super::{OWNER, Relaxed};
 use core::sync::atomic::AtomicU32;
-use mhgu_sdk::style::physical::{self, Rule, Scope};
+use mhgu_sdk::style::{
+    action::melee,
+    physical::{self, Rule, Scope},
+};
 
 static LEVEL: [AtomicU32; 5] = [const { AtomicU32::new(0) }; 5];
 
@@ -36,15 +39,24 @@ impl Polish {
         self.held = 0.;
     }
 
-    pub fn tick(&mut self, elapsed: f32, drawn: bool, in_attack_chain: bool) {
-        let was_active = self.active();
+    pub unsafe fn tick(&mut self, actor: u32, elapsed: f32, drawn: bool, in_attack_chain: bool) {
+        // 81820BD4 skips the entire blade-polish update during hitstop.
+        if unsafe { melee::hitstop_active(actor) } {
+            return;
+        }
         if drawn {
-            self.remaining = (self.remaining - elapsed).max(self.held);
+            let next = (self.remaining - elapsed).max(self.held);
+            self.remaining = if next == 0. && self.active() && in_attack_chain {
+                // 8182000E restores one FZ tick when the timer expires in a weapon action.
+                2.
+            } else {
+                next
+            };
         } else {
             self.held = 0.;
             self.remaining = 0.;
         }
-        if self.stacks != 0 && (!drawn || !in_attack_chain || (was_active && !self.active())) {
+        if self.stacks != 0 && (!drawn || !in_attack_chain) {
             self.stacks = 0;
             LEVEL[self.slot].store(0, Relaxed);
         }

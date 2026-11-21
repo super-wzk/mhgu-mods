@@ -1,11 +1,11 @@
-"""Check that native hunt setup caches first-draw resources for all four styles."""
+"""Check that native hunt setup caches the selected style's attack resources."""
 
 import struct
 
-from verify_style import ENCODE, INIT_HUNTER, SUBMIT_MODEL, boot, hunters, load_registered_style, setup_controller
+from verify_style import ENCODE, INIT_HUNTER, SUBMIT_MODEL, api_for, boot, hunters, load_registered_style, setup_controller
 
 
-def replay_style(repo, name, weapon_id, style, hunter_vtable, clip, tag, audio, particles):
+def replay_style(repo, name, weapon_id, style, hunter_vtable, clip, tag, audio, shapes):
     config = f"[Weapons]\n{weapon_id}={style}\n".encode()
     g = boot((repo / "mhgu/main.elf").read_bytes(), config, ("registry",))
     plugin = name + "-extreme"
@@ -27,7 +27,10 @@ def replay_style(repo, name, weapon_id, style, hunter_vtable, clip, tag, audio, 
     paths = []
     resources = {}
     native_calls = []
-    extensions = {0x2125210: ".lmt", 0x2125BEC: ".srqr", 0x1889FDC: ".pel"}
+    extensions = {
+        0x2125210: ".lmt", 0x2125BEC: ".srqr", 0x1889FDC: ".pel",
+        0x1857810: ".hts", 0x21255D0: ".tex",
+    }
 
     def load(_, kind, path, flags):
         assert flags == 1
@@ -48,6 +51,11 @@ def replay_style(repo, name, weapon_id, style, hunter_vtable, clip, tag, audio, 
             g.cpu.mem_write(rows, requests)
             g.put(resource + 104, count)
             g.put(resource + 108, rows)
+        elif kind == 0x21255D0:
+            resource = g.alloc(228)
+            g.put(resource + 80, 1)
+            g.put(resource + 220, 128 if weapon_id == 11 else 3072)
+            g.put(resource + 224, 1024)
         paths.append(relative)
         resources[relative] = resource
         return resource
@@ -75,41 +83,72 @@ def replay_style(repo, name, weapon_id, style, hunter_vtable, clip, tag, audio, 
     prefix = f"player/mot/frontier_{tag}"
     male, female = f"{prefix}/m_4.lmt", f"{prefix}/f_4.lmt"
     sounds = [f"sound/se/pl/frontier_{tag}/{bank}.srqr" for bank in audio]
-    expected = [f"{prefix}/m_0.lmt", male, *sounds]
-    if particles:
-        expected.append(f"effect/frontier_{tag}/particles.pel")
-    assert paths == expected and not queued, (paths, queued)
+    expected = {
+        f"{prefix}/m_0.lmt", f"{prefix}/m_2.lmt", male, *sounds,
+        f"effect/frontier_{tag}/particles.pel",
+        *(f"player/hit/frontier_{tag}/{shape}.hts" for shape in shapes),
+    }
+    if weapon_id != 0:
+        expected.add(f"GUI/frontier_{tag}/gauge.tex")
+    assert set(paths) == expected and not queued, (expected - set(paths), paths, queued)
+    prepared = list(paths)
     assert bytes(g.cpu.mem_read(banks, 8 * 4)) == before
 
     assert g.run(g.hooks[ENCODE], actor, 0x10000 | clip) == 0xE00 | (clip % 100)
     assert g.get(banks + 6 * 4) == resources[male]
+    strikes = []
+    attack = g.get(api_for(g, b"mhgu::StyleRegistryV1", b"SRG1") + 8)
+    g.stub(attack, lambda _, data, *__: strikes.append(g.get(data + 16)) or 1)
+    g.cpu.mem_write(actor + 5078, struct.pack("<h", 100))
+
+    def frame(value, end=False):
+        g.cpu.mem_write(actor + 1280, struct.pack("<f", value))
+        g.cpu.mem_write(actor + 1206, bytes([4 if end else 0]))
+        g.run(tick, actor, inputs)
+
     if weapon_id == 8:
         set_action(16, 0x8000 + 10)
-        for frame in (0, 4, 6):
-            g.cpu.mem_write(actor + 1280, struct.pack("<f", frame))
-            g.run(tick, actor, inputs)
+        for sample in (0, 4, 6):
+            frame(sample)
         assert g.half(actor + 1204) == clip
         assert queued == [(resources[sounds[0]], 4098), (resources[sounds[1]], 4100)]
-    assert paths == expected
+        frame(37, end=True)
+        frame(40)
+        assert strikes == [resources["player/hit/frontier_sa/hit_106_0.hts"]]
+    elif weapon_id == 11:
+        set_action(16, 0x8000 + 16)
+        for sample in (0, 2, 8):
+            frame(sample)
+        assert g.half(actor + 1204) == clip
+        assert queued == [(resources[sounds[2]], 4102), (resources[sounds[2]], 4097)]
+        frame(27, end=True)
+        frame(28)
+        frame(36)
+        assert g.half(actor + 1204) == 1404
+        assert strikes == [0, 0]  # Both hits use GU's equipped weapon collision.
+    assert paths == prepared
 
     # Reinitializing reuses the same resources. A different model sex loads
     # its own motion only, and first playback binds it to a free slot.
     g.run(init, actor)
-    assert paths == expected
+    assert paths == prepared
     g.cpu.mem_write(equipped + 1240, b"\x01")
     g.run(init, actor)
-    expected += [f"{prefix}/f_0.lmt", female]
-    assert paths == expected
+    assert set(paths[len(prepared):]) == {f"{prefix}/f_0.lmt", f"{prefix}/f_2.lmt", female}
+    prepared = list(paths)
     assert g.run(g.hooks[ENCODE], actor, 0x10000 | clip) == 0xD00 | (clip % 100)
-    assert g.get(banks + 5 * 4) == resources[female] and paths == expected
+    assert g.get(banks + 5 * 4) == resources[female] and paths == prepared
 
 
 def replay(repo):
     for case in (
-        ("great-sword", 0, 1, 0x1749A88, 1410, "gs", ("iron",), False),
-        ("dual-blades", 11, 2, 0x174F2B4, 1413, "db", ("blade", "common", "weapon"), False),
-        ("long-sword", 7, 3, 0x174CF64, 1415, "ls", ("weapon", "common"), True),
-        ("switch-axe", 8, 4, 0x174D838, 1412, "sa", ("weapon", "blade"), True),
+        ("great-sword", 0, 1, 0x1749A88, 1410, "gs", ("iron", "blade", "common"),
+         ("guard_counter", "radiance")),
+        ("dual-blades", 11, 2, 0x174F2B4, 1413, "db", ("blade", "common", "weapon"), ()),
+        ("long-sword", 7, 3, 0x174CF64, 1415, "ls", ("weapon", "common", "blade"),
+         ("blade_0", "blade_32", "blade_33", "discharge", "instant", "release")),
+        ("switch-axe", 8, 4, 0x174D838, 1412, "sa", ("weapon", "blade", "common"),
+         tuple(f"hit_{family}_{group}" for family, count in ((106, 7), (107, 4)) for group in range(count))),
     ):
         replay_style(repo, *case)
-    print("GU hunt setup caches both draw banks and startup audio/effects for all four selected styles.")
+    print("GU hunt setup caches the selected style's motions, sound, particles, hit shapes and HUD.")

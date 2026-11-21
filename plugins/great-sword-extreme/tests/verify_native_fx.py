@@ -21,7 +21,7 @@ def resources(g):
         address = g.alloc(len(data))
         g.cpu.mem_write(address, data)
         model = address + (model >> 8)
-        assert g.cpu.mem_read(model + 3, 1) == b"\1"
+        assert g.cpu.mem_read(model + 3, 1) == bytes([0 if index < 2 else 1])
         scale, color = g.half(model + 306), g.half(model + 66)
         # Use GU's own interpolation and RGBA paths, including the native loop.
         for frame in (0, 1, 2, 3, 4, 30, 90, 120):
@@ -46,7 +46,7 @@ def resources(g):
         assert len(flash) == 2
         efl = (NX / f"effect/frontier_gs/e{flash[0]}.efl").read_bytes()[48:]
         model = struct.unpack_from("<I", efl, 4)[0] >> 8
-        assert efl[model + 3] == 1
+        assert efl[model + 3] == 0
         scale = struct.unpack_from("<H", efl, model + 306)[0]
         ptr = g.alloc(len(efl))
         g.cpu.mem_write(ptr, efl)

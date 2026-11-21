@@ -2,9 +2,20 @@
 
 use mhfz_sdk::combat::HitWindow;
 use mhgu_sdk::{
-    combat::collision::{Contact, HitShape},
+    combat::collision::{CachedHitShape, Contact, HitShape},
     style::action::Attack,
 };
+
+static GUARD_COUNTER: CachedHitShape =
+    CachedHitShape::new(c"player\\hit\\frontier_gs\\guard_counter");
+static RADIANCE: CachedHitShape = CachedHitShape::new(c"player\\hit\\frontier_gs\\radiance");
+
+pub(super) unsafe fn preload() {
+    unsafe {
+        GUARD_COUNTER.preload();
+        RADIANCE.preload();
+    }
+}
 
 /// Use GU's equipped sword shape, attributes, owner and collision serial.
 /// FZ 81DBE87E subtracts the current motion frame from a nonzero SDT start
@@ -17,14 +28,10 @@ pub(super) unsafe fn emit(player: u32, source: u16, late: f32, deflectable: bool
         if *((player + 12696) as *const u32) == 0 || *((player + 12700) as *const u32) == 0 {
             return None;
         }
-        let shape_path = match source {
-            247 => Some(c"player\\hit\\frontier_gs\\guard_counter"),
-            crate::program::RADIANCE => Some(c"player\\hit\\frontier_gs\\radiance"),
+        let shape_override = match source {
+            247 => Some(GUARD_COUNTER.load()?),
+            crate::program::RADIANCE => Some(RADIANCE.load()?),
             _ => None,
-        };
-        let shape_override = match shape_path {
-            Some(path) => Some(HitShape::load(path)?),
-            None => None,
         };
         let shape = shape_override.as_ref().map_or(0, HitShape::as_raw);
         let template = match source {

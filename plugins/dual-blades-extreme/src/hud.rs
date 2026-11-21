@@ -6,6 +6,11 @@ static PLATE: GaugePlate = GaugePlate::new(
     c"GUI\\frontier_db\\gauge",
     [384., 112., 512., 136.],
 );
+
+pub(super) unsafe fn preload() {
+    unsafe { PLATE.preload() };
+}
+
 #[forge::hook(offset = 0x64b830)]
 unsafe fn twin_sword_gauge(widget: u32) -> u32 {
     unsafe {

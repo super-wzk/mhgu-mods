@@ -1,13 +1,144 @@
 """Replay ground inputs through the retail w08 mappers and idle command rows."""
+import re
 import struct
 import zlib
 
 from unicorn import arm_const as arm
 
 from verify_style import (
-    CHANGE_ACTION, COMMAND_UPDATE, DISPATCH, WEAPON_DISPATCH, boot, hunters, load_registered_style,
+    BLOCK, CHANGE_ACTION, COMMAND_BIND, COMMAND_UPDATE, DISPATCH, ENCODE, WEAPON_DISPATCH,
+    boot, hunters, load_registered_style,
     quest_entries, setup_controller,
 )
+
+
+def roll_chains(g, actor, set_action, form):
+    native = {name: zlib.decompress(raw) for name, kind, raw in quest_entries("w08_m0.arc")
+              if kind in (0x4B4C2BD3, 0x5139901D)}
+    data = native[b"player\\cmd\\w08\\plcmd_w08_guild"]
+    refs = list(re.finditer(rb"rPlBaseCmd\0(player[\\a-zA-Z\d_]+)\0", data))
+    table_list, tables = g.alloc(120), g.alloc(27 * 4)
+    g.put(table_list + 104, 27)
+    g.put(table_list + 116, tables)
+    for index, rows, stock_slot in ((25, refs[183:189], 41), (26, refs[189:195], 72)):
+        table, entries = g.alloc(24), g.alloc(4 * len(rows))
+        g.cpu.mem_write(table, struct.pack("<6I", 0, 0, len(rows), len(rows), 0, entries))
+        g.put(tables + 4 * index, table)
+        for i, row in enumerate(rows):
+            raw = native[row[1]]
+            fields = [struct.unpack_from("<H", raw, off)[0] for off in (504, 510, 516, 522)]
+            params = [struct.unpack_from("<I", raw, off)[0] for off in (528, 536, 544, 552)]
+            if i == 1:
+                assert fields[:2] == [16, stock_slot]
+            times = struct.unpack_from("<IfIfIf", data, row.end())[1::2]
+            entry, resource = g.alloc(24), g.alloc(124)
+            g.cpu.mem_write(entry, struct.pack("<3I3f", 0, 1, resource, *times))
+            g.cpu.mem_write(resource + 100, struct.pack("<4H4I", *fields, *params))
+            g.put(entries + 4 * i, entry)
+    for fn in (COMMAND_BIND, 0x27F5D0):
+        g.cpu.hook_del(g.traps.pop(fn))
+    g.stub(0x285F68, lambda *_: table_list)
+    g.stub(0x2A81DC, lambda *_: 0)  # level terrain
+    previous = 0
+
+    def number(off, value):
+        g.cpu.mem_write(actor + off, struct.pack("<f", value))
+
+    def current():
+        return g.half(actor + 9478), g.half(actor + 9482)
+
+    def action(state):
+        return 16, 0x8000 + state
+
+    def tick(frame, held=0, *, side=False, flick=False, ended=False):
+        nonlocal previous
+        g.cpu.mem_write(actor + 5108, struct.pack("<3H", held, previous & ~held, held & ~previous))
+        previous = held
+        strength = 100 if flick else 64 if side else 0
+        g.cpu.mem_write(actor + 5132, struct.pack("<H2xh", 0x8000, strength))
+        g.cpu.mem_write(actor + 5140, bytes(32))
+        g.cpu.mem_write(actor + 1276, struct.pack("<2f", frame + 1, frame))
+        g.cpu.mem_write(actor + 1206, bytes([4 if ended else 0]))
+        number(5332, frame)
+        g.run(0x27CA28, actor)
+        g.run(0x11A03A8, actor)
+        g.run(COMMAND_UPDATE, actor)
+        group, slot = current()
+        if group != 16:
+            g.run(DISPATCH, actor)
+        elif slot >= 0x8000:
+            g.run(g.hooks[WEAPON_DISPATCH], actor)
+        return current()
+
+    def roll(button, state, *, sword=True, press_frame=40, flick=False):
+        nonlocal previous
+        form(sword)
+        g.put(actor + 13100, 100)
+        g.put(actor + 4076, 0)
+        g.put(actor + 5280, 0)
+        set_action(1, 6)
+        g.cpu.mem_write(actor + 5, b"\x02")
+        g.cpu.mem_write(actor + 1204, struct.pack("<H", g.run(ENCODE, actor, 28)))
+        g.cpu.mem_write(actor + 5188, bytes(8))
+        g.put(actor + 5328, 0)
+        number(1268, 0)
+        number(1284, 58)  # co_0[28] has 59 samples
+        previous = 0
+        g.run(0x119FE44, actor)
+        assert g.get(actor + 9388) == (2025 if sword else 2026)
+        assert g.get(g.get(actor + 9384) + 8) == 5
+        for frame in range(0, 52, 2):
+            expected = (1, 6) if frame < 50 or state is None else action(state)
+            held = button if frame >= press_frame else 0
+            assert tick(frame, held, flick=flick and frame in (20, 24)) == expected, (
+                sword, button, frame, current(), expected,
+            )
+        number(1284, 180)
+
+    # The X held through the roll must not mask the subsequent directional chord.
+    roll(0x20, 7)
+    assert tick(54, 0x20) == action(7)
+    observed = tick(66, 0x120, side=True)
+    assert observed == action(153), (observed, g.get(actor + 5188), g.get(actor + 5156))
+    roll(0x20, 7)
+    tick(54)
+    assert tick(66, 0x160, side=True) == action(153), current()
+    for side, target in ((False, 70), (True, 153)):
+        roll(0x20, 7)
+        tick(54)
+        for f in (66, 68, 70):
+            tick(f, 0x20)
+        assert current() == action(29)
+        tick(26, ended=True)  # Advance from clip 1430 to the second part of the slash.
+        tick(44)
+        assert tick(56, 0x120, side=side) == action(target), (side, current())
+
+    def double_slash():
+        roll(0x100, 88)
+        assert tick(14, ended=True) == action(88)  # Roll follow-up clip 1467 ends.
+        tick(80)
+        for f in (92, 94, 96):
+            assert tick(f, 0x100) == action(88), (f, current())
+        assert tick(122) == action(95), (current(), g.get(actor + 13096))
+
+    double_slash()
+    assert tick(110, 0x120, side=True) == action(153)
+    double_slash()
+    assert tick(60, 0x120) == action(95)
+    assert tick(92) == action(98)
+    assert tick(26, 0x120, side=True) == action(153)
+
+    roll(0x20, 20, sword=False)
+    roll(0x100, 28, sword=False)
+    for sword, guard, sprint in ((False, 89, 103), (True, 91, 148)):
+        roll(0x800, None, sword=sword, press_frame=48)  # GP uses a fresh press at 50.
+        roll(0x800, guard, sword=sword, press_frame=50)
+        roll(0, sprint, sword=sword, flick=True)
+        roll(0x800, guard, sword=sword, press_frame=50, flick=True)
+        roll(0x40, None if sword else 111, sword=sword)
+    roll(0x20, 20, sword=False, flick=True)
+    g.stub(COMMAND_BIND, lambda *_: 0)
+    print("GU w08 forward roll: attack chains, absorption, axe charge and sprint priority passed.")
 
 
 def replay(repo, root):
@@ -126,6 +257,8 @@ def replay(repo, root):
     form(False)
     press(0x80, "plcmd_com_0x0001_006d", (1, 6))
 
+    roll_chains(g, actor, set_action, form)
+
     from verify_chains import replay as verify_chains
     verify_chains(g, root, actor, form, weapon, set_action)
 
@@ -193,15 +326,20 @@ def replay(repo, root):
     g.cpu.hook_del(g.traps.pop(0x2A2444))
     g.cpu.hook_del(g.traps.pop(0x2A2560))
 
-    def draw(current, dash=0, *, key=0x120, pressed=True):
+    def draw(current, dash=0, *, key=0x120, pressed=True, filter_sprint=True, stick=0):
         edge = key if pressed else 0
         set_action(*current)
-        g.cpu.mem_write(actor + 10057, b"\0")
+        running = current in ((2, 2), (2, 13), (2, 14), (2, 15))
+        g.cpu.mem_write(actor + 10057, bytes([2 if running else 0]))
+        g.put(actor + 9488, 0x181 if running else 0)
+        if current in ((2, 13), (2, 15)):
+            g.put(actor + 9488, 0x8181)
         g.put(actor + 5188, 0)
+        g.cpu.mem_write(actor + 5136, struct.pack("<h", stick))
         g.cpu.mem_write(actor + 5140, bytes(32))
         g.cpu.mem_write(actor + 5108, struct.pack("<3H", key | dash, 0, edge))
         g.put(actor + 5124, edge)
-        if dash:
+        if dash and filter_sprint:
             g.put(actor + 10096, 1)
             for reg, value in (
                 (arm.UC_ARM_REG_R4, actor), (arm.UC_ARM_REG_R6, actor + 5112),
@@ -237,8 +375,31 @@ def replay(repo, root):
         assert draw(current) == (16, 0x8000 + 4), current
     for shoulder_layout, dash in ((0, 0x40), (1, 0x800)):
         g.cpu.mem_write(layout, bytes([shoulder_layout]))
-        assert draw((2, 2), dash, pressed=False) == (2, 2)
+        assert draw((1, 0), key=dash) == (16, 0x8000 + 111)
+        assert draw((1, 0), key=dash, stick=49) == (16, 0x8000 + 111)
+        assert draw((1, 0), key=dash, stick=50) == (1, 0)
+        assert draw((1, 0), key=dash, pressed=False) == (1, 0)
+        for current in ((1, 2), (2, 0), (2, 1), (2, 2), (2, 13)):
+            for pressed in (True, False):
+                assert draw(current, key=dash, pressed=pressed) == current, (
+                    current, shoulder_layout, pressed,
+                )
         for key in (0x20, 0x100, 0x1000):
             assert draw((2, 2), dash, key=key) == (2, 2)
         assert draw((2, 2), dash) == (16, 0x8000 + 4)
     print("GU light-sword draw: X+A in idle, walk and both sprint layouts, unlock, kick and airborne rejection passed.")
+    print("GU draw charge: a fresh R press in sheathed idle, both shoulder layouts and native stick deadzone passed.")
+
+    for shoulder_layout, dash, gp in ((0, 0x40, 0x800), (1, 0x800, 0x40)):
+        g.cpu.mem_write(layout, bytes([shoulder_layout]))
+        for current in ((2, 2), (2, 13), (2, 14), (2, 15)):
+            assert draw(current, dash, key=gp, pressed=False) == current
+            for filtered in (False, True):
+                assert draw(current, dash, key=gp, filter_sprint=filtered) == (16, 0x8000 + 89), (
+                    current, shoulder_layout, filtered,
+                )
+                assert g.half(actor + 1204) == 1471
+                assert g.run(BLOCK, actor, g.half(actor + 5280)) == 1
+        for current in ((1, 4), (4, 14)):
+            assert draw(current, dash, key=gp, filter_sprint=False) == current
+    print("GU draw-absorption: regular and panic sprint with both shoulder layouts and native guard passed.")

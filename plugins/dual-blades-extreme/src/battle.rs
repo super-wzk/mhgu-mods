@@ -1,4 +1,5 @@
 //! Local hunter state. GU owns transitions, hits, movement and Hunter Arts.
+mod maw;
 mod peer;
 mod sharpen;
 
@@ -16,7 +17,7 @@ use core::{
 };
 use mhfz_sdk::{
     action::Cursor,
-    combat::HitWindow,
+    combat::{HitWindow, evade_bonus_frames},
     sound::Clock,
     sprint::{self, Flick, Resume, STICK_DEADZONE},
 };
@@ -27,6 +28,7 @@ use mhgu_sdk::style::{
         command::{BufferedCommand, CommandInput, CommandSet},
         melee::{self, BLADE_CONTACT_OFFSETS},
     },
+    input::attack_chord_with_shoulder,
     movement::{self, CLIMBS, stamina},
 };
 
@@ -46,8 +48,9 @@ const fn roll_attack(execute: i16) -> BufferedCommand {
         accept_until: execute,
     }
 }
-static FORWARD_ROLL: CommandSet = CommandSet::new(&[roll_attack(44)]);
-static SIDE_ROLL: CommandSet = CommandSet::new(&[roll_attack(42)]);
+// GU table 2025 can queue 16:11 ahead of the Frontier follow-up on the same X press.
+static FORWARD_ROLL: CommandSet = CommandSet::new(&[roll_attack(44)]).replacing_weapon(11);
+static SIDE_ROLL: CommandSet = CommandSet::new(&[roll_attack(42)]).replacing_weapon(11);
 
 pub(super) unsafe extern "C" fn bind_commands(actor: u32, table: u32) -> *const CommandSet {
     let (group, slot) = unsafe { action::current(actor) };
@@ -75,16 +78,18 @@ const CMD_SPRINT: u16 = 1;
 const CMD_SLASH_DOWN: u16 = 2;
 const CMD_COMBO: u16 = 5;
 const CMD_SWEEP: u16 = 9;
+const CMD_SHOULDER_HELD: u16 = 18;
 
 static PHASE: AtomicU32 = AtomicU32::new(0);
 static OWNER: AtomicU32 = AtomicU32::new(0);
 static FLAME: AtomicU32 = AtomicU32::new(0);
 static MONSTER_HIT: AtomicBool = AtomicBool::new(false);
 
-fn reset_gauges() {
+fn reset_local_state() {
     sharpen::clear_active_level();
     PHASE.store(0, Relaxed);
     FLAME.store(0, Relaxed);
+    maw::clear();
 }
 
 fn add_flame(amount: u32) {
@@ -117,6 +122,10 @@ fn demon_phase(actor: u32, slot: usize) -> u8 {
     }
 }
 
+fn flame_full() -> bool {
+    FLAME.load(Relaxed) == program::FLAME_MAX
+}
+
 #[derive(Clone, Copy)]
 struct Commands {
     bits: u32,
@@ -139,6 +148,7 @@ struct Battle {
     packed: u16,
     flick: Flick,
     elapsed: f32,
+    shoulder_used_by_chord: bool,
     activation_phase: u8,
     finish_window: f32,
     finish_requested: bool,
@@ -200,9 +210,18 @@ impl Battle {
             if self.flick.update(input, self.elapsed) && read::<f32>(actor, 5088) > 0. {
                 bits |= 1 << CMD_SPRINT;
             }
+            let shoulder_chord = attack_chord_with_shoulder(actor);
+            let shoulder_held = input.command(27);
+            self.shoulder_used_by_chord =
+                shoulder_held && (shoulder_chord || self.shoulder_used_by_chord);
+            if shoulder_chord && let Some(cursor) = &mut self.cursor {
+                // R may have queued a higher-priority follow-up one tick before
+                // GU resolves it as part of X+A.
+                cursor.discard_pending_command(CMD_SHOULDER_HELD);
+            }
             if input.command(8) {
                 bits |= 1 << 13;
-            } else if input.weapon_command(X_AND_A) {
+            } else if input.weapon_command(X_AND_A) || shoulder_chord {
                 bits |= 1 << CMD_COMBO;
                 if direction >= 2 {
                     bits |= 1 << (direction + 4);
@@ -240,10 +259,14 @@ impl Battle {
             }
             // Frontier 811EE87C tests the level for both held and released.
             // An early tap must still count as released when its window opens.
-            if input.command(70) {
+            if input.command(70) && !shoulder_chord {
                 bits |= 1 << 19;
             }
-            bits |= 1 << if input.command(27) { 18 } else { 20 };
+            if !shoulder_held {
+                bits |= 1 << 20;
+            } else if !self.shoulder_used_by_chord {
+                bits |= 1 << CMD_SHOULDER_HELD;
+            }
             Commands {
                 bits,
                 direction,
@@ -278,11 +301,16 @@ impl Battle {
     }
 
     unsafe fn begin(&mut self, actor: u32, state: u8) -> bool {
+        unsafe { self.begin_facing(actor, state, None) }
+    }
+
+    unsafe fn begin_facing(&mut self, actor: u32, state: u8, facing: Option<u16>) -> bool {
         unsafe {
-            let requested = action::current(actor) == (action::GROUP, action::slot(state))
-                && read::<u8>(actor, 5) == 0;
-            if !requested && !action::transition_to(actor, action::GROUP, action::slot(state)) {
+            if !action::accept_custom_start(actor, state) {
                 return false;
+            }
+            if let Some(yaw) = facing {
+                movement::set_facing(actor, yaw);
             }
             self.clear_action(actor);
             self.cursor = Some(program::cursor(state));
@@ -386,7 +414,7 @@ impl Battle {
                     2 => {
                         native!(0x2a2560, actor, u32::from(parameter != 0));
                     }
-                    3 if self.peer_slot == 0 => turn(actor, parameter),
+                    3 if self.peer_slot == 0 => movement::turn(actor, parameter),
                     4 => {
                         self.keep_poise = false;
                         write(actor, 10288, frames);
@@ -395,11 +423,7 @@ impl Battle {
                     6 | 7 => {
                         self.keep_evade = false;
                         let extra = if kind == 7 {
-                            match native!(0x2a69dc, actor) as i32 {
-                                2.. => 10.,
-                                1 => 6.,
-                                _ => 0.,
-                            }
+                            evade_bonus_frames(actor)
                         } else {
                             0.
                         };
@@ -410,8 +434,14 @@ impl Battle {
                     9 if self.peer_slot == 0 => stamina(actor, -150., false),
                     11 | 12 => submit_strike(actor, state, parameter, late, kind == 12),
                     13 => {
-                        self.set_phase(actor, parameter as u8);
-                        self.effects.demon(actor, parameter as u8, 0.);
+                        let phase = parameter as u8;
+                        self.set_phase(actor, phase);
+                        let full = if self.peer_slot == 0 {
+                            flame_full()
+                        } else {
+                            peer::bits(self.peer_slot) & 4 != 0
+                        };
+                        self.effects.demon(actor, phase, full, 0.);
                     }
                     14 if self.peer_slot == 0 => {
                         native!(0x2ad288, actor, u32::from(parameter), 1);
@@ -450,8 +480,10 @@ impl Battle {
     }
 
     unsafe fn branch(&mut self, actor: u32, command: Commands, target: u16) -> bool {
+        const SIDE_TURNS: [u16; 3] = [0, 0x2000, 0xe000];
         unsafe {
             let phase = phase(actor);
+            let mut turn_by = None;
             let state = match target {
                 0..=88 => target as u8,
                 89 | 90 => {
@@ -460,13 +492,15 @@ impl Battle {
                 }
                 91 => SPRINT,
                 92..=95 => attack_variant(phase, target),
+                // FZ 811EF340 skips the turn when dispatching the normal sweep.
+                96..=98 if phase == 0 => 15,
                 96..=98 => {
-                    turn(actor, [0, 0x2000, 0xe000][usize::from(target - 96)]);
-                    if phase == 0 { 15 } else { 21 }
+                    turn_by = Some(SIDE_TURNS[usize::from(target - 96)]);
+                    21
                 }
                 99 | 103 if phase > 0 => 21,
                 100..=102 => {
-                    turn(actor, [0, 0x2000, 0xe000][usize::from(target - 100)]);
+                    turn_by = Some(SIDE_TURNS[usize::from(target - 100)]);
                     15
                 }
                 104 => {
@@ -480,7 +514,8 @@ impl Battle {
                 105 if self.activation_phase == 2 => 69,
                 _ => return false,
             };
-            program::ACTIONS.contains(state) && self.begin(actor, state)
+            let facing = turn_by.map(|offset| read::<u16>(actor, 4076).wrapping_add(offset));
+            program::ACTIONS.contains(state) && self.begin_facing(actor, state, facing)
         }
     }
 
@@ -543,8 +578,8 @@ impl Battle {
                 // Frontier applies 128 angle units per 30 Hz logic frame.
                 let angle = (64. * self.elapsed) as u16;
                 match commands.direction {
-                    2 => turn(actor, angle),
-                    3 => turn(actor, angle.wrapping_neg()),
+                    2 => movement::turn(actor, angle),
+                    3 => movement::turn(actor, angle.wrapping_neg()),
                     _ => {}
                 }
             }
@@ -721,10 +756,9 @@ impl Battle {
             if custom.is_some() && melee::take_deflection(actor) && !self.polish.active() {
                 self.deflected = true;
             }
-            self.polish.tick(self.elapsed, drawn, in_attack_chain);
+            self.polish
+                .tick(actor, self.elapsed, drawn, in_attack_chain);
             let mode = phase(actor);
-            self.effects
-                .demon(actor, if drawn { mode } else { 0 }, self.elapsed);
             if drawn && mode >= 2 {
                 self.flame_subframe += self.elapsed;
                 let ticks = (self.flame_subframe / 2.) as u32;
@@ -733,6 +767,12 @@ impl Battle {
                     add_flame(ticks.saturating_mul(program::FLAME_PER_TICK));
                 }
             }
+            self.effects.demon(
+                actor,
+                if drawn { mode } else { 0 },
+                flame_full(),
+                self.elapsed,
+            );
             if drawn && (mode != 0 || sprint) && self.elapsed > 0. {
                 let clip = motion::source_clip(actor, read(actor, 1204));
                 self.upkeep(actor, mode, sprint, clip);
@@ -908,20 +948,6 @@ unsafe fn submit_strike(actor: u32, state: u8, strike_id: u16, late: f32, swap_h
     unsafe { attack.submit(actor) };
 }
 
-unsafe fn turn(actor: u32, amount: u16) {
-    unsafe {
-        let yaw = read::<u16>(actor, 4076).wrapping_add(amount);
-        set_facing(actor, yaw);
-    }
-}
-
-unsafe fn set_facing(actor: u32, yaw: u16) {
-    unsafe {
-        write(actor, 4076, u32::from(yaw));
-        write(actor, 5280, u32::from(yaw));
-    }
-}
-
 struct LocalBattle(UnsafeCell<Option<Battle>>);
 // The registry invokes the local weapon controller on the game thread.
 unsafe impl Sync for LocalBattle {}
@@ -953,7 +979,7 @@ unsafe fn dispatch_frame(actor: u32, raw: *const Input) -> u32 {
             *battle = None;
             motion::ROLL.clear();
             OWNER.store(0, Relaxed);
-            reset_gauges();
+            reset_local_state();
             return PASS;
         };
         let equipment = read(actor, 5060);
@@ -962,7 +988,7 @@ unsafe fn dispatch_frame(actor: u32, raw: *const Input) -> u32 {
             .is_none_or(|old| old.owner != actor || old.equipment != equipment)
         {
             motion::ROLL.clear();
-            reset_gauges();
+            reset_local_state();
             OWNER.store(actor, Relaxed);
             *battle = Some(Battle {
                 owner: actor,
@@ -984,7 +1010,7 @@ pub(super) unsafe extern "C" fn request(actor: u32, raw: *const ActionRequest) -
         let mode = phase(actor);
         if NATIVE_AERIAL_SLOTS.contains(&request.slot) {
             let buttons = read::<u32>(actor, 5156);
-            if buttons & (1 << X_AND_A) != 0 {
+            if buttons & (1 << X_AND_A) != 0 || attack_chord_with_shoulder(actor) {
                 if mode == 3 {
                     return u32::from(AERIAL_DANCE);
                 }
@@ -1013,6 +1039,13 @@ unsafe fn native_demon_gauge(actor: u32, amount: u32, kind: u32) -> u32 {
     original!(actor, amount, kind)
 }
 
+fn blade_hand(actor: u32, hit: u32) -> Option<usize> {
+    let offset = hit.wrapping_sub(actor);
+    BLADE_CONTACT_OFFSETS
+        .iter()
+        .position(|&blade| blade == offset)
+}
+
 // GU records a resolved monster contact once per target. Polling the two hand
 // slots on the next controller tick would lose successive contacts in a frame.
 #[forge::hook(offset = 0x169d44)]
@@ -1021,7 +1054,7 @@ unsafe fn record_contact(hit: u32, target: u32, kind: u32) -> u32 {
     if actor != 0
         && kind == 1
         && target != 0
-        && BLADE_CONTACT_OFFSETS.contains(&hit.wrapping_sub(actor))
+        && let Some(hand) = blade_hand(actor, hit)
     {
         let (group, slot) = unsafe { action::current(actor) };
         if action::custom(group, slot) {
@@ -1030,6 +1063,7 @@ unsafe fn record_contact(hit: u32, target: u32, kind: u32) -> u32 {
         if phase(actor) >= 2 {
             add_flame(program::FLAME_PER_HIT);
         }
+        unsafe { maw::recover_on_contact(actor, hit, hand) };
     }
     original!(hit, target, kind)
 }
@@ -1040,11 +1074,14 @@ unsafe fn adjust_strike(actor: u32, hit: u32, row: u32, flags: u32) -> u32 {
         // 2B76CC calls this with the HDP row pointer and flags.
         let local = OWNER.load(Relaxed) == actor;
         let peer = if local { None } else { peer::slot_of(actor) };
-        if (!local && peer.is_none())
-            || !BLADE_CONTACT_OFFSETS.contains(&hit.wrapping_sub(actor))
-            || flags & 1 == 0
-        {
+        if (!local && peer.is_none()) || flags & 1 == 0 {
             return original!(actor, hit, row, flags);
+        }
+        let Some(hand) = blade_hand(actor, hit) else {
+            return original!(actor, hit, row, flags);
+        };
+        if local {
+            maw::clear_contact(hand);
         }
         let power = read::<i16>(hit, 56);
         let result = original!(actor, hit, row, flags);
@@ -1052,24 +1089,13 @@ unsafe fn adjust_strike(actor: u32, hit: u32, row: u32, flags: u32) -> u32 {
         let Some(state) = action::custom_id(group, slot) else {
             return result;
         };
-        // 11BACE8 normally latches Wolf's Maw on a stock action change.
-        // Frontier enters its own actions directly. Arm the native follow-up
-        // for this hand when its hit is constructed (11BA9C8 -> 11BA074).
-        let hand = u32::from(hit != actor + BLADE_CONTACT_OFFSETS[0]);
-        write(
-            actor,
-            13156 + 4 * hand,
-            u32::from(read::<f32>(actor, 13144) > 0.),
-        );
+        maw::arm(actor, hand);
         if program::aerial_motion(state).is_some() {
             // 2B76CC adds secondary buildup to the aerial templates.
             write(hit, 86, 0u8);
             write(hit, 89, 0u8);
         }
-        let bits = peer.map_or_else(
-            || phase(actor) | (u8::from(FLAME.load(Relaxed) == program::FLAME_MAX) << 2),
-            peer::bits,
-        );
+        let bits = peer.map_or_else(|| phase(actor) | (u8::from(flame_full()) << 2), peer::bits);
         let mode = bits & 3;
         if mode != 0 {
             // 81DBDE7A / 81DBE87E snapshot the motion value at hit creation.
@@ -1111,6 +1137,7 @@ pub(super) fn install() {
     let base = forge::mem::text_addr();
     forge::install_hook!(base, native_demon_gauge);
     forge::install_hook!(base, record_contact);
+    maw::install(base);
     forge::install_hook!(base, adjust_strike);
     forge::install_hook!(base, native_demon_upkeep);
     forge::install_hook!(base, native_demon_status);

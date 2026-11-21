@@ -9,6 +9,10 @@ pub const MAX_COMMAND_FRAME: i16 = 998;
 pub enum CommandInput {
     Common(u8),
     Weapon(u8),
+    /// A weapon command that waits for GU to resolve X+A.
+    WeaponAfterCombo(u8),
+    /// The weapon's X+A command, also accepting GU's shoulder + X+A combination.
+    AttackChord(u8),
 }
 
 /// A branch into a shared GU action or a registered style action.
@@ -88,12 +92,17 @@ pub mod native {
 
     pub const CAPACITY: usize = 48;
     pub type Buffer = [u8; CAPACITY];
+    pub const WEAPON_CONDITION: u16 = 8;
+    pub const WEAPON_AFTER_COMBO: u16 = 0x100 | WEAPON_CONDITION;
+    pub const ATTACK_CHORD: u16 = 0x200 | WEAPON_CONDITION;
 
     impl CommandInput {
         pub const fn opcode_and_id(self) -> (u16, u8) {
             match self {
                 Self::Common(id) => (6, id),
-                Self::Weapon(id) => (8, id),
+                Self::Weapon(id) => (WEAPON_CONDITION, id),
+                Self::WeaponAfterCombo(id) => (WEAPON_AFTER_COMBO, id),
+                Self::AttackChord(id) => (ATTACK_CHORD, id),
             }
         }
     }

@@ -64,13 +64,6 @@ pub(super) unsafe fn riot_active(actor: u32) -> bool {
     matches!(unsafe { read::<u32>(actor, RIOT_LEVEL) }, 1..=3)
 }
 
-unsafe fn set_riot_form(actor: u32, battle: &mut Battle, sword: bool) {
-    battle.gauges.unlocked = sword;
-    battle.gauges.sword = sword;
-    battle.model_motion = program::idle_model_motion(sword);
-    unsafe { write(actor, motion::SWORD_POSE, u32::from(sword)) };
-}
-
 fn selected(actor: u32) -> bool {
     actor != 0 && actor == OWNER.load(Relaxed) && style::selected(WEAPON_ID) == STYLE_ID
 }
@@ -122,7 +115,10 @@ unsafe fn demon_riot(actor: u32, tier: u32) -> u32 {
             with_equipped_battle(actor, |battle| {
                 change_slash(actor, RIOT_SLASH_RECOVERY);
                 battle.gauges.light = program::param(18);
-                set_riot_form(actor, battle, true);
+                battle.gauges.unlocked = true;
+                battle.gauges.sword = true;
+                battle.model_motion = program::SWORD_IDLE_MOTION;
+                write(actor, motion::SWORD_POSE, 1u32);
                 battle.publish_gauges();
             });
         }
@@ -183,7 +179,8 @@ unsafe fn weapon_upkeep(actor: u32) -> u32 {
                 native!(RESET_SLASH_RECOVERY, actor);
                 write(actor, RIOT_STARTED, 0u8);
                 write(actor, RIOT_LEVEL, 0u32);
-                set_riot_form(actor, battle, false);
+                // Preserve the held form for the shared empty-light morph at neutral.
+                battle.gauges.unlocked = false;
             }
             battle.publish_gauges();
         });

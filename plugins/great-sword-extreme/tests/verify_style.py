@@ -43,6 +43,7 @@ EQUIPMENT_GRIP = 0x308834
 CHANGE_ACTION, GS_CHANGE_ACTION = 0x2AB670, 0x1160650
 COMMAND_BIND, COMMAND_CONDITION = 0x2E9B7C, 0x2ECEFC
 COMMAND_UPDATE = 0x2E9D54
+SHARED_MENU, CHAT_UPDATE, TOUCH_MENU = 0x66F0A8, 0x678894, 0x793424
 SHARPNESS = 0x2AD288
 HIT_EXPAND, MODEL_DEPTH = 0x1696FC, 0xA957CC
 HUNTER_COLLISION = 0x16BB38
@@ -127,6 +128,10 @@ def style_descriptor(g, ident, weapon, encode=0, art_slots=0):
 
 def boot(elf, config, order=("registry", "sword"), mount_ok=True):
     g = Game(elf)
+    # The fixture starts after class registration. Populate the real weapon
+    # DTI parent links so GU's virtual type query can distinguish the lobby.
+    for vtable in (0x1749A88, 0x174CF64, 0x174D838, 0x174F2B4):
+        g.put(g.run(g.get(vtable + 20)) + 16, 0x1886BB8)
     g.stub(0x13EFDAC, lambda p, size, *_: g.cpu.mem_write(p, bytes(size)))
     g.inline_hooks = g.inline_hooks | {
         ENCODE,
@@ -138,6 +143,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         CHANGE_ACTION,
         COMMAND_BIND,
         COMMAND_CONDITION,
+        SHARED_MENU, CHAT_UPDATE, TOUCH_MENU,
         GS_CHANGE_ACTION,
         DRAW_ROUTE,
         DB_DRAW_ROUTE,
@@ -217,6 +223,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             CHANGE_ACTION,
             COMMAND_BIND,
             COMMAND_CONDITION,
+            SHARED_MENU, CHAT_UPDATE, TOUCH_MENU,
             GS_CHANGE_ACTION,
             DRAW_ROUTE,
             DB_DRAW_ROUTE,
@@ -627,6 +634,7 @@ def verify_battle(g, p, remote, resources):
         h(9484, g.half(p + 9482))
         h(9478, group)
         h(9482, act)
+        f(5296, 1.)  # GU 28E538 resets the action's base animation rate.
         phase(0)
         g.cpu.mem_write(p + 9384, bytes(64))
         g.cpu.mem_write(p + 10057, bytes([g.cpu.mem_read(p + 10057, 1)[0] & ~6]))
@@ -635,8 +643,9 @@ def verify_battle(g, p, remote, resources):
         route = g.run(DRAW_ROUTE, p, kind)
         g.run(GS_CHANGE_ACTION, p, *struct.unpack("<3H", g.cpu.mem_read(route, 6)))
 
-    def tick(frame=None, held=0, pressed=0, draw=False):
+    def tick(frame=None, held=0, pressed=0, draw=False, native_pad=False):
         if frame is not None:
+            f(1276, frame + 1)
             f(1280, frame)
             f(5332, frame)
         h(5108, held)
@@ -645,8 +654,11 @@ def verify_battle(g, p, remote, resources):
         combo = {0x20: 2, 0x100: 4, 0x120: 0x40}.get(pressed & 0x120, 0)
         if pressed & 0x40:
             combo |= 0x20
-        g.put(p + 5188, combo)
         g.cpu.mem_write(p + 5140, bytes(32))
+        if native_pad:
+            g.run(0x27CA28, p)
+        else:
+            g.put(p + 5188, combo)
         for active, cmd in ((pressed & 0x1000, 8), (pressed & 0x80, 3),
                             (pressed & 0x10, 13), (pressed & 0x40, 70), (held & 0x40, 0)):
             if active:
@@ -887,7 +899,60 @@ def verify_battle(g, p, remote, resources):
         tick(close - 0.5, held=32, pressed=32)
         assert clip() == (63 if side == 32769 else 62)
 
+    # The retail 2011 table contains this earlier weapon-12 row. A staggered
+    # chord can set weapon 12 and weapon 1 in the same native input update.
+    raw, = (zlib.decompress(raw) for name, _, raw in quest_entries("w00_m0.arc")
+            if name.endswith(b"plcmd_w00_0x0010_041a"))
+    attack, attack_resource, roll_entries, roll_table = (g.alloc(n) for n in (24, 124, 8, 24))
+    fields = [struct.unpack_from("<H", raw, off)[0] for off in (504, 510, 516, 522)]
+    assert fields == [16, 41, 4096, 8]
+    g.cpu.mem_write(attack_resource + 100, struct.pack("<4H4I", *fields, 12, 0, 0, 0))
+    g.cpu.mem_write(attack, struct.pack("<3I3f", 0, 1, attack_resource, 0, 28, 0))
+    g.cpu.mem_write(roll_entries, struct.pack("<2I", attack, command))
+    g.cpu.mem_write(roll_table, struct.pack("<6I", 0, 0, 2, 2, 0, roll_entries))
+
+    for side in (9102, 32769):
+        vertical = 63 if side == 32769 else 62
+        for presses, expected in (
+            ((0x120,), 37), ((0x20, 0x120), 37), ((0x100, 0x120), 37),
+            ((0x160,), 37), ((0x40, 0x160), 37), ((0x20,), vertical),
+        ):
+            roll(side)
+            g.put(tables + 11 * 4, roll_table)
+            g.run(0x115FDF8, p)
+            assert g.get(g.get(p + 9384) + 8) == 3
+            previous = 0
+            g.put(p + 5188, 0)
+            for i, frame in enumerate(range(30, 46, 2)):
+                held = presses[min(i, len(presses) - 1)]
+                tick(frame, held=held, pressed=held & ~previous, native_pad=True)
+                previous = held
+            assert clip() == expected, (side, presses, clip())
+            if presses == (0x100, 0x120):
+                for elapsed in range(0, 202, 2):
+                    tick(54 + elapsed % 68, held=0x120, native_pad=True)
+                tick(54 + elapsed % 68, native_pad=True)
+                assert (clip(), value()) == (38, 200), (side, clip(), value())
+            g.put(tables + 11 * 4, stock)
+        roll(side)
+        g.put(p + 5188, 0)
+        tick(63, held=0x20, pressed=0x20, native_pad=True)
+        assert clip() == vertical
+
     # Guard recovery uses the native common B command with no pre-input.
+    guard_rows = (b"plcmd_com_0x8010_241a", b"plcmd_com_0x0001_006f", b"plcmd_w00_0x0010_004a")
+    guard_table, guard_entries = g.alloc(24), g.alloc(12)
+    g.cpu.mem_write(guard_table, struct.pack("<6I", 0, 0, 3, 3, 0, guard_entries))
+    g.put(tables + 10 * 4, guard_table)
+    native_rows = {n.rsplit(b"\\", 1)[-1]: raw for n, _, raw in quest_entries("w00_m0.arc")}
+    for index, name in enumerate(guard_rows):
+        raw = zlib.decompress(native_rows[name])
+        fields = [struct.unpack_from("<H", raw, off)[0] for off in (504, 510, 516, 522)]
+        params = [struct.unpack_from("<I", raw, off)[0] for off in (528, 536, 544, 552)]
+        entry, resource = g.alloc(24), g.alloc(124)
+        g.cpu.mem_write(entry, struct.pack("<3I3f", 0, 1, resource, 0, 0, 0))
+        g.cpu.mem_write(resource + 100, struct.pack("<4H4I", *fields, *params))
+        g.put(guard_entries + 4 * index, entry)
     for stick, strength, expected in [(0x4000, 0, 28), (0x8000, 120, 12), (0, 120, 13)]:
         action(32, 0)
         g.cpu.mem_write(p + 10057, b"\x01")
@@ -901,7 +966,10 @@ def verify_battle(g, p, remote, resources):
         phase(1)
         g.run(0x115FDEC, p)  # GU's GS guard startup binds table 2010.
         bound = g.get(p + 9384)
-        assert g.get(bound + 8) == 2 and g.get(g.get(bound + 20)) == command
+        assert g.get(bound + 8) == 2 and g.get(g.get(bound + 20)) == g.get(guard_entries)
+        f(5328, 0)
+        tick(20, pressed=0x80, native_pad=True)
+        assert (g.half(p + 9478), g.half(p + 9482)) == (32, 0)
         f(5328, 1)
         tick(55, pressed=0x80)  # GU's projected motion frame is already 56.
         tick(56)
@@ -910,6 +978,7 @@ def verify_battle(g, p, remote, resources):
         tick(56, pressed=0x80)
         assert (g.half(p + 9478), g.half(p + 9482)) == (1, 6)
         assert g.run(ENCODE, p, 28) & 255 == expected
+    g.put(tables + 10 * 4, stock)
     h(5136, 0)
     for key, expected in [(32, 31), (0x100, 47), (0x120, 48)]:
         action(1, 0)
@@ -1025,13 +1094,14 @@ def verify_battle(g, p, remote, resources):
     charge_rises.clear()
     neutral()
     tick(held=32, pressed=32)
-    for n in range(2, 202, 2):
-        tick(n if n < 106 else 56 + (n - 106) % 50, held=32)
-        if n == 100:
+    for elapsed in range(2, 202, 2):
+        frame = elapsed if elapsed <= 34 else 34 + (elapsed - 34) // 2
+        tick(frame if frame < 106 else 56 + (frame - 106) % 50, held=32)
+        if elapsed == 100:
             assert len(units) >= 4
             assert all(g.cpu.mem_read(u + 344, 1)[0] == 0 for u in units)
     assert charge_rises == [128, 129, 130]
-    tick(85)
+    tick(56 + (frame - 106) % 50)
     g.put(0x188A0D4, 0)
     assert clip() == 28 and value() == 146
     # X+A has a separate charge and release program.
@@ -1080,10 +1150,12 @@ def verify_battle(g, p, remote, resources):
         tick(0, held=key, pressed=key)
         arm_at, loop_at, end = (34, 56, 106) if key == 32 else (54, 54, 122)
         tick(arm_at, held=key)
+        assert g.get(p + 5296) == (0x3F000000 if key == 32 else 0x3F800000)
+        frames_per_tick = 1 if key == 32 else 2
         for _ in range(45):
             tick(arm_at, held=key)
         for t in range(1, hold + 1):
-            frame = arm_at + 2 * t
+            frame = arm_at + frames_per_tick * t
             tick(
                 frame if frame < end else loop_at + (frame - end) % (end - loop_at),
                 held=key,
@@ -1094,9 +1166,10 @@ def verify_battle(g, p, remote, resources):
                 flashes = [g.get(unit + 68) for unit in units if g.get(unit + 68) in routes[10]]
                 assert flashes == (list(routes[10]) if expected == 85 else []), (hold, interval, flashes)
                 g.put(0x188A0D4, 0)
-            frame = max(58, arm_at + 2 * hold)
+            frame = max(58, arm_at + frames_per_tick * hold)
             tick(frame if frame < end else loop_at + (frame - end) % (end - loop_at))
         assert clip() in (28, 38) and value() == expected, (key, hold, clip(), value())
+        assert g.get(p + 5296) == 0x3F800000
         if key == 0x120 and expected == 200:
             g.put(0x188A0D4, manager)
             units.clear()
@@ -1116,7 +1189,37 @@ def verify_battle(g, p, remote, resources):
             assert clip() == 6 and value() == 46
             assert struct.unpack("<f", g.cpu.mem_read(p + 1280, 4))[0] == 44.
             assert struct.unpack("<2f", g.cpu.mem_read(p + 12320 + 92, 8)) == (8., 14.)
+    # Run the actual hunter rate calculation and layer clock at 30/60 Hz.
+    # A full stop consumes wall time without advancing the charge or pose.
     skills.clear()
+    for step in (1, 2):
+        neutral()
+        charge_rises.clear()
+        tick(0, held=32, pressed=32)
+        tick(34, held=32)
+        packed = g.half(p + 1204)
+        bank = g.get(p + 3844 + 4 * (packed >> 8))
+        header = g.run(0xB49E54, bank, packed & 255)
+        g.run(0x952C7C, p, 0, header)
+        f(28, step)
+        f(1276, 34.)
+        for elapsed in range(0, 78 + step, step):
+            # 29BF34 multiplies the base rate by the GU hitstop factor in s16.
+            g.cpu.reg_write(arm.UC_ARM_REG_R4, p)
+            g.cpu.reg_write(arm.UC_ARM_REG_S16, 0x3F800000 if elapsed else 0)
+            g.run(0x29BF34, until=0x29BF4C)
+            g.run(0x951A80, p)
+            tick(held=32)
+            pose, = struct.unpack("<f", g.cpu.mem_read(p + 1280, 4))
+            assert pose == 34. + max(0, elapsed - step) / 2
+            assert not charge_rises
+        g.run(0x951A80, p)
+        tick(held=32)
+        assert charge_rises == [128]
+        tick(held=0)
+        assert clip() == 28 and value() == 85 and g.get(p + 5296) == 0x3F800000
+    f(28, 2)
+
     # Lion's Maw applies to the first registered strike even on a whiff.
     # Exercise GU's bonus and clear routines with all three native tiers.
     for tier in (1, 2, 3):
@@ -1214,17 +1317,26 @@ def verify_battle(g, p, remote, resources):
     g.stub(0x2831E0, lambda *_: 0)
     damage = g.alloc(4)
 
-    def guard(when, accepted, monster=True, cost=None):
+    def guard(when, accepted, monster=True, cost=None, *,
+              stamina_value=900, angle=0, hit_flags=0, hit_kind=0, native_clip=False):
         action(32, 0)
         f(11072, 0)
         tick()
         packed = g.run(g.hooks[ENCODE], p, 5005)
-        h(1204, packed)
+        h(1204, 0x501 if native_clip else packed)
         phase(1)
         f(1280, when)
         g.put(p + 9488, 16 if accepted else 0)
         h(12828, 0)
-        result = g.run(g.hooks[BLOCK], p, 0)
+        h(12820, hit_flags)
+        g.cpu.mem_write(p + 12822, bytes([hit_kind]))
+        g.put(p + 5280, 0)
+        f(5088, stamina_value)
+        if stamina_value < 150:
+            assert g.run(g.originals[BLOCK], p, angle) == 0
+        result = g.run(g.hooks[BLOCK], p, angle)
+        h(12820, 0)
+        g.cpu.mem_write(p + 12822, b"\0")
         if accepted:
             heavy_recoil.clear()
             g.run(GUARD_REACTION, p, 2, p + 12820, damage)
@@ -1248,6 +1360,7 @@ def verify_battle(g, p, remote, resources):
         tick()
         if result:
             assert struct.unpack("<f", g.cpu.mem_read(p + 11072, 4))[0] == 14
+        f(5088, 900)
         return result
 
     assert guard(8, 0) == 0 and clip() != 74
@@ -1262,6 +1375,17 @@ def verify_battle(g, p, remote, resources):
     assert guard(32, 1) == 0
     skills.clear()
     assert guard(8, 1, False) == 1 and clip() == 74
+    assert guard(8, 1, False, stamina_value=0, angle=0x4000) == 1
+    assert guard(8, 1, False, stamina_value=0, angle=0x4001) == 0
+    assert guard(8, 0, False, stamina_value=0) == 0
+    assert guard(28, 1, False, stamina_value=0) == 0
+    assert guard(8, 1, False, stamina_value=0, native_clip=True) == 0
+    assert guard(8, 1, False, stamina_value=0, hit_flags=0x20) == 0
+    skills.add(171)
+    assert guard(8, 1, False, stamina_value=0, hit_flags=0x20) == 1
+    assert guard(8, 1, False, stamina_value=0, hit_flags=0x100) == 0
+    assert guard(8, 1, False, stamina_value=0, hit_kind=0x19) == 0
+    skills.clear()
     # Run the real GU sharpness consumer and equipment skill rules. Only the
     # scene's sharpness-colour table is supplied; no post-hit refund is used.
     g.stub(0x29CDFC, lambda *_: 0)
@@ -1312,6 +1436,14 @@ def verify_battle(g, p, remote, resources):
     f(72, 300.)
     g.put(p + 4076, 0x4000)
     units.clear()
+    for frame in (18, 42, 68):
+        count = len(units)
+        tick(frame - 1)
+        assert len(units) == count
+        tick(frame)
+        assert [g.get(u + 68) for u in units[count:]] == list(routes[23])
+        tick(frame)
+        assert len(units) == count + len(routes[23])
     tick(85)
     # The blade emits at frames 18/42/68, independently of contact or shockwaves.
     assert whiff() and [g.get(u + 68) for u in units] == list(routes[23]) * 3

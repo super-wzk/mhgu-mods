@@ -123,12 +123,12 @@ unsafe extern "C" fn peer_frame(local: u32) {
                 }
                 let Some(battle) = playback else { return };
                 if read::<u8>(actor, 4180) != read::<u8>(local, 4180) {
-                    fx::clear(battle.slot);
+                    battle.clear_visuals();
                     return;
                 }
                 let (group, slot) = action::current(actor);
                 if !action::custom(group, slot) {
-                    let clip = motion::source_clip(actor, read(actor, 1204));
+                    let clip = motion::native_clip(actor);
                     battle.cursor = None;
                     battle.native_visual(
                         actor,

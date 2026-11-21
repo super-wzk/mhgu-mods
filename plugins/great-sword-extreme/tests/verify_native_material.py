@@ -101,6 +101,7 @@ def rendering(g):
     uppercut_flash, fourth, third, dust, late_dust, release, ready, charge, blade = (
         routes[i][0] for i in (0, 1, 2, 5, 6, 7, 8, 9, 23))
     directory = NX / "effect/frontier_gs"
+    assert not (directory / "m66_alpha.tex").exists()
     blend_states = {
         0: 0x805701F3,  # Additive alpha
         1: 0x0F09B1F4,  # Alpha blend
@@ -119,7 +120,7 @@ def rendering(g):
         release + 2: (0, [(4, (255,) * 4), (6, (255,) * 4)]),
         release + 4: (1, [(5, (0,) * 4), (6, (255,) * 4)]),
         ready + 1: (0, [(24, (255,) * 4)]),
-        charge: (1, [(90, (255, 192, 64, 96))]),
+        charge: (0, [(90, (255, 192, 64, 96))]),
         charge + 2: (1, [(90, (224, 32, 32, 96))]),
     }
     # FZ 4022:9 has three delayed pairs of layers with separate alpha curves.
@@ -142,6 +143,9 @@ def rendering(g):
         mesh = params[80:144].split(b"\0", 1)[0].decode().replace("\\", "/")
         mrl = (NX / (mesh + ".mrl")).read_bytes()
         word = lambda offset: struct.unpack_from("<I", mrl, offset)[0]
+        if layer == charge:
+            assert mesh == "effect/frontier_gs/m66"
+            assert b"effect\\frontier_gs\\t3\0" in mrl
         row = word(24)
         block = word(row + 52)
         attributes = {word(p + 8): (word(p) & 15, word(p + 4))

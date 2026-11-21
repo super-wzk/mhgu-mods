@@ -196,12 +196,19 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
             0
         }
         WeaponEffect::DualBlades => {
-            playback.dual_blades(crate::hunter::dual_blades_parameters(&mhfdat)?)?;
+            let params = crate::hunter::dual_blades_parameters(&mhfdat)?;
+            playback.dual_blades(params)?;
             playback.bank(&load_bank(4021)?, 4021, &[2, 3])?;
             for bank in [4035, 4036] {
                 playback.bank(&load_bank(bank)?, bank, &[2, 5, 6, 12, 13])?;
             }
             playback.dual_blade_swing()?;
+            playback.bank(&load_bank(4002)?, 4002, &[2])?;
+            playback.bank(&load_bank(4021)?, 4021, &[0])?;
+            for bank in [4035, 4036] {
+                playback.bank(&load_bank(bank)?, bank, &[4])?;
+            }
+            playback.dual_blade_glows(params, true)?;
             6
         }
         WeaponEffect::LongSword => {
@@ -211,6 +218,7 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
             playback.bank(&load_bank(4035)?, 4035, &[11, 13, 14])?;
             playback.footfalls()?;
             playback.spirit_full()?;
+            playback.bank(&load_bank(4036)?, 4036, &[11, 13, 14])?;
             7
         }
     };
@@ -288,7 +296,9 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
                     entry.insert(png)
                 }
             };
-            let material_atlas = if id == usize::from(CHARGE_AURA_MESH) {
+            let material_atlas = if id == usize::from(CHARGE_AURA_MESH)
+                && !matches!(weapon_effect, WeaponEffect::GreatSword)
+            {
                 let masked_atlas = format!("{path}_alpha");
                 assets.push(Asset {
                     name: masked_atlas.clone(),
@@ -378,7 +388,7 @@ fn motion_fx(data: &[u8], weapon_id: usize) -> Result<Vec<u8>> {
             let keep = match (weapon_id, clip, kind) {
                 (_, _, 8) => false, // 817BD8FE immediately returns.
                 (0, 1465 | 1476, 5..=7) => (bank, selector) != (4022, 8), // Alpha stays zero.
-                (6, 1444..=1447, 0 | 3 | 5 | 7) | (6, 1450, 0) => true,
+                (6, 1444..=1447, 0 | 3 | 5 | 7) | (6, 1448, 2 | 5) | (6, 1450, 0) => true,
                 (12, _, 1 | 5..=7) => true,
                 (7, _, _) => match (kind, bank, selector, row[8], row[9]) {
                     (0, 5, _, 0, 0)

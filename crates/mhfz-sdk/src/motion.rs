@@ -29,6 +29,17 @@ impl MotionBanks {
         }
     }
 
+    /// Cache the locomotion, terrain, and weapon attack banks during hunter setup.
+    /// `attack_clip` is a clip present in this weapon's attack bank.
+    ///
+    /// # Safety
+    /// Call on the game thread with a live hunter and initialized resource manager.
+    pub unsafe fn preload_for_hunt(&self, actor: u32, attack_clip: u16) {
+        for clip in [1002, 1211, attack_clip] {
+            unsafe { self.preload(actor, clip) };
+        }
+    }
+
     /// # Safety
     /// The actor must be a live GU hunter on the game thread.
     pub unsafe fn decode(&self, actor: u32, packed: u16) -> Option<u16> {

@@ -38,6 +38,8 @@ pub const fn custom_id(group: u16, slot: u16) -> Option<u8> {
 #[derive(Clone, Copy)]
 pub struct MotionFrame {
     pub frame: f32,
+    /// The layer's next playhead after sampling `frame` (GU 951A80).
+    pub next: f32,
     pub end: f32,
     pub restart: f32,
     pub blend: f32,
@@ -52,6 +54,7 @@ impl MotionFrame {
         unsafe {
             Self {
                 frame: ((actor + 1280) as *const f32).read(),
+                next: ((actor + 1276) as *const f32).read(),
                 end: ((actor + 1284) as *const f32).read(),
                 restart: ((actor + 1288) as *const f32).read(),
                 blend: ((actor + 1268) as *const f32).read(),
@@ -63,6 +66,15 @@ impl MotionFrame {
     pub fn complete(self) -> bool {
         self.ended || (self.end > 0. && self.frame >= self.end)
     }
+}
+
+/// Set the hunter's base animation rate. GU 29BF34 combines it with hitstop
+/// and resets it on action change (28E538).
+/// # Safety
+/// The actor must be a live GU hunter on the game thread.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn set_motion_rate(actor: u32, rate: f32) {
+    unsafe { ((actor + 5296) as *mut f32).write(rate) };
 }
 
 /// GU 11681DC tests the active skill and its compound-skill equivalents.
@@ -293,6 +305,20 @@ impl Transition {
 pub unsafe fn transition_to(actor: u32, group: u16, slot: u16) -> bool {
     unsafe {
         transition(actor, Transition::accepted(group, slot)) && current(actor) == (group, slot)
+    }
+}
+
+/// Accept a pending custom action already selected by GU, or request it
+/// through the command dispatcher when the style selects the next action.
+///
+/// # Safety
+/// The actor must be the selected local hunter and the ID must be registered.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn accept_custom_start(actor: u32, id: u8) -> bool {
+    let slot = slot(id);
+    unsafe {
+        (current(actor) == (GROUP, slot) && ((actor + 5) as *const u8).read() == 0)
+            || transition_to(actor, GROUP, slot)
     }
 }
 

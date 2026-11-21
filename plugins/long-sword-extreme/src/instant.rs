@@ -3,7 +3,7 @@ use crate::peer::{COUNT, Slot};
 use crate::{collision, program, read};
 use core::cell::UnsafeCell;
 use mhgu_sdk::{
-    combat::collision::{Contact, ContactPool, HitShape},
+    combat::collision::{Contact, ContactPool},
     style::action,
 };
 
@@ -129,7 +129,7 @@ pub(super) unsafe fn collision_pass(slot: Slot, manager: u32) {
                 state.stop();
                 return;
             }
-            let shape = HitShape::load(cr"player\hit\frontier_ls\instant");
+            let shape = collision::INSTANT.load();
             let Some(shape) = shape.filter(|s| s.rows_in_first_group(1).is_some()) else {
                 state.stop();
                 return;

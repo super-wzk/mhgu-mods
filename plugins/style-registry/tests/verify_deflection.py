@@ -2,13 +2,17 @@
 from pathlib import Path
 import struct
 import sys
+import zlib
 
 from unicorn import UC_HOOK_CODE, arm_const as arm
 
 PLUGINS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PLUGINS / "great-sword-extreme/tests"))
 from verify_assets import Machine, MEM, STOP
-from verify_style import CHANGE_ACTION, api_for, boot, hunters, load_registered_style, setup_controller
+from verify_style import (
+    CHANGE_ACTION, COMMAND_UPDATE, DB_DRAW_ROUTE, ENCODE, WEAPON_DISPATCH, api_for, boot, hunters,
+    load_registered_style, quest_entries, setup_controller,
+)
 
 
 def source():
@@ -41,6 +45,55 @@ def source():
             m.call(dispatch, player)
             assert transitions == ([(1, recoil, 0)] if enabled else []), (state, transitions)
     print("FZ w00/w06 dispatch: original recoil destinations, exempt actions and single consumption passed")
+
+    m.c.hook_add(UC_HOOK_CODE, lambda cpu, *_: cpu.reg_write(arm.UC_ARM_REG_PC, STOP | 1),
+                 begin=0x8181F11E, end=0x8181F11E)
+    for drawn, group, timer, expected in (
+        (1, 1, 1, (1, 4)), (1, 0, 10, (9, 0)), (0, 1, 10, (0, 0)),
+    ):
+        m.c.mem_write(player + 18, bytes((drawn, 0, 0, group)))
+        m.c.mem_write(player + 2852, struct.pack("<HBxB", timer, 0, 4))
+        m.c.reg_write(arm.UC_ARM_REG_R8, player)
+        m.c.reg_write(arm.UC_ARM_REG_R7, 1)
+        m.call(0x8181FFF0)
+        actual = struct.unpack("<H2xB", m.c.mem_read(player + 2852, 5))
+        assert actual == expected, (drawn, group, timer, actual)
+    print("FZ w06: blade polish retains its last tick in weapon actions and clears stacks on exit")
+
+    updates = []
+    m.trap(0x8182D384, lambda *_: 0)
+    m.trap(0x8181DF10, lambda actor, *_: updates.append(actor))
+    m.c.hook_add(UC_HOOK_CODE, lambda cpu, *_: cpu.reg_write(arm.UC_ARM_REG_PC, STOP | 1),
+                 begin=0x81820CEA, end=0x81820CEA)
+    m.c.mem_write(player + 30, b"\x01")  # No world effect to update.
+    for hitstop in (3, 0):
+        m.c.mem_write(player + 1253, bytes([hitstop]))
+        m.call(0x81820BD4, player)
+        assert updates == ([] if hitstop else [player]), (hitstop, updates)
+    print("FZ w06: the hunter skips its blade polish update during hitstop")
+
+    m.trap(0x8182E032, lambda *_: 3)  # Extreme style.
+    m.trap(0x8182D1EE, lambda _, group, state, flags: transitions.append((group, state, flags)))
+    for phase, target, state, facing in (
+        (0, 93, 14, 0x1234), (1, 93, 20, 0x1234),
+        (2, 93, 20, 0x1234), (3, 93, 72, 0x1234),
+        (0, 97, 15, 0x1234), (3, 97, 21, 0x3234),
+        (0, 98, 15, 0x1234), (3, 98, 21, 0xf234),
+    ):
+        transitions.clear()
+        m.c.mem_write(player + 3148, bytes([phase]))
+        m.c.mem_write(player + 14, struct.pack("<H", 0x1234))
+        m.call(0x811EF3BA, player, target)
+        assert transitions == [(1, state, 12)], (phase, target, transitions)
+        assert m.c.mem_read(player + 14, 2) == struct.pack("<H", facing), (phase, target)
+    m.trap(0x8184373A, lambda *_: 150)
+    m.trap(0x81818AAC, lambda *_: 900)
+    m.trap(0x811EEEC6, lambda _, __, mask, ___: 9 if mask & (1 << 9) else 28)
+    transitions.clear()
+    m.call(0x811EF3BA, player, 91)
+    m.call(0x811F0C32, player)
+    assert transitions == [(0, 200, 12), (1, 78, 12)], transitions
+    print("FZ w06: native blade polish follow-ups and facing passed")
 
 
 def replay(weapon, style, plugin, recoil, recoil_clip):
@@ -80,7 +133,7 @@ def replay(weapon, style, plugin, recoil, recoil_clip):
     g.put(0x2126A64, mgr)
     g.put(mgr, lookup)
     g.put(lookup + 48, loader)
-    g.stub(loader, lambda _, kind, *__: bank if kind in (0x2125210, 0x1857810) else 0)
+    g.stub(loader, lambda _, kind, *__: bank if kind in (0x2125210, 0x1857810, 0x1889FDC) else 0)
     g.put(bank + 80, 1)
     g.put(actor + 3844 + 15 * 4, bank)
     g.stub(0xB49E54, lambda *_: 1)
@@ -114,9 +167,12 @@ def replay(weapon, style, plugin, recoil, recoil_clip):
     for address in (0x178030, 0x1748A8):
         g.stub(address, lambda *_: 0)
 
-    def tick(frame):
-        g.cpu.mem_write(actor + 1280, struct.pack("<f", frame))
-        g.run(controller, actor, inputs)
+    def tick(frame, *, native_input=False):
+        g.cpu.mem_write(actor + 1276, struct.pack("<2f", frame + 1, frame))
+        if native_input:
+            g.run(g.hooks[WEAPON_DISPATCH], actor)
+        else:
+            g.run(controller, actor, inputs)
         return g.half(actor + 9482) - 0x8000
 
     def begin(state):
@@ -130,6 +186,10 @@ def replay(weapon, style, plugin, recoil, recoil_clip):
         player = actor if owner is None else owner
         g.cpu.mem_write(factor, struct.pack("<f", ratio))
         g.run(g.hooks[resolver], 0, player + hand, target, part, part, player, factor, factor)
+
+    def transition(accepted):
+        nonlocal allow_transition
+        allow_transition = accepted
 
     hands = (12320, 12504) if dual else (12320,)
     for hand in hands:
@@ -222,9 +282,18 @@ def replay(weapon, style, plugin, recoil, recoil_clip):
         begin(24)
         tick(28)  # Activate blade polish.
         begin(0)
+        g.cpu.mem_write(actor + 28, struct.pack("<f", 2.))
+        for _ in range(125):
+            assert tick(16) == 0
+        g.put(actor + 28, 0)
         contact(0.1, 12504)
         assert tick(16) == 0
-        power_and_trails(g, actor, eq, vt, trails, begin, tick)
+        power_and_trails(g, actor, eq, vt, trails, begin, tick, set_action)
+        polish_hitstop(g, actor, begin, tick, set_action, contact)
+        polish_followups(g, actor, begin, tick, transition)
+        demon_effects(g, actor, inputs, vt, begin, tick)
+        aerial_followup(g, actor, begin, tick, set_action)
+        roll_followup(g, actor, set_action)
     else:
         for state in (29, 54):
             begin(state)
@@ -234,15 +303,25 @@ def replay(weapon, style, plugin, recoil, recoil_clip):
     print(f"{plugin}: contact threshold, recoil clip, single response, exceptions and interruption passed")
 
 
-def power_and_trails(g, actor, equipment, vtable, trails, begin, tick):
+def power_and_trails(g, actor, equipment, vtable, trails, begin, tick, set_action):
     g.cpu.mem_write(equipment + 800, struct.pack("<h", 200))
     separate = g.alloc(184)
-    for hit, expected in ((actor + 12320, 2.1), (actor + 12504, 2.1), (separate, 2.0)):
+
+    def power(hit):
         g.put(hit + 12, actor)
         g.put(hit + 48, 0x20)
         g.run(0x169548, hit)
-        power, = struct.unpack("<f", struct.pack("<I", g.cpu.reg_read(arm.UC_ARM_REG_S0)))
-        assert abs(power - expected) < 1e-5, (hit, power, expected)
+        return struct.unpack("<f", struct.pack("<I", g.cpu.reg_read(arm.UC_ARM_REG_S0)))[0]
+
+    for hit, expected in ((actor + 12320, 2.1), (actor + 12504, 2.1), (separate, 2.0)):
+        assert abs(power(hit) - expected) < 1e-5, (hit, power(hit), expected)
+    set_action(1, 0)
+    g.cpu.mem_write(actor + 28, struct.pack("<f", 2.))
+    tick(0)
+    g.put(actor + 28, 0)
+    assert power(actor + 12320) == 2.
+    begin(0)
+    assert power(actor + 12504) == 2.  # Re-entering cannot reactivate expired polish.
 
     matrices = {joint: g.alloc(64) for joint in (8, 12)}
     for hand, (joint, matrix) in enumerate(matrices.items()):
@@ -269,6 +348,297 @@ def power_and_trails(g, actor, equipment, vtable, trails, begin, tick):
     assert tick(2) == 18
     assert all(g.run(callback, sample) == 0 for callback in trails.values())
     print("GU DB blade-only polish, shared right/left blade trail snapshots and cleanup passed")
+
+
+def polish_hitstop(g, actor, begin, tick, set_action, contact):
+    def elapsed(frames):
+        g.cpu.mem_write(actor + 28, struct.pack("<f", frames))
+
+    for offset in (10156, 10160):
+        begin(24)
+        tick(28)
+        set_action(1, 0)
+        elapsed(2.)
+        for _ in range(119):
+            tick(0)
+        # The two remaining GU frames outlast either native hitstop timer.
+        for stop in (6., 4., 2.):
+            g.cpu.mem_write(actor + offset, struct.pack("<f", stop))
+            tick(0)
+        g.put(actor + offset, 0)
+        elapsed(0.)
+        begin(0)
+        contact(0.1)
+        assert tick(16) == 0, ("polish expired during hitstop", offset)
+        set_action(1, 0)
+        elapsed(2.)
+        tick(0)
+        elapsed(0.)
+        begin(0)
+        contact(0.1)
+        assert tick(16) == 11, ("polish did not resume counting", offset)
+    print("GU DB blade polish pauses for full-stop and slow-hit and resumes afterward")
+
+
+def polish_followups(g, actor, begin, tick, transition):
+    a, chord = 0x100, 0x120
+    aim = 0
+    previous = 0
+    g.cpu.hook_del(g.traps.pop(0x27F5D0))
+    g.stub(0x27F5D0, lambda *_: aim)
+    g.stub(0x27E638, lambda *_: 0)
+
+    def pad(frame, held=0, *, stick=0):
+        nonlocal previous
+        g.cpu.mem_write(actor + 5108, struct.pack("<3H", held, previous & ~held, held & ~previous))
+        previous = held
+        g.cpu.mem_write(actor + 5140, bytes(32))
+        g.cpu.mem_write(actor + 5136, struct.pack("<h", stick))
+        g.run(0x27CA28, actor)
+        g.run(0x11BAEF0, actor)
+        return tick(frame, native_input=True)
+
+    def enter(state):
+        g.cpu.mem_write(actor + 5188, bytes(16))
+        begin(state)
+
+    for activation, activation_frame, result in ((18, 2, 14), (65, 2, 20), (68, 48, 20), (69, 86, 72)):
+        begin(activation)
+        tick(activation_frame)
+        enter(24)
+        assert pad(35, a) == 24
+        assert pad(36) == 24
+        assert g.get(actor + 5156) & 6
+        assert pad(49) == 24
+        assert pad(50) == result, (activation, result)
+
+    for state, execute in ((25, 20), (27, 30), (33, 22), (61, 40)):
+        enter(state)
+        assert pad(12, a) == state
+        assert pad(13) == state
+        assert pad(execute) == 72, state
+    for state in (26, 28, 29, 30, 31, 32, 57, 58, 59, 60):
+        enter(state)
+        assert pad(18, a) == state
+        assert pad(19) == state
+        assert pad(42) == state
+
+    enter(24)
+    assert pad(50, a) == 24
+    assert pad(51) == 24
+    enter(24)
+    assert pad(36, stick=100) == 24
+    assert pad(37) == 24
+    assert pad(38, stick=100) == 24
+    assert pad(50, stick=100) == 89
+    assert pad(1, a, stick=100) == 89
+    assert pad(2, stick=100) == 78
+
+    shoulder_layout = g.get(0x1897F78) + 17518
+    old_layout = bytes(g.cpu.mem_read(shoulder_layout, 1))
+    for activation, delta, result, layout, shoulder, shoulder_first in (
+        (18, 0, 15, 0, 0, False), (69, 0x2000, 21, 0, 0, False),
+        (69, -0x2000, 21, 0, 0, False), (18, 0, 15, 0, 0x40, False),
+        (18, 0, 15, 0, 0x40, True), (18, 0, 15, 1, 0x800, False), (18, 0, 15, 1, 0x800, True),
+    ):
+        g.cpu.mem_write(shoulder_layout, bytes([layout]))
+        begin(activation)
+        tick(86 if activation == 69 else 2)
+        enter(24)
+        g.put(actor + 4076, 0x1234)
+        aim = 0x5234 if delta >= 0 else 0xd234
+        assert pad(0) == 24
+        if shoulder_first:
+            assert pad(38, shoulder, stick=64) == 24
+        assert pad(40, chord | shoulder, stick=64) == 24
+        assert bool(g.get(actor + 5156) & (1 << 11)) == (shoulder == 0)
+        transition(False)
+        assert pad(50, shoulder) == 24
+        assert g.half(actor + 4076) == 0x1234
+        transition(True)
+        actual = pad(51, shoulder)
+        assert actual == result, (activation, delta, layout, shoulder_first, actual, result)
+        assert g.half(actor + 4076) == (0x1234 + delta) & 0xffff, (activation, delta)
+    g.cpu.mem_write(shoulder_layout, old_layout)
+    begin(18)
+    tick(2)
+    enter(24)
+    assert pad(0) == 24
+    assert pad(38, 0x40) == 24
+    assert pad(50, 0x40) == 66
+    print("GU DB blade polish: native A/chord inputs, follow-up windows and facing passed")
+
+
+def aerial_followup(g, actor, begin, tick, set_action):
+    layout_offset = g.get(0x1897F78) + 17518
+    for layout, shoulder in ((0, 0x40), (1, 0x800)):
+        g.cpu.mem_write(layout_offset, bytes([layout]))
+        chord = 0x120 | shoulder
+        for presses, dest in (((0x120,), 78), ((chord,), 78), ((shoulder, chord), 78), ((0x20,) * 3, 91)):
+            begin(69)
+            tick(86)  # Enter Extreme Demon.
+            set_action(4, 14)
+            g.cpu.mem_write(actor + 5, b"\x02")
+            g.cpu.mem_write(actor + 9477, b"\x02")
+            g.cpu.mem_write(actor + 5188, bytes(8))
+            previous = 0
+            for held in presses:
+                g.cpu.mem_write(actor + 5108, struct.pack("<3H", held, previous & ~held, held & ~previous))
+                previous = held
+                g.cpu.mem_write(actor + 5140, bytes(32))
+                g.run(0x27CA28, actor)
+                g.run(0x11BAEF0, actor)
+            route = g.run(DB_DRAW_ROUTE, actor, 5)
+            group, slot, flags = struct.unpack("<3H", g.cpu.mem_read(route, 6))
+            g.run(CHANGE_ACTION, actor, group, slot, flags)
+            assert g.half(actor + 9482) == 0x8000 + dest, (layout, presses, g.half(actor + 9482))
+    g.cpu.mem_write(layout_offset, b"\x00")
+    print("GU DB aerial routing: plain X and shoulder chords in both layouts passed")
+
+
+def roll_followup(g, actor, set_action):
+    raw, = (zlib.decompress(raw) for name, _, raw in quest_entries("w11_m0.arc")
+            if name.endswith(b"plcmd_w11_0x0010_011a"))
+    fields = [struct.unpack_from("<H", raw, off)[0] for off in (504, 510, 516, 522)]
+    assert fields == [16, 11, 4096, 8]
+    table, table_list, tables, entries, row, resource = (g.alloc(n) for n in (24, 120, 104, 4, 24, 124))
+    g.cpu.mem_write(table, struct.pack("<6I", 0, 0, 1, 1, 0, entries))
+    g.cpu.mem_write(row, struct.pack("<3I3f", 0, 1, resource, 14, 44, 58))
+    g.cpu.mem_write(resource + 100, struct.pack("<4H4I", *fields, 4, 0, 0, 0))
+    g.put(table_list + 104, 26)
+    g.put(table_list + 116, tables)
+    g.put(tables + 25 * 4, table)
+    g.put(entries, row)
+    for fn in (COMMAND_UPDATE, 0x2E9B7C):
+        g.cpu.hook_del(g.traps.pop(fn))
+    g.stub(0x285F68, lambda *_: table_list)
+    g.put(actor + 1188, 1)
+    g.put(actor + 5068, 1)
+    g.cpu.mem_write(actor + 10057, b"\x01")
+    g.cpu.mem_write(actor + 5136, bytes(2))
+    g.cpu.mem_write(actor + 28, struct.pack("<f", 2))
+
+    for clip, execute in ((28, 44), (5012, 42), (5013, 42)):
+        set_action(1, 6)
+        g.cpu.mem_write(actor + 5, b"\x02")
+        g.cpu.mem_write(actor + 1204, struct.pack("<H", g.run(ENCODE, actor, clip)))
+        g.cpu.mem_write(actor + 1284, struct.pack("<f", 80))
+        g.cpu.mem_write(actor + 5188, bytes(8))
+        g.put(actor + 1268, 0)
+        g.put(actor + 5328, 0)
+        g.run(0x11BA4FC, actor)  # Native bind of w11 table 2025.
+        assert g.get(g.get(actor + 9384) + 8) == 1
+        for frame in range(32, execute + 1, 2):
+            g.cpu.mem_write(actor + 1276, struct.pack("<2f", frame + 1, frame))
+            g.cpu.mem_write(actor + 5332, struct.pack("<f", frame))
+            g.cpu.mem_write(actor + 5108, struct.pack("<3H", 0x20, 0, 0x20 if frame == 32 else 0))
+            g.cpu.mem_write(actor + 5140, bytes(32))
+            g.run(0x27CA28, actor)
+            g.run(0x11BAEF0, actor)
+            g.run(COMMAND_UPDATE, actor)
+            expected = (16, 0x8006) if frame == execute else (1, 6)
+            assert (g.half(actor + 9478), g.half(actor + 9482)) == expected, (clip, frame)
+    print("GU DB rolls: stock attack cannot consume the buffered X follow-up")
+
+
+def demon_effects(g, actor, inputs, vtable, begin, tick):
+    root = PLUGINS / "dual-blades-extreme"
+    routes = list(struct.iter_unpack("<HH", (root / "target/assets/effects/routes.bin").read_bytes()))
+    pel = root / "dist/dual-blades-extreme/romfs/nativeNX/effect/frontier_db/particles.pel"
+    assert struct.unpack_from("<I", pel.read_bytes(), 12)[0] == sum(n for _, n in routes)
+    manager, scene, handle, parent = [g.alloc(n) for n in (128, 16, 8, 32)]
+    g.put(0x188A0D4, manager)
+    g.put(0x2126F48, scene)
+    g.put(0x21270E0, g.alloc(32))
+    g.stub(0x3268D8, lambda *_: handle)
+    g.stub(0x326C78, lambda *_: 0)
+    g.stub(0x3288C4, lambda size, *_: g.alloc(size))
+    g.stub(0x328900, lambda *_: 0)
+    g.stub(0x2A25F0, lambda *_: 0)
+    matrix = g.alloc(64)
+    for address, callback in (
+        (g.get(vtable + 304), lambda *_: parent),
+        (0xC1628, lambda *_: matrix),
+    ):
+        g.cpu.hook_del(g.traps.pop(address))
+        g.stub(address, callback)
+    g.cpu.mem_write(matrix + 48, struct.pack("<3f", 15., 35., 25.))
+    g.cpu.mem_write(actor + 64, struct.pack("<3f", 10., 20., 30.))
+    g.cpu.mem_write(actor + 4076, struct.pack("<H", 0x2000))
+    spawned = []
+    water = -100001.
+
+    def spawn(_, unit, *__):
+        stack = g.cpu.reg_read(arm.UC_ARM_REG_SP)
+        spawned.append((g.get(stack), unit + 128))
+        return 1
+
+    def ground(*_):
+        stack = g.cpu.reg_read(arm.UC_ARM_REG_SP)
+        g.cpu.mem_write(g.get(stack + 4), struct.pack("<f", -5.))
+        g.cpu.mem_write(g.get(stack + 8) + 20, struct.pack("<f", water))
+        return 1
+
+    g.stub(0x3267D0, spawn)
+    g.stub(0x18192C, ground)
+
+    def proofs(route):
+        first, count = routes[route]
+        return [p for selector, p in spawned if first <= selector < first + count]
+
+    def world(route, position):
+        assert len(proofs(route)) == routes[route][1], (route, spawned)
+        for p in proofs(route):
+            assert struct.unpack("<3f", g.cpu.mem_read(p + 176, 12)) == position
+            assert struct.unpack("<f", g.cpu.mem_read(p + 36, 4))[0] == 45.
+
+    def palette(glow, trail):
+        # The blades use separate glow routes for their local rotations.
+        for joint, glow_route, trail_route in ((8, 6, 9), (12, 33, 12)):
+            assert [g.half(p + 66) for p in proofs(glow_route + glow)] == [joint], spawned
+            assert len(proofs(trail_route + trail)) == 1, spawned
+
+    g.put(inputs, 1 << 27)  # Keep R held through the phase gates.
+    begin(65)
+    spawned.clear()
+    assert tick(32) == 65
+    palette(1, 1)
+    spawned.clear()
+    tick(49)
+    assert not spawned
+    tick(50)
+    world(29, (10., 20., 30.))
+    spawned.clear()
+    tick(50)
+    assert not spawned
+    tick(63)
+    palette(0, 1)
+    spawned.clear()
+    tick(83)
+    assert not spawned
+    tick(84)
+    world(30, (15., 35., 25.))
+    world(31, (10., -5., 30.))
+    assert not proofs(32)
+    spawned.clear()
+    g.cpu.mem_write(actor + 28, struct.pack("<f", 7200.))
+    tick(86)
+    palette(2, 2)
+    g.put(actor + 28, 0)
+    water = 12.
+    begin(69)
+    spawned.clear()
+    tick(84)
+    world(30, (15., 35., 25.))
+    world(32, (10., 12., 30.))
+    assert not proofs(31)
+    begin(18)
+    begin(68)
+    spawned.clear()
+    g.cpu.mem_write(actor + 28, struct.pack("<f", 7200.))
+    tick(48)
+    palette(2, 2)  # Full flame can be reached in true demon as well.
+    print("GU DB true/extreme demon: timed bursts, dry/wet placement, both blade palettes and full flame passed")
 
 
 if __name__ == "__main__":

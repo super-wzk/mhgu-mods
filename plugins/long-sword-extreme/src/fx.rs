@@ -15,11 +15,10 @@ use mhgu_sdk::{
 
 static PARTICLES: Bank = Bank::new(c"effect\\frontier_ls\\particles", ROUTES);
 
-pub(super) unsafe fn preload_draw() {
-    // Sheathed deflect (1450) emits its first particle at frame 6.
+pub(super) unsafe fn preload() {
     unsafe { PARTICLES.resource() };
 }
-const ROUTES: &[u8; 320] = include_bytes!("../target/assets/effects/routes.bin");
+const ROUTES: &[u8; 332] = include_bytes!("../target/assets/effects/routes.bin");
 
 const fn route_layers(route: usize) -> usize {
     u16::from_le_bytes([ROUTES[route * 4 + 2], ROUTES[route * 4 + 3]]) as usize
@@ -86,11 +85,15 @@ impl DashCharge {
         if self.pending_flash == 0 && self.pending_auras == [0; DASH_CHARGE_AURAS] {
             return;
         }
-        let Some(parent) = (unsafe { particle::parent(actor) }) else {
-            return;
-        };
-        let units = &DASH_CHARGE_UNITS[self.slot.0];
         unsafe {
+            // Do not start the attached emitters with GU's unmapped-joint root fallback.
+            if particle::joint_matrix(actor, 8).is_none() {
+                return;
+            }
+            let Some(parent) = particle::parent(actor) else {
+                return;
+            };
+            let units = &DASH_CHARGE_UNITS[self.slot.0];
             self.pending_flash = units.emit_layers(
                 &PARTICLES,
                 DASH_CHARGE_FLASH,
@@ -239,14 +242,14 @@ pub(super) fn install() {
     }
 }
 
-pub(super) unsafe fn joint(actor: u32, bone: u8, route: usize) {
+pub(super) unsafe fn joint(actor: u32, joint: i16, route: usize) {
     if let Some(parent) = unsafe { particle::parent(actor) } {
         unsafe {
             PARTICLES.emit(
                 route,
                 Anchor::Joint {
                     parent,
-                    joint: i16::from(bone),
+                    joint,
                     offset: Some([0.; 3]),
                 },
             );
@@ -288,10 +291,16 @@ pub(super) unsafe fn mark(
 // Returns true when the footfall cue has been submitted for this dry step.
 pub(super) unsafe fn dash_ground(actor: u32, charged: bool, sound_due: bool) -> bool {
     unsafe {
-        let mut pos: [f32; 3] = read(actor, 64);
-        let (sin, cos) = Angle::from_units(read(actor, 4076)).sin_cos();
-        pos[0] -= 120. * cos + 40. * sin;
-        pos[2] += 120. * sin - 40. * cos;
+        // FZ uses node 0's evaluated position, and the hunter's current floor height.
+        // GU's equivalent is the evaluated root (176), before the next movement update.
+        let [x, _, z]: [f32; 3] = read(actor, 224);
+        let yaw = read(actor, 4076);
+        let (sin, cos) = Angle::from_units(yaw).sin_cos();
+        let mut pos = [
+            x - 120. * cos - 40. * sin,
+            read(actor, 68),
+            z + 120. * sin - 40. * cos,
+        ];
         let Some((floor, water)) = particle::ground_heights(actor, pos) else {
             return false;
         };
@@ -299,7 +308,7 @@ pub(super) unsafe fn dash_ground(actor: u32, charged: bool, sound_due: bool) -> 
             return false;
         }
         pos[1] = floor;
-        world(actor, pos, if charged { 16 } else { 15 });
+        PARTICLES.emit(if charged { 16 } else { 15 }, Anchor::World(pos, yaw));
         if sound_due {
             crate::sound::blade_at(actor, if charged { 9 } else { 8 }, pos);
         }
@@ -369,8 +378,8 @@ pub(super) unsafe fn motion_events(
     const ROWS: &[[u8; 18]] = include_bytes!("../target/assets/effects/motion_fx.bin")
         .as_chunks::<18>()
         .0;
-    for (event, late) in clock.advance(ROWS, clip, sample) {
-        unsafe { motion_event(actor, slot, trail, clip, event, late) };
+    for event in clock.advance(ROWS, clip, sample) {
+        unsafe { motion_event(actor, slot, trail, clip, event) };
     }
 }
 
@@ -380,7 +389,6 @@ unsafe fn motion_event(
     trail: &mut crate::trail::History,
     clip: u16,
     event: MotionEvent,
-    late: f32,
 ) {
     unsafe {
         let MotionEvent {
@@ -398,11 +406,7 @@ unsafe fn motion_event(
             return;
         }
         if kind == 0 {
-            trail.swing(
-                slot,
-                actor,
-                (2. * (f32::from(selector) + 2.) - late).max(0.),
-            );
+            trail.swing(slot, actor, 2. * (f32::from(selector) + 2.));
             return;
         }
         let yaw = read::<u16>(actor, 4076);
@@ -434,7 +438,7 @@ unsafe fn motion_event(
             (
                 particle::transform_offset(&m, offset),
                 if mode == 0 {
-                    effects::pose_angles(&m)
+                    effects::world_pose_angles(&m)
                 } else {
                     [0; 3]
                 },
@@ -454,15 +458,16 @@ unsafe fn motion_event(
                 ],
             )
         };
-        let wet = if matches!(kind, 1 | 5) {
-            let Some((floor, water)) = particle::ground_heights(actor, position) else {
+        let mut wet = false;
+        if matches!(kind, 1 | 5) {
+            if let Some((floor, water)) = particle::ground_heights(actor, position) {
+                position[1] = water.unwrap_or(floor);
+                wet = water.is_some();
+            } else if kind == 1 {
                 return;
-            };
-            position[1] = water.unwrap_or(floor);
-            water.is_some()
-        } else {
-            false
-        };
+            }
+            // 8170469E keeps the input node height when the terrain probe misses.
+        }
         let route = match kind {
             1 if wet => {
                 position[1] += 5.;
@@ -475,10 +480,12 @@ unsafe fn motion_event(
                 (6, false) => 60,
                 (2, true) => 61,
                 (6, true) => 62,
-                // 817BD21C selects bank+1 on water. 4036 has no 11, 13 or 14.
                 (11, false) => 72,
                 (13, false) => 73,
                 (14, false) => 74,
+                (11, true) => 80,
+                (13, true) => 81,
+                (14, true) => 82,
                 _ => return,
             },
             6 if bank == 4035 => 59,

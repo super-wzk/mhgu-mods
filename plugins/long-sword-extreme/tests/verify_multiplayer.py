@@ -156,7 +156,7 @@ def replay():
         g.cpu.mem_write(actor + 10156, bytes(8))
         g.stub(0x16DB68, zero)
 
-    def resolve_blade(actor):
+    def resolve_blade(actor, power=40):
         hit = actor + 12320
         half(g.get(actor + 5060) + 800, 100)
         before = g.get(status + 880)
@@ -184,10 +184,10 @@ def replay():
             g.run(0x16C0C0, collision, hit, monster)
             if along in (5, 315) or side == 55:
                 assert g.half(status + 1160) == 0
-        assert credit[-1] == (0, roster.index(actor), 40), credit
-        assert g.half(status + 1160) == 40
+        assert credit[-1] == (0, roster.index(actor), power), credit
+        assert g.half(status + 1160) == power
         g.run(0x97DDC, monster)
-        assert g.get(status + 880) == before - 40
+        assert g.get(status + 880) == before - power
         g.run(0x9D67C, monster)
 
     for local in (0, 2):
@@ -236,6 +236,26 @@ def replay():
                 g.run(0x282DA8, p)
                 assert g.half(p + 12320 + 52) == n
                 serial = n
+        p = guests[0]
+        hit = p + 12320
+        # The hunter's playhead can advance by less than the collision clock.
+        # Keep the native contact aging and verify that the swing frame
+        # still reaches the monster as a new attack.
+        for state, power in ((7, 37), (18, 17)):
+            receive(p, 72)
+            number(p + 1280, 0)
+            g.run(0x282DA8, p)
+            number(p + 1280, 18)
+            g.run(0x282DA8, p)
+            serial = g.half(hit + 52)
+            receive(p, state)
+            for frame in range(8, 49):
+                number(p + 1280, frame)
+                g.run(0x282DA8, p)
+                g.run(0x16919C, hit)
+            assert g.run(0x169328, hit) == 1, (state, "Spirit I contact expired before frame 48")
+            assert g.half(hit + 52) != serial
+            resolve_blade(p, power)
     # Two peers sweep different world paths at once, then one leaves the room.
     for address in (0x276748, 0x5CEB4, 0x258FFC):
         g.stub(address, zero)

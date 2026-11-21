@@ -1,8 +1,24 @@
 //! GU contact setup for Frontier long sword attacks.
 use crate::{native, read, write};
-use mhgu_sdk::combat::collision::Contact;
+use mhgu_sdk::combat::collision::{CachedHitShape, Contact};
 
 pub(super) const BLADE_TEMPLATE: u16 = 1;
+
+pub(super) static BLADES: [CachedHitShape; 3] = [
+    CachedHitShape::new(cr"player\hit\frontier_ls\blade_0"),
+    CachedHitShape::new(cr"player\hit\frontier_ls\blade_32"),
+    CachedHitShape::new(cr"player\hit\frontier_ls\blade_33"),
+];
+pub(super) static DISCHARGE: CachedHitShape =
+    CachedHitShape::new(cr"player\hit\frontier_ls\discharge");
+pub(super) static INSTANT: CachedHitShape = CachedHitShape::new(cr"player\hit\frontier_ls\instant");
+pub(super) static RELEASE: CachedHitShape = CachedHitShape::new(cr"player\hit\frontier_ls\release");
+
+pub(super) unsafe fn preload() {
+    for shape in BLADES.iter().chain([&DISCHARGE, &INSTANT, &RELEASE]) {
+        unsafe { shape.preload() };
+    }
+}
 
 pub(super) unsafe fn blade_template(actor: u32) -> Option<u32> {
     let template = unsafe { native!(0x2a8a88, actor, u32::from(BLADE_TEMPLATE)) };

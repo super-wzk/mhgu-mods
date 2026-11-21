@@ -2,7 +2,7 @@
 use crate::peer::{COUNT, Slot};
 use crate::{collision, fx, motion, native, read, sound, write};
 use core::cell::{Cell, UnsafeCell};
-use mhgu_sdk::combat::collision::{Contact, ContactPool, HitShape};
+use mhgu_sdk::combat::collision::{Contact, ContactPool};
 use mhgu_sdk::style::action;
 
 // All accesses run on GU's game thread. Copy values out before calling GU,
@@ -176,7 +176,7 @@ unsafe fn launch(slot: Slot, actor: u32, hit: Contact<'_>, mark: Mark) {
         let Some(template) = collision::blade_template(actor) else {
             return;
         };
-        let Some(shape) = HitShape::load(c"player\\hit\\frontier_ls\\release") else {
+        let Some(shape) = collision::RELEASE.load() else {
             return;
         };
         let Some(rows) = shape.rows_in_first_group(1) else {

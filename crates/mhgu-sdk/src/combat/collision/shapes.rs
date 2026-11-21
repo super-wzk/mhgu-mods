@@ -1,6 +1,9 @@
 //! Groups in a live HTS resource, shared by contacts of any owner.
 use crate::memory::{Field, Object, entry, singleton};
-use core::ffi::{CStr, c_char};
+use core::{
+    ffi::{CStr, c_char},
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 /// Owns one native reference to a loaded rHitShape. GU retains its own reference
 /// when the resource is submitted with an attack.
@@ -48,6 +51,53 @@ impl Drop for HitShape {
         unsafe {
             let release: unsafe extern "C" fn(u32) = core::mem::transmute(entry(0x887660));
             release(self.as_raw());
+        }
+    }
+}
+
+/// A fixed style HTS that can be retained for the life of the process.
+pub struct CachedHitShape {
+    path: &'static CStr,
+    resource: AtomicU32,
+}
+
+impl CachedHitShape {
+    pub const fn new(path: &'static CStr) -> Self {
+        Self {
+            path,
+            resource: AtomicU32::new(0),
+        }
+    }
+
+    /// # Safety
+    /// Call on the game thread while the resource manager is active.
+    pub unsafe fn preload(&self) {
+        if self.resource.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        let Some(shape) = (unsafe { HitShape::load(self.path) }) else {
+            return;
+        };
+        if self
+            .resource
+            .compare_exchange(0, shape.as_raw(), Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            core::mem::forget(shape);
+        }
+    }
+
+    /// Acquire an owned reference, resolving the path if preload did not run.
+    /// # Safety
+    /// Call on the game thread while the resource manager is active.
+    pub unsafe fn load(&self) -> Option<HitShape> {
+        unsafe {
+            let Some(resource) = Object::at(self.resource.load(Ordering::Acquire)) else {
+                return HitShape::load(self.path);
+            };
+            let retain: unsafe extern "C" fn(u32) = core::mem::transmute(entry(0x887648));
+            retain(resource.addr());
+            Some(HitShape(resource))
         }
     }
 }

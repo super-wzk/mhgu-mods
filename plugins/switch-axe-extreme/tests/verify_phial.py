@@ -118,7 +118,7 @@ def replay(g, root, actor, eq, receive, routes, stub, sync_light):
 
     def frame(n):
         g.run(g.hooks[0x282DA8], local)
-        g.cpu.mem_write(actor + 1280, struct.pack("<f", n))
+        g.cpu.mem_write(actor + 1276, struct.pack("<2f", n + 1, n))
         g.run(g.hooks[0x2B8178], actor)
 
     def tick_size(n):
@@ -199,6 +199,13 @@ def replay(g, root, actor, eq, receive, routes, stub, sync_light):
     )
     assert count == 1
     tick_size(0)
+    receive(actor, 86)
+    for n, enabled in ((79, False), (80, True), (80, False)):
+        spawned.clear()
+        frame(n)
+        batch = selected(4014, 16)
+        assert len(batch) == (routes[4014, 16][1] if enabled else 0), (n, batch)
+        release(spawned)
     for state, tier in ((75, 1), (85, 2), (86, 3)):
         receive(actor, state)
         spawned.clear()
@@ -238,6 +245,124 @@ def replay(g, root, actor, eq, receive, routes, stub, sync_light):
         frame(20)
     assert len(selected(4016, 8)) == routes[4016, 8][1]
     release(spawned)
+
+    # The native sheathe action can take ownership before it starts its clip.
+    tick_size(0)
+    sync_light(148)
+    spawned.clear()
+    frame(23)
+    frame(39)
+    opener = selected(4016, 14) + selected(4016, 16)
+    assert len(opener) == routes[4016, 14][1] + 3 * routes[4016, 16][1], opener
+    sync_light(179)
+    tick_size(2)
+    spawned.clear()
+    for _ in range(27):
+        frame(90)
+    glow = selected(4016, 8)
+    sprint = selected(4016, 25) + selected(4013, 0)
+    assert glow and sprint
+    release(glow[:1])
+    stopped.clear()
+    spawned.clear()
+    g.cpu.mem_write(actor + 9478, struct.pack("<H2xH", 1, 2))
+    g.cpu.mem_write(actor + 5, b"\0")
+    frame(90)
+    assert set(stopped) == {r[1] for r in glow[1:] + sprint + opener}, stopped
+    for _ in range(5):
+        frame(90)
+    assert not (selected(4016, 8) or selected(4016, 25) or selected(4013, 0))
+
+    tick_size(0)
+    receive(actor, 105)
+    spawned.clear()
+    frame(2)
+    frame(6)
+    brake = selected(4015, 13) + selected(4014, 3)
+    assert len(brake) == 2 * routes[4015, 13][1] + routes[4014, 3][1]
+    stopped.clear()
+    g.cpu.mem_write(actor + 9478, struct.pack("<H2xH", 1, 2))
+    frame(6)
+    assert set(stopped) == {r[1] for r in brake}
+
+    # Bind the private native locomotion bank so sheathe reaches real clip IDs.
+    manager = g.get(0x2126A64)
+    load = g.get(g.get(manager) + 48)
+    lmt = {}
+    for bank in ("m_0", "m_4"):
+        lmt[bank] = g.alloc(128)
+        g.put(lmt[bank] + 80, 1)
+    stub(load, lambda _, kind, path, __: (
+        lmt[g.string(path).rsplit("\\", 1)[-1]] if kind == 0x2125210 else 0
+    ))
+    stub(0xB49E54, lambda *_: 1)
+    stub(0x957400, lambda p, r, bank, *_: g.put(p + 3844 + 4 * bank, r))
+
+    def native_frame(n):
+        g.cpu.mem_write(actor + 1280, struct.pack("<f", n))
+        g.run(g.hooks[0x282DA8], local)
+
+    for previous, clip, cue in ((78, 1003, 8), (179, 1009, 6)):
+        tick_size(0)
+        sync_light(previous)
+        packed = g.run(g.hooks[0x27C6A0], actor, 0x10000 | clip)
+        assert packed & 0xff == clip - 1000 and 8 <= packed >> 8 < 16
+        if previous == 78:
+            # A stationary, drawn hunter enters sheathe through GU itself.
+            stub(0x2A2444, lambda *_: 1)
+            g.cpu.mem_write(actor + 9478, struct.pack("<H2xH", 1, 0))
+            native_frame(20)
+        tick_size(2)
+        spawned.clear()
+        for _ in range(5):
+            if previous == 179:
+                frame(90)
+            else:
+                native_frame(20)
+        glow = selected(4016, 8)
+        assert glow, (previous, spawned, g.get(actor + 13096), g.half(actor + 9478))
+        stopped.clear()
+        g.cpu.mem_write(actor + 9478, struct.pack("<H2xH", 1, 2))
+        g.cpu.mem_write(actor + 1204, struct.pack("<H", packed))
+        g.cpu.mem_write(actor + 1276, struct.pack("<f", cue - 1))
+        spawned.clear()
+        native_frame(cue + 1)
+        assert {r[1] for r in glow} <= set(stopped)
+        assert not (selected(4015, 4) or selected(4014, 2) or selected(4016, 8)), spawned
+
+    # Start the highest discharge in the same room, then interrupt it with
+    # damage while the old motion is still bound and its old clock is frozen.
+    tick_size(0)
+    spawned.clear()
+    sync_light(86)
+    flash = selected(4014, 21)
+    assert len(flash) == routes[4014, 21][1]
+    packed = g.run(g.hooks[0x27C6A0], actor, 0x10000 | 1456)
+    assert packed & 0xff == 56 and 8 <= packed >> 8 < 16
+    frame(95)
+    live = flash + selected(4014, 5)
+    assert len(live) > len(flash)
+    g.cpu.mem_write(actor + 9478, struct.pack("<H2xH", 64, 6))
+    g.cpu.mem_write(actor + 1204, struct.pack("<H", packed))
+    g.cpu.mem_write(actor + 1276, struct.pack("<f", 95))
+    stopped.clear()
+    spawned.clear()
+    native_frame(97)
+    native_frame(97)
+    assert not spawned
+    assert {r[1] for r in live} <= set(stopped)
+
+    area = bytes(g.cpu.mem_read(actor + 4180, 1))
+    g.cpu.mem_write(actor + 4180, bytes((area[0] ^ 1,)))
+    receive(actor, 86)
+    frame(97)
+    receive(actor, 105)
+    frame(7)  # The axe brake emits through the separate motion FX table.
+    assert not spawned
+    g.cpu.mem_write(actor + 4180, area)
+    frame(8)
+    assert not spawned  # Effects skipped in the other room do not play on re-entry.
+
     tick_size(0)
     g.put(actor + 9120, 0)
     g.put(actor + 1172, 0)
@@ -245,5 +370,5 @@ def replay(g, root, actor, eq, receive, routes, stub, sync_light):
     from verify_phial_follow import moving_blade
     moving_blade(root, glow_proofs)
     print(
-        "FZ/GU phials: six equipment values, five-tick cadence, weapon-model anchor, discharge cutoff, late-join state, three release tiers, cartridge lifetime and unit retirement passed."
+        "FZ/GU phials: six equipment values, five-tick cadence, weapon-model anchor, discharge cutoff, late-join state, three release tiers, cartridge, sprint/sheathe retirement, damage interruption and cross-area effects passed."
     )

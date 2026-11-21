@@ -21,62 +21,59 @@ pub struct MotionEvent {
 pub struct MotionClock {
     clip: u16,
     frame: f32,
+    scanned_until: f32,
 }
 
 impl MotionClock {
     pub fn seek(&mut self, clip: u16, frame: f32) {
-        *self = Self { clip, frame };
+        *self = Self {
+            clip,
+            frame,
+            scanned_until: frame,
+        };
     }
 
-    /// Skip blended samples and split a loop into its tail and restarted head.
+    /// Scan from the evaluated pose up to the next playhead. A loop starts
+    /// a new interval once GU has evaluated the restarted pose.
     pub fn advance<'a>(
         &mut self,
         rows: &'a [[u8; 18]],
         clip: u16,
         sample: MotionFrame,
-    ) -> impl Iterator<Item = (MotionEvent, f32)> + 'a {
-        let previous = self.frame;
-        let same_clip = self.clip == clip;
-        self.seek(clip, sample.frame);
-        let ranges = if !same_clip || sample.blend > 0. {
-            [(0., 0., 0.); 2]
-        } else if sample.frame < previous
-            && sample.restart > 0.
-            && (sample.restart..sample.end).contains(&sample.frame)
-        {
-            [
-                (previous, sample.end, sample.frame - sample.restart),
-                (sample.restart, sample.frame, 0.),
-            ]
+    ) -> impl Iterator<Item = MotionEvent> + 'a {
+        if self.clip != clip || sample.frame < self.frame {
+            self.seek(clip, sample.frame);
+        }
+        self.frame = sample.frame;
+        let from = sample.frame.max(self.scanned_until);
+        let to = if sample.blend <= 0. && sample.next > from {
+            self.scanned_until = sample.next;
+            sample.next
         } else {
-            [(previous, sample.frame, 0.), (0., 0., 0.)]
+            from
         };
-        ranges
-            .into_iter()
-            .filter(|&(from, to, _)| from < to)
-            .flat_map(move |(from, to, after)| {
-                motion_events(rows, clip, from, to).map(move |event| {
-                    let late = to - event.frame + after;
-                    (event, late)
-                })
-            })
+        motion_events(rows, clip, from, to)
     }
 }
 
-/// FZ 817BD900 scans [previous, current) in the clip's authored event order.
+/// FZ 817BD900 scans [+544, +476) in the clip's authored event order.
 fn motion_events(
     rows: &[[u8; 18]],
     clip: u16,
-    previous: f32,
-    current: f32,
+    from: f32,
+    to: f32,
 ) -> impl Iterator<Item = MotionEvent> + '_ {
-    let start = rows.partition_point(|row| half(row, 0) < clip);
+    let start = if from < to {
+        rows.partition_point(|row| half(row, 0) < clip)
+    } else {
+        rows.len()
+    };
     rows[start..]
         .iter()
         .take_while(move |row| half(*row, 0) == clip)
         .filter_map(move |row| {
             let frame = f32::from(half(row, 2));
-            (previous <= frame && frame < current).then(|| MotionEvent {
+            (from <= frame && frame < to).then(|| MotionEvent {
                 frame,
                 kind: half(row, 4),
                 bank: half(row, 6),
@@ -92,21 +89,25 @@ fn half(data: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([data[at], data[at + 1]])
 }
 
-// FZ 810050CC decomposes normalized matrix columns in Z-Y-X order.
-pub fn pose_angles(m: &[f32; 16]) -> [u16; 3] {
-    let len = |i: usize| {
-        libm::sqrtf(m[i] * m[i] + m[i + 1] * m[i + 1] + m[i + 2] * m[i + 2]).max(f32::EPSILON)
+/// Preserve the sampled bone basis when submitting a GU world particle.
+/// FZ 810050CC and GU 8A7DC4 use different Euler orders. GU builds Ry * Rx * Rz.
+pub fn world_pose_angles(pose: &[f32; 16]) -> [u16; 3] {
+    let normalize = |i: usize| {
+        let [x, y, z] = [pose[i], pose[i + 1], pose[i + 2]];
+        let len = libm::sqrtf(x * x + y * y + z * z).max(f32::EPSILON);
+        [x / len, y / len, z / len]
     };
-    let xy = libm::hypotf(m[0], m[1]);
-    let (x, z) = if xy < f32::EPSILON * len(0) {
-        (libm::atan2f(-m[9] / len(8), m[5] / len(4)), 0.)
+    let [xx, xy, xz] = normalize(0);
+    let [_, yy, _] = normalize(4);
+    let [zx, zy, zz] = normalize(8);
+    let horizontal = libm::hypotf(zx, zz);
+    let (yaw, roll) = if horizontal > f32::EPSILON {
+        (libm::atan2f(zx, zz), libm::atan2f(xy, yy))
     } else {
-        (
-            libm::atan2f(m[6] / len(4), m[10] / len(8)),
-            libm::atan2f(m[1], m[0]),
-        )
+        (libm::atan2f(-xz, xx), 0.)
     };
-    [x, libm::atan2f(-m[2], xy), z].map(|r| (r * (65536. / core::f32::consts::TAU)) as i32 as u16)
+    [libm::atan2f(-zy, horizontal), yaw, roll]
+        .map(|r| (r * (65536. / core::f32::consts::TAU)) as i32 as u16)
 }
 
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
@@ -131,59 +132,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wrapped_effects_keep_order_lateness_and_half_open_bounds() {
-        let rows = [20u16, 22, 59, 60].map(|frame| {
+    fn world_particle_angles_preserve_a_scaled_pose() {
+        // FZ local X/Y/Z angles 20/35/50 degrees with column scales 2/3/4.
+        #[rustfmt::skip]
+        let pose = [
+             1.0530816, 1.2550137, -1.1471529, 0.,
+            -1.7812429, 2.2629039,  0.8404995, 0.,
+             2.4338234, 0.7721623,  3.0790045, 0.,
+             0.,        0.,         0.,        1.,
+        ];
+        for (actual, expected) in world_pose_angles(&pose)
+            .into_iter()
+            .zip([63510, 6976, 7237])
+        {
+            assert!((actual.wrapping_sub(expected) as i16).abs() <= 1);
+        }
+        // At +90 degrees of pitch the same basis is represented with zero roll.
+        #[rustfmt::skip]
+        let vertical = [
+             0.,  0., -1., 0.,
+             1.,  0.,  0., 0.,
+             0., -1.,  0., 0.,
+             0.,  0.,  0., 1.,
+        ];
+        assert_eq!(world_pose_angles(&vertical), [0x4000, 0x4000, 0]);
+    }
+
+    #[test]
+    fn events_use_the_pose_and_exclude_the_next_playhead() {
+        let rows = [20u16, 22, 50, 51, 59, 60, 84].map(|frame| {
             let mut row = [0u8; 18];
-            row[..2].copy_from_slice(&1000u16.to_le_bytes());
+            row[..2].copy_from_slice(&1448u16.to_le_bytes());
             row[2..4].copy_from_slice(&frame.to_le_bytes());
             row
         });
-        let sample = MotionFrame {
-            frame: 22.,
-            end: 60.,
-            restart: 20.,
-            blend: 0.,
-            ended: false,
-        };
         let mut clock = MotionClock::default();
-        clock.seek(1000, 58.);
-        let mut events = clock.advance(&rows, 1000, sample);
-        assert_eq!(
-            events.next().map(|(e, late)| (e.frame, late)),
-            Some((59., 3.))
-        );
-        assert_eq!(
-            events.next().map(|(e, late)| (e.frame, late)),
-            Some((20., 2.))
-        );
-        assert!(events.next().is_none());
-        assert!(clock.advance(&rows, 1000, sample).next().is_none());
-        assert!(
-            clock
+        clock.seek(1448, 48.);
+        let mut check = |frame, next, blend, expected: &[u16]| {
+            let events = clock
                 .advance(
                     &rows,
-                    1000,
+                    1448,
                     MotionFrame {
-                        frame: 23.,
-                        blend: 1.,
-                        ..sample
-                    }
+                        frame,
+                        next,
+                        end: 100.,
+                        restart: 20.,
+                        blend,
+                        ended: false,
+                    },
                 )
-                .next()
-                .is_none()
-        );
-        assert!(
-            clock
-                .advance(
-                    &rows,
-                    1000,
-                    MotionFrame {
-                        frame: 24.,
-                        ..sample
-                    }
-                )
-                .next()
-                .is_none()
-        );
+                .map(|event| event.frame as u16);
+            assert!(events.eq(expected.iter().copied()), "{frame}..{next}");
+        };
+        check(48., 50., 0., &[]);
+        check(50., 52., 0., &[50, 51]);
+        check(50., 52., 0., &[]);
+        check(58., 60., 0., &[59]);
+        check(60., 20., 0., &[]);
+        check(20., 20., 0., &[]);
+        check(20., 22., 0., &[20]);
+        check(22., 23., 0., &[22]);
+        check(82., 84., 2., &[]);
+        check(84., 85., 0., &[84]);
     }
 }

@@ -1,7 +1,8 @@
 """Compare GU release decisions to the original FZ branch dispatcher."""
 
+import math
 import struct
-from unicorn.arm_const import UC_ARM_REG_S1
+from unicorn.arm_const import UC_ARM_REG_S0, UC_ARM_REG_S1
 
 from verify_assets import Machine, MEM
 
@@ -66,6 +67,18 @@ class Frontier:
         self.m.call(0x81213F18, self.actor, branch)
         return int.from_bytes(self.m.c.mem_read(self.actor + 14, 2), "little")
 
+    def sprint_facing(self, target):
+        m = self.m
+        m.trap(0x817C7966, lambda *_: 1)
+        m.trap(0x817C5810, lambda *_: target & 65535)
+        m.trap(0x8122A4EC, lambda *_: 0)
+        m.c.mem_write(self.actor, b"\1")
+        m.put(self.actor + 164, 0)
+        m.c.mem_write(self.actor + 14, bytes(2))
+        m.c.reg_write(UC_ARM_REG_S0, 0)
+        m.call(0x81817490, self.actor, 800, 910)
+        return int.from_bytes(m.c.mem_read(self.actor + 14, 2), "little")
+
 
 def replay(g, repo, actor, remote, tick, inputs, set_action, reg):
     reference = Frontier(repo / "mhfz/eboot.bin.elf")
@@ -102,6 +115,16 @@ def replay(g, repo, actor, remote, tick, inputs, set_action, reg):
     stub(0x2864C4, lambda _, candidate, *__: int(skill == candidate))
     num(actor + 5088, 900)
     for skill, lower, upper in ((0, 60, 270), (152, 48, 216), (153, 72, 324)):
+        fz_skill = {0: None, 152: 0x12e, 153: 0x130}[skill]
+        reference.m.trap(0x8114690c, lambda _, id, *__: int(id == fz_skill))
+        reference.m.call(0x8181848c, reference.actor)
+        expected_rate = reference.m.c.mem_read(reference.actor + 3108, 4)
+        for state in (123, 124, 128, 129):
+            clear_input()
+            num(actor + 5296, 1)
+            enter(state)
+            assert g.cpu.mem_read(actor + 5296, 4) == expected_rate
+        num(actor + 5296, 1)
         for sword in (False, True):
             for elapsed, level in (
                 (lower - 1, 1),
@@ -276,9 +299,9 @@ def replay(g, repo, actor, remote, tick, inputs, set_action, reg):
         "FZ/GU: release thresholds, both forms, side turns, per-discharge contacts and peer sprint resumes passed."
     )
 
-    def sync_light():
+    def sync_light(state=78):
         # Construct the packet from the selected local style, then join the peer
-        # directly in a sword attack without replaying either unlock action.
+        # directly in a light-sword action without replaying the unlock.
         local_eq = g.get(actor + 5060)
         g.cpu.mem_write(local_eq + 1236, bytes([8]))
         g.put(actor, 0x174D838)
@@ -287,11 +310,11 @@ def replay(g, repo, actor, remote, tick, inputs, set_action, reg):
         clear_input()
         enter(94)
         enter(110)
-        enter(78)
+        enter(state)
         g.run(g.hooks[0x1FED90], packet, actor, 0)
         value = g.get(packet + 16)
         assert (value >> 16) & 15 == 12, hex(value)
-        assert g.half(packet + 56) == 0x8000 + 78
+        assert g.half(packet + 56) == 0x8000 + state
         g.run(g.hooks[0x1FF308], packet, remote)
         g.run(g.hooks[0x2B8178], remote)
         g.cpu.mem_write(local_eq + 1236, b"\0")
@@ -312,10 +335,16 @@ def verify_swing_fx(g, actor, eq, receive, load, stub, shape, sync_light):
     )
     sizes = {}
     for phi, bank in enumerate((4019, 4018, 4016, 4018, 4017, 4016)):
-        for sel in (13, 26, 27, 31):
+        for sel in (0, 13, 26, 27, 31):
             first, count = routes[bank, sel]
             assert count and first + count < 65536
             sizes[phi, sel] = range(first, first + count)
+    effects = root / "dist/switch-axe-extreme/romfs/nativeNX/effect/frontier_sa"
+    for layers in (sizes[phi, sel] for phi in range(6) for sel in (0, 13, 31)):
+        for layer in layers:
+            efl = (effects / f"e{layer}.efl").read_bytes()
+            model = 48 + (struct.unpack_from("<I", efl, 52)[0] >> 8)
+            assert struct.unpack_from("<I", efl, model + 256)[0] & 15 == 0, layer
     # GU proof records at the native spawn boundary, including the 1.1x
     # scale for sword mode. No renderer or audio engine is required.
     handle, unit, pel = [g.alloc(n) for n in (32, 416, 128)]
@@ -357,6 +386,26 @@ def verify_swing_fx(g, actor, eq, receive, load, stub, shape, sync_light):
         g.cpu.mem_write(actor + 1280, struct.pack("<f", n))
         g.run(g.hooks[0x2B8178], actor)
 
+    def assert_swing(angles, pitch, yaw, roll):
+        # Recover two columns of GU's Ry * Rx * Rz emitter basis and compare
+        # them with FZ's local X/Z rotation followed by the hunter yaw.
+        a, b, c = map(math.radians, angles)
+        p, y, r = map(math.radians, (pitch, yaw, roll))
+        x = (
+            math.cos(b) * math.cos(c) + math.sin(b) * math.sin(a) * math.sin(c),
+            math.cos(a) * math.sin(c),
+            -math.sin(b) * math.cos(c) + math.cos(b) * math.sin(a) * math.sin(c),
+        )
+        z = (math.sin(b) * math.cos(a), -math.sin(a), math.cos(b) * math.cos(a))
+        expected_x = (math.cos(y) * math.cos(r), math.sin(r), -math.sin(y) * math.cos(r))
+        expected_z = (
+            math.cos(y) * math.sin(r) * math.sin(p) + math.sin(y) * math.cos(p),
+            -math.cos(r) * math.sin(p),
+            -math.sin(y) * math.sin(r) * math.sin(p) + math.cos(y) * math.cos(p),
+        )
+        assert math.dist(x, expected_x) < 0.0003, (angles, pitch, yaw, roll)
+        assert math.dist(z, expected_z) < 0.0003, (angles, pitch, yaw, roll)
+
     for phi in range(6):
         g.cpu.mem_write(eq + 854, struct.pack("<h", phi))
         for state, loop_state, sel in ((116, 117, 13), (155, 156, 31)):
@@ -383,19 +432,34 @@ def verify_swing_fx(g, actor, eq, receive, load, stub, shape, sync_light):
                             ((220, 370, 50), (-310, 320, 50)),
                             ((240, 320, 80), (-320, 230, 120)),
                         )[phase][i]
+                        pitch = ((15, 10), (5, -5))[phase][i]
                         roll = ((140, 240), (130, 250))[phase][i]
                         factor = 1.0
                     else:
                         expected = (0, 120, 20)
+                        pitch = 0
                         roll = ((140, 250), (130, 240))[phase][i]
                         factor = 1.1
-                    assert pos == expected and abs(angles[2] - roll) < 0.01, (
-                        pos,
-                        angles,
-                        expected,
-                        roll,
-                    )
+                    assert pos == expected, (pos, expected)
+                    assert_swing(angles, pitch, 0, roll)
                     assert all(abs(v - factor) < 0.00001 for v in scale)
+
+    for facing in (0, 90):
+        g.cpu.mem_write(eq + 854, b"\0\0")
+        for state, hits in (
+            (78, ((45, 315), (89, 45))),
+            (5, ((41, 197),)),
+            (6, ((49, 20),)),
+        ):
+            sync_light(state)
+            g.cpu.mem_write(actor + 4076, struct.pack("<H", facing * 65536 // 360))
+            for n, roll in hits:
+                spawned.clear()
+                frame(n)
+                take = [s for s in spawned if s[0] in sizes[0, 0]]
+                assert [s[0] for s in take] == list(sizes[0, 0]), (state, n, take)
+                assert_swing(take[0][3], 0, facing, roll)
+    g.cpu.mem_write(actor + 4076, b"\0\0")
     from verify_phial import replay as verify_phials
 
     verify_phials(g, root, actor, eq, receive, routes, stub, sync_light)
@@ -422,7 +486,8 @@ def verify_swing_fx(g, actor, eq, receive, load, stub, shape, sync_light):
         ]
         assert slots == [1 + i], slots
     print(
-        "GU particles: both loop phases, all six equipped phial values and two-material mesh passed."
+        "GU particles: light A-A and X-X at two headings, both charged swing phases,"
+        " six equipped phial values and the two-material mesh passed."
     )
 
 

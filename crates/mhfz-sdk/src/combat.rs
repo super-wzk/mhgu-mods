@@ -1,4 +1,4 @@
-//! Frontier attack and guard timing on GU's motion clock.
+//! Frontier attack, guard and evade timing on GU's motion clock.
 
 /// FZ 816FD8A2 consumes the first matching contact of either blade, even
 /// when the effective hitzone is soft enough to keep swinging.
@@ -29,6 +29,19 @@ pub unsafe fn guard_bonus_frames(actor: u32) -> u16 {
         2
     } else {
         0
+    }
+}
+
+/// Extra GU clock frames for a Frontier action that benefits from Evasion.
+///
+/// # Safety
+/// The actor must be a live, equipped GU hunter on the game thread.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn evade_bonus_frames(actor: u32) -> f32 {
+    match unsafe { mhgu_sdk::style::hunter::evasion_level(actor) } {
+        2.. => 10.,
+        1 => 6.,
+        _ => 0.,
     }
 }
 

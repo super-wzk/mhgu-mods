@@ -1,15 +1,16 @@
 """Boundary replays for the w07 native branches using the built NRO and GU 1.4."""
 
+import math
 import struct
 from pathlib import Path
 
 from unicorn import arm_const as arm
-from verify_style import api_for
+from verify_style import BLOCK, CHANGE_ACTION, api_for
 
 ROLL_ATTACKS = ((0, 0), (2, 20))  # GU weapon command and Frontier destination.
 
 
-def replay(g, actor, descriptor, set_action):
+def replay(g, actor, descriptor, set_action, allow_transition):
     controller = g.get(descriptor + 20)
     registry = api_for(g, b"mhgu::StyleRegistryV1", b"SRG1")
     inputs = g.alloc(40)
@@ -29,6 +30,9 @@ def replay(g, actor, descriptor, set_action):
     def number(addr):
         return struct.unpack("<f", g.cpu.mem_read(addr, 4))[0]
 
+    def playhead(who, frame, advance=1.):
+        g.cpu.mem_write(who + 1276, struct.pack("<2f", frame + advance, frame))
+
     def motion(_, layer, request, flags):
         blend, frame = (
             struct.unpack("<f", struct.pack("<I", g.cpu.reg_read(r)))[0]
@@ -38,7 +42,7 @@ def replay(g, actor, descriptor, set_action):
         motions.append((clip, frame, blend))
         put_float(actor + 1292, 1.0)
         half(actor + 1204, clip)
-        put_float(actor + 1280, frame)
+        playhead(actor, frame, 0.)
         return 1
 
     def begin(state):
@@ -62,16 +66,39 @@ def replay(g, actor, descriptor, set_action):
         half(actor + 5136, strength)
         half(actor + 5108, held)
         half(inputs + 34, strength)
-        g.put(inputs, common)
+        g.cpu.mem_write(inputs, common.to_bytes(16, "little"))
         g.put(inputs + 16, weapon)
         g.put(inputs + 36, auxiliary)
-        put_float(actor + 1280, frame)
+        playhead(actor, frame)
         g.run(controller, actor, inputs)
         return g.half(actor + 9482) - 0x8000
 
     stub(0x53A06C, motion)
     g.cpu.hook_del(g.traps.pop(0x27E608))
     stub(0x27F678, lambda p, *_: (g.half(p + 5132) - 0x4000) & 65535)
+    for addr in (0x27D5C4, 0x3A5ED0, 0x5584A0, 0x27F728):
+        stub(addr, lambda *_: 0)
+    shoulder_layout = g.get(0x1897F78) + 17518
+    old_layout = bytes(g.cpu.mem_read(shoulder_layout, 1))
+    for layout, shoulder in ((0, 0x40), (1, 0x800)):
+        g.cpu.mem_write(shoulder_layout, bytes([layout]))
+        chord = shoulder | 0x120
+        for presses in ((0x120,), (0x20, 0x120), (0x100, 0x120), (chord,), (shoulder, chord)):
+            begin(0)
+            g.cpu.mem_write(actor + 5188, bytes(8))
+            previous = 0
+            for frame, held in (*zip(range(44, 48, 2), presses), (78, 0), (80, 0)):
+                g.cpu.mem_write(actor + 5108, struct.pack("<3H", held, previous & ~held, held & ~previous))
+                previous = held
+                g.cpu.mem_write(actor + 5140, bytes(32))
+                g.run(0x27CA28, actor)
+                g.run(0x1199114, actor)
+                common = int.from_bytes(g.cpu.mem_read(actor + 5140, 16), "little")
+                active = tick(frame, weapon=g.get(actor + 5156), held=held, common=common, strength=0)
+            assert active == 32, (layout, presses, active)
+    g.cpu.mem_write(shoulder_layout, old_layout)
+    print("GU LS evade slash: X+A survives overlapping weapon shoulder input in both layouts")
+
     stub(0x2A8458, lambda *_: (_ for _ in ()).throw(
         AssertionError("sprint used the forward ledge probe")))
     begin(85)
@@ -106,6 +133,41 @@ def replay(g, actor, descriptor, set_action):
         tick(4, -yaw)
         tick(20, yaw)
         assert tick(40, 0) == 34 and g.half(actor + 4076) == expected
+    begin(7)
+    assert tick(46, weapon=1) == 7
+    assert tick(56) == 8
+    put_float(actor + 1284, 24)
+    assert tick(24) == 8 and motions[-1] == (1405, 16, 0)
+    put_float(actor + 1284, 130)
+    assert tick(28, 0x4000, weapon=4) == 8
+    assert tick(38, 0x4000) == 8
+    assert tick(40, common=(1 << 70) | (1 << 27)) == 8
+    assert tick(42) == 27
+    begin(7)
+    assert tick(46, 0x4000, weapon=4) == 7
+    assert tick(56, 0x4000) == 35
+    put_float(actor + 1284, 40)
+    assert tick(40, 0x4000) == 34
+    put_float(actor + 1284, 160)
+    assert tick(66, common=(1 << 70) | (1 << 27)) == 34
+    assert tick(70) == 45
+    for source, first_frame, execute, expected in (
+        (72, 32, 58, 7), (74, 22, 64, 7), (75, 22, 64, 7), (0, 24, 80, 56),
+    ):
+        begin(source)
+        for frame in range(first_frame, execute, 2):
+            common = (1 << 27) | (1 << 70 if frame == first_frame else 0)
+            assert tick(frame, common=common) == source
+        actual = tick(execute, common=1 << 27)
+        assert actual == expected, (source, actual, expected)
+    begin(80)
+    assert tick(10, weapon=1) == 80
+    allow_transition(False)
+    assert tick(20, 0x4000) == 80
+    assert g.half(actor + 4076) == 0
+    allow_transition(True)
+    assert tick(22, -0x4000) == 77
+    assert g.half(actor + 4076) == 0x4000
     for yaw, facing in ((0x8000, 0), (0x4000, 0xF000), (-0x4000, 0x1000)):
         begin(0)
         # Buffer a neutral A first, then steer only on the execution frame.
@@ -120,9 +182,10 @@ def replay(g, actor, descriptor, set_action):
     for frame in range(2, 32, 2):
         state = tick(frame, held=0 if frame == 10 else 0x100)
         assert state == (47 if frame < 30 else 49)
-    begin(71)
-    tick(4, 0x4000, common=(1 << 27) | 8)
-    assert g.half(actor + 9482) == 6 and g.run(0x27C6A0, actor, 28) == 28
+    for state, frame, common in ((85, 30, 8), (71, 4, (1 << 27) | 8)):
+        begin(state)
+        tick(frame, 0x4000, common=common)
+        assert g.half(actor + 9482) == 6 and g.run(0x27C6A0, actor, 28) == 28
 
     # Let GU maintain its actual weapon-drawn and guard flags for draw-parry.
     for address in (0x2A2444, 0x2A2560, 0x283238):
@@ -134,7 +197,8 @@ def replay(g, actor, descriptor, set_action):
     for layout, dash_pressed, parry_pressed in ((0, 0x40, 0x800), (1, 0x800, 0x40)):
         g.cpu.mem_write(shoulder_layout, bytes([layout]))
         actions = (((1, 0), 78), ((2, 0), 78), ((2, 1), 78), ((2, 2), 78),
-                   ((2, 3), 78), ((2, 5), 78), ((4, 14), 14 - 0x8000))
+                   ((2, 3), 78), ((2, 5), 78), ((2, 13), 78), ((2, 14), 78), ((2, 15), 78),
+                   ((1, 4), 4 - 0x8000), ((4, 14), 14 - 0x8000))
         for action, expected in actions:
             begin(0)
             set_action(*action)
@@ -147,6 +211,9 @@ def replay(g, actor, descriptor, set_action):
                 g.run(0x2E5810, actor)
                 g.cpu.hook_del(g.traps.pop(0x281B4C))
                 assert started == [3] and g.get(actor + 9488) & 256
+            if action[0] == 2 and action[1] in (13, 14, 15):
+                g.put(actor + 9488, 0x181 if action[1] == 14 else 0x8181)
+                g.cpu.mem_write(actor + 10057, b"\x02")
             # Exercise 2A79CC's real sprint input filter before the style
             # dispatch. +5124 is the GU snapshot from before the filter.
             held = dash_pressed | parry_pressed
@@ -184,7 +251,56 @@ def replay(g, actor, descriptor, set_action):
                 assert g.run(g.hooks[0x2F2BA0], actor, 0) == 0
     g.cpu.hook_del(g.traps.pop(g.originals[dispatch]))
     g.cpu.mem_write(shoulder_layout, old_layout)
-    print("GU draw-parry: both shoulder layouts, native sprint filtering, ground movement and airborne rejection passed")
+    print("GU draw-parry: both shoulder layouts, regular and panic sprint filtering, and airborne rejection passed")
+
+    # The retail w07 guard rejects Guard Up attacks even with the skill.
+    skills = set()
+    stub(0x2864C4, lambda _, skill, *__: int(skill in skills))
+    g.put(actor + 5068, 1)
+    for skill, frame, delta, flags, expected in (
+        (0, 8, 0, 0x20, 0),
+        (171, 8, -0x4000, 0x20, 1),
+        (317, 8, 0x4000, 0x20, 1),
+        (171, 8, 0x4001, 0x20, 0),
+        (171, 8, 0x8000, 0x20, 0),
+        (171, 8, 0, 0x120, 0),
+        (171, 28, 0, 0x20, 0),
+    ):
+        skills.clear()
+        skills.add(skill)
+        begin(0)
+        assert tick(68, -0x4000, auxiliary=1) == 78
+        assert g.half(actor + 5280) == 0x1000
+        tick(frame)
+        g.put(actor + 12820, flags)
+        half(actor + 12828, 0)
+        angle = (0x1000 + delta) & 0xffff
+        assert g.run(g.originals[BLOCK], actor, angle) == 0
+        assert g.run(g.hooks[BLOCK], actor, angle) == expected, (skill, frame, delta, flags)
+
+    skills.clear()
+    skills.add(171)
+    begin(78)
+    tick(8)
+    g.put(actor + 12820, 0x20)
+    half(actor + 12824, 0)
+    half(actor + 12826, 123)
+    damage, absorbed = g.alloc(4), g.alloc(4)
+    g.put(damage, 35)
+    stub(0x27BCD0, lambda *_: 1)
+    stub(g.originals[CHANGE_ACTION], lambda _, group, slot, __: set_action(group, slot) or 1)
+    stub(0x2C4EEC, lambda *_: 0)
+    assert g.run(0x2F0670, actor, 0, damage, absorbed) == 1
+    assert (g.half(actor + 9478), g.half(actor + 9482)) == (32, 3)
+    assert tick(0) == 80
+    assert tick(20, weapon=1) == 77
+    assert g.run(g.hooks[BLOCK], actor, 0) == 0
+    g.put(actor + 12820, 0)
+    for address in (0x27BCD0, g.originals[CHANGE_ACTION], 0x2C4EEC):
+        g.cpu.hook_del(g.traps.pop(address))
+    stub(0x2864C4, lambda *_: 0)
+    print("GU LS Guard Up: native skill tiers, guard boundaries, recoil and instant slash passed")
+
     g.stub(0x2A2444, lambda *_: 1)
     for address in (0x2A2560, 0x283238):
         g.stub(address, lambda *_: 0)
@@ -205,18 +321,19 @@ def replay(g, actor, descriptor, set_action):
             assert dst == (3 - 0x8000 if elapsed < 8 else expected), (elapsed, dst)
 
     # Exercise the real registry binding for the native drawn roll table.
-    stock = g.alloc(24)
+    stock, entries, terrain, attack, climb, slash = (g.alloc(n) for n in (24, 8, 24, 24, 124, 124))
+    g.cpu.mem_write(stock, struct.pack("<6I", 0, 0, 2, 2, 0, entries))
+    g.cpu.mem_write(entries, struct.pack("<2I", terrain, attack))
+    for entry, resource, group, slot in ((terrain, climb, 1, 137), (attack, slash, 16, 41)):
+        g.put(entry + 8, resource)
+        g.cpu.mem_write(resource + 100, struct.pack("<2H", group, slot))
     stub(g.originals[0x2E9B7C], lambda *_: g.put(actor + 9384, stock))
     set_action(1, 6)
     g.put(actor + 5068, g.get(actor + 5068) | 1)
     g.run(g.hooks[0x2E9B7C], actor, 2023, 0)
     table = g.get(actor + 9384)
-    assert table != stock and g.get(table + 8) == 2
-    for i, (cmd, dst) in enumerate(ROLL_ATTACKS):
-        row = g.get(g.get(table + 20) + 4 * i)
-        raw = g.get(row + 8) + 100
-        assert g.half(raw + 2) == 0x8000 + dst and g.get(raw + 8) == cmd
-        assert number(row + 16) == 36 and number(row + 16) - number(row + 12) == 6
+    assert table != stock and g.get(table + 8) == 1
+    assert g.get(g.get(table + 20)) == terrain
     # Restore the fixture's native transition backend for the remaining moves.
     g.put(actor + 9384, 0)
 
@@ -249,6 +366,26 @@ def replay(g, actor, descriptor, set_action):
     put_float(actor + 1284, 24)
     tick(24)
     assert motions[-1] == (1407, 20, 0) and submits[count:] == [(28, 0, 10)]
+    # A second R tap after the running slash enters Spirit I. Its contact
+    # must be armed on the active clip, after any pause or skipped frame.
+    for gauge, state, power in ((100, 7, 37), (0, 18, 17)):
+        begin(71)
+        for frame in range(2, 94, 2):
+            assert tick(frame, common=1 << 27) == 71
+        assert tick(94) == 72
+        count = len(submits)
+        assert tick(18) == 72
+        assert submits[count:] == [(70, 0, 14)]
+        g.put(actor + 10112, gauge)
+        assert tick(48, common=(1 << 70) | (1 << 27)) == 72
+        count = len(submits)
+        assert tick(50) == state and motions[-1][:2] == (1404, 8)
+        for frame in (8, 8, 46, 47):
+            assert tick(frame) == state
+        assert submits[count:] == []
+        assert tick(49) == state
+        assert tick(49) == state
+        assert submits[count:] == [(power, 0, 7)]
     target, part, factor, element = [g.alloc(n) for n in (47000, 88, 4, 4)]
     hit = actor + 12320
     stub(0x119F574, lambda *_: 0)
@@ -435,9 +572,12 @@ def replay(g, actor, descriptor, set_action):
     stub(loader, lambda _, kind, *__: resource if kind == 0x2125BEC else 0)
     emitted, cues, probes = [], [], []
     water = [-100001.0]
+    floor_available = True
 
     def floor(_, owner, point, end):
         probes.append(struct.unpack("<3f", g.cpu.mem_read(point, 12)))
+        if not floor_available:
+            return 0
         sp = g.cpu.reg_read(arm.UC_ARM_REG_SP)
         put_float(g.get(sp + 4), 12)
         put_float(g.get(sp + 8) + 20, water[0])
@@ -454,6 +594,7 @@ def replay(g, actor, descriptor, set_action):
         water[0] = surface
         begin(71)
         g.cpu.mem_write(actor + 64, struct.pack("<3f", 300.0, 12.0, 400.0))
+        g.cpu.mem_write(actor + 224, struct.pack("<3f", 500.0, 70.0, 1000.0))
         emitted.clear()
         cues.clear()
         probes.clear()
@@ -464,7 +605,7 @@ def replay(g, actor, descriptor, set_action):
             first, count = routes[route]
             assert all((sel in emitted) == dry for sel in range(first, first + count))
         assert (8 in cues) == dry and (9 in cues) == dry, cues
-        assert (180.0, 12.0, 360.0) in probes
+        assert (380.0, 12.0, 960.0) in probes
     # Whiff all three cut-gauge tiers. Record GU world proofs, independent
     # of the monster contact path; simulate a frozen sample at every FX edge.
     effects = []
@@ -501,12 +642,13 @@ def replay(g, actor, descriptor, set_action):
                 if at < entry:
                     continue
                 effects.clear()
-                tick(at)
+                if at > entry:
+                    tick(at - 1)
                 # History also emits short-lived strips while a window is active.
                 blades = (routes[35][0], routes[67][0])
                 assert all(sel in blades or sel in footsteps for sel, _, _ in effects), (tier, at, effects)
                 effects.clear()
-                tick(at + 1)
+                tick(at)
                 if wet and route in (59, 60):
                     route += 2
                 first, count = routes[route]
@@ -523,9 +665,24 @@ def replay(g, actor, descriptor, set_action):
                 degrees = (0, 0, 90) if at in (34, 36) else (0, {4: 0, 28: 180}.get(at, 90), 0)
                 assert all(abs(a-b) < 0.01 for a,b in zip(angles, degrees)), (at, angles)
                 effects.clear()
-                tick(at + 1)
+                tick(at)
                 assert all(sel in blades or sel in footsteps for sel, _, _ in effects), (at, effects)
-    print("GU cut-gauge release: three whiff entries, dry/wet selectors, posed offsets and frozen edges passed")
+    # FZ X/Y/Z angles of 20/35/50 degrees. The GU world proof must
+    # reconstruct this blade basis with the native Ry * Rx * Rz order.
+    g.cpu.mem_write(bone, struct.pack(
+        "<16f", .5265408, .6275069, -.5735764, 0.,
+        -.5937476, .7543013, .2801665, 0.,
+        .6084559, .1930406, .7697511, 0.,
+        700., 120., 300., 1.,
+    ))
+    begin(84)
+    effects.clear()
+    tick(34)
+    first, _ = routes[33]
+    angles = next(a for sel, _, a in effects if sel == first)
+    expected = (360. - 11.1303, 38.3249, 39.7572)
+    assert math.dist(angles, expected) < .02, angles
+    print("GU cut-gauge release: three whiff entries, dry/wet selectors, compound blade rotation and frozen edges passed")
     # The clip dispatcher plays independently of monster contact.
     def layers(route):
         first, count = routes[route]
@@ -543,24 +700,40 @@ def replay(g, actor, descriptor, set_action):
         begin(state)
         hold_charge = (1 << 27) if state == 71 else 0
         for at, expected in samples:
-            tick(at, common=hold_charge)
             emitted.clear()
-            tick(at + 1, common=hold_charge)
+            tick(at, common=hold_charge)
             assert emitted == [i for route in expected for i in layers(route)], (state, at, emitted)
             emitted.clear()
-            tick(at + 1, common=hold_charge)
+            tick(at, common=hold_charge)
             assert not emitted, (state, at, emitted)
 
     water[0] = 20
     begin(77)
+    emitted.clear()
     tick(20)
-    emitted.clear()
-    tick(21)
     assert emitted == layers(61) + layers(18)
-    tick(32)
     emitted.clear()
-    tick(33)
+    tick(32)
     assert emitted == layers(75)
+    emitted.clear()
+    tick(36)
+    assert emitted == layers(75) + layers(82)
+    emitted.clear()
+    tick(44)
+    assert emitted == layers(75) + layers(80)
+    begin(72)
+    tick(24)
+    emitted.clear()
+    tick(32)
+    assert emitted == layers(81)
+
+    # FZ keeps the event's original height if there is no floor at its point.
+    floor_available = False
+    begin(84)
+    emitted.clear()
+    tick(28)
+    assert set(layers(60)).issubset(emitted)
+    floor_available = True
     water[0] = -100001
 
     units = []
@@ -576,8 +749,8 @@ def replay(g, actor, descriptor, set_action):
             assert tick(frame, common=1 << 27) == 71
         assert tick(102) == 72
         units.clear()
-        tick(19)
-        tick(24)
+        for frame in (18, 20, 22, 24):
+            tick(frame)
         expected = layers(ground_route) + layers(23) + layers(21)
         blast = [unit for selector, unit in units if selector in expected]
         opening = [unit for selector, unit in units if selector in layers(18)]
@@ -594,7 +767,7 @@ def replay(g, actor, descriptor, set_action):
         assert all(g.cpu.mem_read(unit + 48, 1) == b"\x02" for unit in opening)
         assert g.cpu.mem_read(retired + 48, 1) == b"\0"
         units.clear()
-        tick(3)
+        tick(2)
         assert [selector for selector, _ in units] == layers(59)
         x, y, z = struct.unpack("<3f", g.cpu.mem_read(actor + 64, 12))
         assert all(struct.unpack("<3f", g.cpu.mem_read(unit + 304, 12)) == (x, y, z + 200.)
@@ -603,8 +776,8 @@ def replay(g, actor, descriptor, set_action):
     water[0] = -100001.
     begin(72)
     units.clear()
-    tick(19)
-    tick(24)
+    for frame in (18, 20, 22, 24):
+        tick(frame)
     expected = layers(59) + layers(22)
     weak_blast = [unit for selector, unit in units if selector in expected]
     weak_opening = [unit for selector, unit in units if selector in layers(17)]
@@ -650,20 +823,20 @@ def replay(g, actor, descriptor, set_action):
         if who == actor:
             return motion(who, _, request, flags)
         half(who + 1204, request)
-        put_float(who + 1280, 0.)
+        playhead(who, 0., 0.)
         put_float(who + 1268, 0.)
         return 1
 
     stub(0x53A06C, peer_motion)
     for state, frame, route in ((0, 48, 64), (49, 16, 1), (52, 36, 2),
-                                (77, 21, 18), (79, 3, 20), (81, 36, 2)):
+                                (77, 20, 18), (79, 2, 20), (81, 36, 2)):
         half(peer + 9478, 16)
         half(peer + 9482, 0x8000 + state)
         g.cpu.mem_write(peer + 5, b"\0")
         put_float(peer + 1284, 240.)
         g.run(0x282DA8, peer)
         emitted.clear()
-        put_float(peer + 1280, frame)
+        playhead(peer, frame)
         g.run(0x282DA8, peer)
         assert set(layers(route)).issubset(emitted), (state, emitted)
 
@@ -673,10 +846,12 @@ def replay(g, actor, descriptor, set_action):
     g.run(0x282DA8, peer)
     units.clear()
     for frame in range(2, 130, 2):
-        put_float(peer + 1280, frame)
+        playhead(peer, frame)
         g.run(0x282DA8, peer)
     auras = [unit for selector, unit in units if selector in layers(19)]
     assert len(auras) == 3
+    for route in (15, 16):
+        assert set(layers(route)).issubset(selector for selector, _ in units)
     half(peer + 9478, 64)
     half(peer + 9482, 1)
     g.run(g.hooks[0x16ABAC], g.alloc(8300))
@@ -692,7 +867,20 @@ def replay(g, actor, descriptor, set_action):
     begin(54)
     first, count = routes[36]
     assert all(sel in emitted for sel in range(first, first + count)) and 12 in cues
-    # Execute GU's retail command evaluator with the registry's buffered rows.
+    stub(0x3267D0, capture_unit)
+    begin(57)
+    put_float(actor + 1284, 40.)
+    tick(40)
+    assert motions[-1][:2] == (1437, 40)
+    put_float(actor + 1284, 260.)
+    for at in (40, 54, 84):
+        units.clear()
+        tick(at)
+        charge_layers = [unit for selector, unit in units if selector in layers(8)]
+        assert len(charge_layers) == len(layers(8))
+        assert all(g.half(unit + 194) == 0xffff for unit in charge_layers)
+    stub(0x3267D0, capture)
+    # Execute GU's retail command evaluator before ticking the style's input buffer.
     # The scene state transition is the same fixture boundary used for GS rolls.
     g.run(controller, 0, 0)
     g.cpu.hook_del(g.traps.pop(0x2E9D54))
@@ -707,28 +895,55 @@ def replay(g, actor, descriptor, set_action):
     stub(g.originals[0x2AB670], change)
     for offset in (752, 756, 792, 796, 808, 812):
         stub(g.get(g.get(actor) + offset), lambda *_: 0)
-    for key, dest in ROLL_ATTACKS:
+    def roll():
+        g.run(controller, 0, 0)
         set_action(1, 6)
+        half(actor + 1204, 28)
         g.cpu.mem_write(actor + 5, b"\x02")
         g.cpu.mem_write(actor + 10057, b"\x01")
+        g.cpu.mem_write(actor + 5188, bytes(8))
         g.cpu.mem_write(actor + 9392, bytes(48))
+        g.put(actor + 4076, 0)
+        g.put(actor + 5280, 0)
+        put_float(actor + 28, 2)
+        put_float(actor + 5088, 900)
         put_float(actor + 5328, 0)
         put_float(actor + 1268, 0)
         put_float(actor + 1284, 80)
         g.run(g.hooks[0x2E9B7C], actor, 2023, 0)
+
+    for key, dest in ROLL_ATTACKS:
+        roll()
         for frame in (4, 5, 6, 34, 35, 36):
-            put_float(actor + 1280, frame)
-            put_float(actor + 5332, frame)
-            g.put(actor + 5156, 1 << key if frame <= 6 else 0)
-            g.run(0x2E9D54, actor)
-            if frame < 6:
-                assert not any(g.cpu.mem_read(actor + 9392, 2))
-            if frame == 6:
-                assert any(g.cpu.mem_read(actor + 9392, 2)), (key, frame)
+            tick(frame, 0x4000, weapon=1 << key if frame == 6 else 0)
             if frame < 36:
                 assert g.half(actor + 9482) == 6
         assert g.half(actor + 9482) == 0x8000 + dest, (key, g.half(actor + 9482))
+        assert g.half(actor + 4076) == 0xf000
+        roll()
+        tick(5, weapon=1 << key)
+        tick(36, strength=0)
+        assert g.half(actor + 9482) == 6  # Pre-input opens at frame 6.
+
+    for button, expected in ((0x20, 0), (0x100, 20)):
+        for first_press, destination in ((6, expected), (22, 85)):
+            roll()
+            for frame in range(0, 38, 2):
+                held = button if frame >= first_press else 0
+                half(actor + 5108, held)
+                half(actor + 5112, button if frame == first_press else 0)
+                g.cpu.mem_write(actor + 5140, bytes(32))
+                g.run(0x27CA28, actor)
+                g.run(0x1199114, actor)
+                playhead(actor, frame)
+                put_float(actor + 5332, frame)
+                g.run(0x2E9D54, actor)
+                strength = 100 if frame == 10 or frame >= 14 else 0
+                tick(frame, weapon=g.get(actor + 5156), strength=strength)
+                if frame < 36:
+                    assert g.half(actor + 9482) == 6
+            assert g.half(actor + 9482) == 0x8000 + destination, (button, first_press)
     g.run(controller, 0, 0)
     print(
-        "GU w07 directions, release latch, roll gates, parry, stock hitstop, deflection, sheathed gauge, delayed hits, terrain effects and camera passed"
+        "GU w07 directions, release latch, roll gates, parry, stock hitstop, deflection, sheathed gauge, running slash to Spirit I, delayed hits, terrain effects and camera passed"
     )

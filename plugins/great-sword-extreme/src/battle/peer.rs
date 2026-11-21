@@ -81,7 +81,7 @@ impl Battle {
             let was_charging = self.charging;
             self.events(p);
             if self.charging {
-                let level = self.charge_level(was_charging, delta, charge_cap(state));
+                let level = self.charge_level(was_charging, delta, charge_cap(state), wrapped);
                 self.level = self.level.max(level);
                 self.charge_effect
                     .get_or_insert_with(|| ChargeEffect::start(p, self.peer_slot))

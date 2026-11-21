@@ -1,5 +1,7 @@
 """Exercise the released sprint/terrain controller and the retail w08 art routes."""
 
+import os
+from pathlib import Path
 import struct
 import zlib
 from unicorn.arm_const import UC_ARM_REG_S1
@@ -16,6 +18,7 @@ from verify_style import (
 
 def replay(repo, root):
     g = boot((repo / "mhgu/main.elf").read_bytes(), b"[Weapons]\n8=4\n", ("registry",))
+    g.inline_hooks = g.inline_hooks | {0x308B3C}
     desc = load_registered_style(
         g,
         root / "dist/switch-axe-extreme/romfs/nativeNX/plugins/switch_axe_extreme.nro",
@@ -88,16 +91,25 @@ def replay(repo, root):
     frame(180)
     set_action(1, 0)
     g.cpu.hook_del(g.traps.pop(0x27E608))
+    g.cpu.hook_del(g.traps.pop(0x27F5D0))
+    g.put(0x2126504, g.alloc(96))  # GU resolves stick yaw without a camera override.
 
-    def flick():
-        for strength in (0, 100, 0, 100):
-            half(inp + 34, strength)
-            half(actor + 5136, strength)
-            frame(0)
+    def stick(strength, yaw):
+        angle = (yaw + 0x4000) & 0xFFFF
+        half(inp + 32, angle)
+        half(actor + 5132, angle)
+        half(inp + 34, strength)
+        half(actor + 5136, strength)
+
+    def flick(yaw=0, first=0):
+        for i, strength in enumerate((0, 100, 0, 100)):
+            stick(strength, yaw)
+            frame(first + 2 * i)
 
     assert g.get(actor + 13100) == 50
-    flick()
+    flick(0x4000)
     assert state() == (16, 0x8000 + 103) and g.get(actor + 13100) == 44
+    idle_facing = g.get(actor + 4076), g.get(actor + 5280)
     frame(80)
     assert g.get(actor + 13096) == 1 and g.get(actor + 13100) == 42
     set_action(64, 6)
@@ -108,6 +120,25 @@ def replay(repo, root):
     assert g.get(actor + 13100) == 36
     frame(80)
     assert g.get(actor + 13100) == 34
+
+    # Buffer during recovery, then sample the stick on the actual branch frame.
+    for attack, first, execute, sprint in ((0, 40, 80, 103), (5, 30, 56, 148)):
+        for yaw, strength in ((0x6000, 100), (0xE000, 100), (0xA000, 100), (0, 49)):
+            g.run(tick, 0, 0)
+            g.run(0x11A8BBC, actor, 0)
+            g.put(actor + 4076, 0x2000)
+            g.put(actor + 5280, 0x2000)
+            enter(attack)
+            flick(0x2000, first)
+            assert state() == (16, 0x8000 + attack)
+            stick(strength, yaw)
+            frame(execute - 1)
+            assert state() == (16, 0x8000 + attack) and g.get(actor + 4076) == 0x2000
+            frame(execute)
+            assert state() == (16, 0x8000 + sprint)
+            facing = yaw if strength >= 50 else 0x2000
+            assert g.get(actor + 4076) == g.get(actor + 5280) == facing, (attack, yaw, strength)
+    assert idle_facing == (0x4000, 0x4000)
     half(inp + 34, 0)
     half(actor + 5136, 0)
     stub(0x27E608, lambda *_: 0)
@@ -127,6 +158,25 @@ def replay(repo, root):
         frame(55, 5)
         assert state() == (16, 0x8000 + (105 if s == 103 else 151))
 
+    from verify_branches import Frontier
+    reference = Frontier(repo / "mhfz/eboot.bin.elf")
+    for sprint in (103, 148):
+        for target in (0, 500, 850, 910, -500, -850, 0x4000, -0x4000):
+            for updates in ((2,), (1, 1)):
+                stub(0x27E608, lambda *_: 1)
+                stub(0x27F5D0, lambda *_: target & 0xffff)
+                g.put(actor + 13100, 100)
+                enter(sprint)
+                frame(60, 52)
+                g.put(actor + 4076, 0)
+                g.put(actor + 5280, 0)
+                for dt in updates:
+                    frame(62, dt)
+                facing = reference.sprint_facing(target)
+                assert (g.half(actor + 4076), g.half(actor + 5280)) == (facing, facing)
+    stub(0x27E608, lambda *_: 0)
+    g.cpu.hook_del(g.traps.pop(0x27F5D0))
+
     # Use GU's weapon model fallback to resolve the animation of an equipped w08.
     model = g.alloc(5160)
     g.stub(g.originals[DISPATCH], lambda *_: 0)  # the scene supplies the active reaction
@@ -144,6 +194,44 @@ def replay(repo, root):
             layers = (g.half(model + 1204), g.half(model + 1524))
             assert layers == (weapon_clip, 256 + weapon_clip), (s, reaction, layers)
             assert state() == reaction and g.half(actor + 1204) == 0x85
+    g.put(actor + 9120, model)
+    stub(0x53A058, lambda p, *_: 32441 if g.half(p + 1204) == 1441 else 2133)
+    weapon_dir = Path(os.environ["MHGU_ROMFS"]) / "nativeNX/arc/weapon/w08"
+    model_banks = []
+    for arc in sorted(weapon_dir.glob("g*.arc")):
+        data = arc.read_bytes()
+        count, = struct.unpack_from("<H", data, 6)
+        for name, kind, size, _, offset in struct.iter_unpack("<64s4I", data[12:12 + 80 * count]):
+            if kind != 0x76820D81 or b"_sa_" in name:
+                continue
+            lmt = zlib.decompress(data[offset:offset + size])
+            count, = struct.unpack_from("<H", lmt, 6)
+            if count == 0:  # g00 has no articulated weapon motion.
+                continue
+            poses = [struct.unpack_from("<I", lmt, 8 + 4 * slot)[0] for slot in (1, 20, 161)]
+            assert all(poses) and struct.unpack_from("<I", lmt, poses[2] + 8)[0] == 15
+            model_banks.append(lmt)
+    assert model_banks
+    lmt = model_banks[0]
+    bank, table = g.alloc(104), g.alloc(len(lmt))
+    g.cpu.mem_write(table, lmt)
+    g.put(bank + 100, table)
+    g.put(model + 3844, bank)
+    assert g.run(0x953B10, model, 161) != 0 and g.run(0x953B10, model, 417) == 0
+    enter(31)
+    for f, clip, sword, track_frame in (
+        (63, 20, 1, None), (64, 161, 0, 0.), (70, 161, 0, 7.),
+        (75.5, 161, 0, 14 * 11.5 / 12), (76, 1, 0, None),
+    ):
+        frame(f)
+        g.run(0x308B3C, model, actor)
+        assert g.half(model + 1204) == clip and g.get(actor + 13096) == sword
+        if track_frame is not None:
+            assert g.half(model + 1524) == 0xffff and g.get(model + 1212) & 16
+            actual, = struct.unpack("<f", g.cpu.mem_read(model + 1276, 4))
+            assert abs(actual - track_frame) < 0.0001
+    g.put(actor + 9120, 0)
+    print("FZ/GU: both sprint forms at 30/60 Hz and weapon-track handoff at frames 64/76 passed.")
     for fn in (0x53A058, 0x954640):
         g.cpu.hook_del(g.traps.pop(fn))
 

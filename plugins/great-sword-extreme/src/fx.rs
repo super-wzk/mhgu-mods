@@ -26,6 +26,11 @@ const MOTION_ROWS: &[[u8; 18]] = include_bytes!("../target/assets/effects/motion
     .as_chunks::<18>()
     .0;
 static PARTICLES: Bank = Bank::new(c"effect\\frontier_gs\\particles", ROUTES);
+
+pub(super) unsafe fn preload() {
+    unsafe { PARTICLES.resource() };
+}
+
 static CHARGE_UNITS: TrackedUnits<20> = TrackedUnits::new();
 
 unsafe fn field<T: Copy>(p: u32, off: u32) -> T {
@@ -121,7 +126,7 @@ pub(super) unsafe fn motion_events(
             1476 if sample.blend <= 0. => guard_counter(p, previous, frame),
             _ => {}
         }
-        for (event, _) in clock.advance(MOTION_ROWS, clip, sample) {
+        for event in clock.advance(MOTION_ROWS, clip, sample) {
             motion_effect(p, event);
         }
     }
@@ -175,7 +180,7 @@ unsafe fn motion_effect(p: u32, e: MotionEvent) {
                 };
                 let m = field(m, 0);
                 let angles = if e.mode == 0 {
-                    effects::pose_angles(&m)
+                    effects::world_pose_angles(&m)
                 } else {
                     [0; 3]
                 };

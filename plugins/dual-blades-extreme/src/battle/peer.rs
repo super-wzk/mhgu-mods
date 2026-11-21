@@ -54,7 +54,7 @@ unsafe fn with_peer(actor: u32, visit: impl FnOnce(&mut Battle)) {
 }
 unsafe extern "C" fn encode(actor: u32) -> u8 {
     if actor == OWNER.load(Relaxed) {
-        phase(actor) | (u8::from(FLAME.load(Relaxed) == program::FLAME_MAX) << 2)
+        phase(actor) | (u8::from(flame_full()) << 2)
     } else {
         u8::MAX
     }
@@ -123,13 +123,14 @@ unsafe extern "C" fn observe(local: u32) {
                 b.effects.clear_action();
             }
             b.polish.tick(
+                actor,
                 dt,
                 drawn,
                 current.0 == action::GROUP && !matches!(custom, Some(SPRINT | BRAKE)),
             );
             let visible = drawn && read::<u8>(local, 4180) == read::<u8>(actor, 4180);
-            b.effects
-                .demon(actor, if visible { bits(b.peer_slot) & 3 } else { 0 }, dt);
+            let mode = if visible { bits(b.peer_slot) } else { 0 };
+            b.effects.demon(actor, mode & 3, mode & 4 != 0, dt);
         })
     }
 }

@@ -5,7 +5,7 @@ use crate::{
 };
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
-use mhfz_sdk::effects::{self, MotionClock};
+use mhfz_sdk::effects::{MotionClock, world_pose_angles};
 use mhgu_sdk::style::{
     action::MotionFrame,
     particle::{self, Anchor, Bank},
@@ -22,7 +22,7 @@ static BANK: Bank = Bank::new(
     include_bytes!("../target/assets/effects/routes.bin"),
 );
 
-pub(super) unsafe fn preload_draw() {
+pub(super) unsafe fn preload() {
     unsafe { BANK.resource() };
 }
 
@@ -71,8 +71,34 @@ unsafe fn matrix(actor: u32, node: u16) -> Option<[f32; 16]> {
     }
 }
 
-pub unsafe fn update(clock: &mut MotionClock, actor: u32, clip: u16, sample: MotionFrame) {
-    for (event, _) in clock.advance(EVENTS, clip, sample) {
+fn angle_units(radians: f32) -> u16 {
+    (radians * (65536. / core::f32::consts::TAU)) as i32 as u16
+}
+
+fn swing_angles(yaw: u16, [pitch, roll]: [f32; 2]) -> [u16; 3] {
+    if pitch == 0. {
+        return [0, yaw, (roll * (65536. / 360.)) as i32 as u16];
+    }
+    // FZ applies Rz * Rx in hunter space before applying the hunter yaw.
+    // Re-express that local rotation in GU's order, then add the yaw.
+    let (sp, cp) = libm::sincosf(pitch.to_radians());
+    let (sr, cr) = libm::sincosf(roll.to_radians());
+    let zx = sr * sp;
+    [
+        angle_units(libm::atan2f(cr * sp, libm::hypotf(zx, cp))),
+        yaw.wrapping_add(angle_units(libm::atan2f(zx, cp))),
+        angle_units(libm::atan2f(sr, cr * cp)),
+    ]
+}
+
+pub unsafe fn update(
+    clock: &mut MotionClock,
+    slot: u8,
+    actor: u32,
+    clip: u16,
+    sample: MotionFrame,
+) {
+    for event in clock.advance(EVENTS, clip, sample) {
         unsafe {
             let (mut pos, yaw) = particle::world_offset(actor, event.offset);
             let mut rotation = [0, yaw, 0];
@@ -82,7 +108,7 @@ pub unsafe fn update(clock: &mut MotionClock, actor: u32, clip: u16, sample: Mot
                 };
                 pos = particle::transform_offset(&pose, event.offset);
                 if matches!(event.mode, 0 | 2) {
-                    rotation = effects::pose_angles(&pose);
+                    rotation = world_pose_angles(&pose);
                 }
             }
             let mut bank = event.bank;
@@ -123,19 +149,27 @@ pub unsafe fn update(clock: &mut MotionClock, actor: u32, clip: u16, sample: Mot
             } else {
                 Anchor::RotatedWorld(pos, rotation)
             };
-            BANK.emit(route, anchor);
+            let life = match (clip, event.kind) {
+                (1055 | 1479, 5) => Lifetime::Sprint,
+                (1480, 6 | 7) => Lifetime::Brake,
+                _ => Lifetime::Natural,
+            };
+            spawn(route, anchor, slot, life);
         }
     }
 }
 
 /// FZ 81214E4E, the flash on entry to the highest discharge tier.
-pub unsafe fn discharge_flash(actor: u32) {
+pub unsafe fn discharge_flash(actor: u32, slot: u8) {
     unsafe {
-        if let Some(pose) = matrix(actor, 21) {
-            emit(
-                4014,
-                21,
-                Anchor::RotatedWorld([pose[12], pose[13], pose[14]], effects::pose_angles(&pose)),
+        if let Some(route) = effect_route(4014, 21)
+            && let Some(pose) = matrix(actor, 21)
+        {
+            spawn(
+                route,
+                Anchor::RotatedWorld([pose[12], pose[13], pose[14]], world_pose_angles(&pose)),
+                slot,
+                Lifetime::Clip1456,
             );
         }
     }
@@ -210,13 +244,12 @@ pub unsafe fn charged_swing(
             // four style banks by the equipped Frontier phial type.
             let bank = Phial::equipped(actor).bank;
             let (position, yaw) = particle::world_offset(actor, offset);
-            let angle = |deg: i32| (deg * 65536 / 360) as u16;
             emit(
                 bank,
                 if sword { 31 } else { 13 },
                 Anchor::ScaledWorld {
                     position,
-                    angles: [angle(pitch), yaw, angle(roll)],
+                    angles: swing_angles(yaw, [pitch as f32, roll as f32]),
                     scale: if sword { 1.1 } else { 1. },
                 },
             );
@@ -253,6 +286,9 @@ impl Phial {
 enum Lifetime {
     Natural,
     Hunter,
+    BladeGlow,
+    Sprint,
+    Brake,
     Clip1423,
     Clip1455,
     Clip1456,
@@ -267,7 +303,9 @@ enum Lifetime {
 impl Lifetime {
     fn active(self, clip: u16, frame: f32, charge: u8) -> bool {
         match self {
-            Self::Natural | Self::Hunter => true,
+            Self::Natural | Self::Hunter | Self::BladeGlow => true,
+            Self::Sprint => matches!(clip, 1055 | 1479),
+            Self::Brake => clip == 1480,
             Self::Cartridge => cartridge_window(clip, frame),
             Self::Clip1423 => clip == 1423,
             Self::Clip1455 => clip == 1455,
@@ -342,6 +380,18 @@ pub unsafe fn clear(slot: u8) {
     unsafe { retire(slot, |_| false) };
 }
 
+fn spawn(route: usize, anchor: Anchor, slot: u8, life: Lifetime) {
+    unsafe {
+        if life == Lifetime::Natural {
+            BANK.emit(route, anchor);
+        } else if TRACKING.load(Ordering::Acquire) {
+            BANK.emit_tracked(route, anchor, |handle| {
+                UNITS.with(|units| units.push(Unit { handle, slot, life }));
+            });
+        }
+    }
+}
+
 struct Visuals {
     actor: u32,
     slot: u8,
@@ -356,23 +406,8 @@ impl Visuals {
     }
 
     fn spawn(&self, bank: u16, selector: u16, anchor: Anchor, life: Lifetime) {
-        let Some(route) = effect_route(bank, selector) else {
-            return;
-        };
-        unsafe {
-            if life == Lifetime::Natural {
-                BANK.emit(route, anchor);
-            } else if TRACKING.load(Ordering::Acquire) {
-                BANK.emit_tracked(route, anchor, |handle| {
-                    UNITS.with(|units| {
-                        units.push(Unit {
-                            handle,
-                            slot: self.slot,
-                            life,
-                        })
-                    });
-                });
-            }
+        if let Some(route) = effect_route(bank, selector) {
+            spawn(route, anchor, self.slot, life);
         }
     }
 
@@ -403,7 +438,7 @@ impl Visuals {
                     return;
                 };
                 pos = particle::transform_offset(&pose, offset);
-                angles = effects::pose_angles(&pose);
+                angles = world_pose_angles(&pose);
             }
             if let Some(delta) = rotation {
                 angles = [0, yaw.wrapping_add_signed(delta), 0];
@@ -412,16 +447,14 @@ impl Visuals {
         }
     }
 
-    fn swing(&self, bank: u16, selector: u16, offset: [f32; 3], degrees: [f32; 3], scale: f32) {
+    fn swing(&self, bank: u16, selector: u16, offset: [f32; 3], pitch_roll: [f32; 2], scale: f32) {
         let (position, yaw) = unsafe { particle::world_offset(self.actor, offset) };
-        let mut angles = degrees.map(|a| (a * 65536. / 360.) as i32 as u16);
-        angles[1] = angles[1].wrapping_add(yaw);
         self.spawn(
             bank,
             selector,
             Anchor::ScaledWorld {
                 position,
-                angles,
+                angles: swing_angles(yaw, pitch_roll),
                 scale,
             },
             Lifetime::Natural,
@@ -541,7 +574,6 @@ impl WeaponFx {
         actor: u32,
         clip: u16,
         state: u8,
-        model_motion: u8,
         previous: f32,
         sample: MotionFrame,
         dt: f32,
@@ -569,8 +601,17 @@ impl WeaponFx {
         };
         let frame = sample.frame;
         let normal = sample.blend <= 0.;
-        unsafe { retire(slot, |life| life.active(clip, frame, charge)) };
-        timeline::play(&v, clip, state, model_motion, tier, unlocked);
+        let glowing = drawn
+            && visible
+            && unlocked
+            && gauges.light > 0
+            && !(clip == 1456 && normal && frame >= 138.);
+        unsafe {
+            retire(slot, |life| {
+                life.active(clip, frame, charge) && (life != Lifetime::BladeGlow || glowing)
+            })
+        };
+        timeline::play(&v, clip, state, tier, unlocked);
         if normal && cartridge_window(clip, frame) {
             v.cartridge();
         }
@@ -643,14 +684,8 @@ impl WeaponFx {
                 && (ticks >= period
                     || (1..=ticks).any(|i| clock.start.wrapping_add(i) % period == 0))
         };
-        if drawn
-            && visible
-            && unlocked
-            && gauges.light > 0
-            && !(clip == 1456 && normal && frame >= 138.)
-            && due(5)
-        {
-            v.joint(v.phial.bank, 8, 21, [-10., 0., 20.], Lifetime::Hunter);
+        if glowing && due(5) {
+            v.joint(v.phial.bank, 8, 21, [-10., 0., 20.], Lifetime::BladeGlow);
         }
         if clip == 1455
             && normal
@@ -678,13 +713,7 @@ impl WeaponFx {
         }
         if matches!(clip, 1055 | 1479) && normal && frame >= 34. {
             if due(27) {
-                v.joint(
-                    4013,
-                    v.phial.accent(0),
-                    21,
-                    [0., 0., 60.],
-                    Lifetime::Natural,
-                );
+                v.joint(4013, v.phial.accent(0), 21, [0., 0., 60.], Lifetime::Sprint);
             }
             if due(5) {
                 v.rotated_pose(
@@ -692,7 +721,7 @@ impl WeaponFx {
                     25,
                     21,
                     [0., 0., 40.],
-                    Lifetime::Natural,
+                    Lifetime::Sprint,
                     Some(i16::MIN),
                 );
             }

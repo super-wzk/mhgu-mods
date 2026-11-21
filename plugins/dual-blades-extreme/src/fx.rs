@@ -8,6 +8,11 @@ use mhgu_sdk::style::{
 mod trail;
 
 static PARTICLES: Bank = Bank::new(c"effect\\frontier_db\\particles", ROUTES);
+
+pub(super) unsafe fn preload() {
+    unsafe { PARTICLES.resource() };
+}
+
 static PEER_BANKS: [Bank; 4] = [
     Bank::new(c"effect\\frontier_db\\peer1", ROUTES),
     Bank::new(c"effect\\frontier_db\\peer2", ROUTES),
@@ -30,6 +35,11 @@ const SLIDE_SELECTORS: [u16; 5] = [2, 5, 6, 12, 13];
 const SLIDE_DRY: usize = 17;
 const SLIDE_WET: usize = SLIDE_DRY + SLIDE_SELECTORS.len();
 const SWING_ROUTE: usize = SLIDE_WET + SLIDE_SELECTORS.len();
+const TRUE_DEMON_BURST: usize = SWING_ROUTE + 2;
+const EXTREME_DEMON_BURST: usize = TRUE_DEMON_BURST + 1;
+const EXTREME_DEMON_DRY: usize = EXTREME_DEMON_BURST + 1;
+const EXTREME_DEMON_WET: usize = EXTREME_DEMON_DRY + 1;
+const LEFT_DEMON_GLOW: usize = EXTREME_DEMON_WET + 1;
 static SWINGS: TrackedUnits<10> = TrackedUnits::new();
 
 unsafe fn stop_swings(slot: usize) {
@@ -50,6 +60,7 @@ pub(super) fn install(style: u32) {
 #[derive(Default)]
 pub(super) struct Effects {
     phase: u8,
+    flame_full: bool,
     until_demon: f32,
     spark: usize,
     history: trail::History,
@@ -78,25 +89,37 @@ impl Effects {
 
     pub(super) unsafe fn motion_events(&mut self, actor: u32, clip: u16, sample: MotionFrame) {
         unsafe {
-            for (e, late) in self.motion.advance(MOTION_ROWS, clip, sample) {
+            for e in self.motion.advance(MOTION_ROWS, clip, sample) {
                 match (e.kind, e.bank) {
                     // The four swing windows each have paired type-2 and type-1 rows.
                     (0, 2) => {
-                        let duration = 2. * f32::from(e.selector + 2) - late;
-                        if duration > 0. {
-                            stop_swings(self.history.slot);
-                            self.history.swing(actor, self.phase, duration);
-                            let anchor = Anchor::World(read(actor, 64), 0);
-                            for hand in 0..2 {
-                                SWINGS.emit_layers(
-                                    self.bank(),
-                                    SWING_ROUTE + hand,
-                                    anchor,
-                                    1,
-                                    2 * self.history.slot + hand,
-                                );
-                            }
+                        let duration = 2. * f32::from(e.selector + 2);
+                        stop_swings(self.history.slot);
+                        self.history.swing(actor, self.phase, duration);
+                        let anchor = Anchor::World(read(actor, 64), 0);
+                        for hand in 0..2 {
+                            SWINGS.emit_layers(
+                                self.bank(),
+                                SWING_ROUTE + hand,
+                                anchor,
+                                1,
+                                2 * self.history.slot + hand,
+                            );
                         }
+                    }
+                    (2, 4002 | 4021) => {
+                        // FZ kind 2, mode 3 snapshots the joint position and hunter yaw.
+                        let (route, position) = match (e.bank, e.selector, e.node) {
+                            (4002, 2, 0) => (TRUE_DEMON_BURST, read(actor, 64)),
+                            (4021, 0, 10) => {
+                                let Some(matrix) = particle::joint_matrix(actor, 2) else {
+                                    continue;
+                                };
+                                (EXTREME_DEMON_BURST, read(matrix, 48))
+                            }
+                            _ => continue,
+                        };
+                        PARTICLES.emit(route, Anchor::World(position, read(actor, 4076)));
                     }
                     (3, 4021) => {
                         let joint = match e.node {
@@ -120,12 +143,17 @@ impl Effects {
                         }
                     }
                     (5, 4035) => {
-                        if let Some(selector) =
+                        let (dry, wet) = if e.selector == 4 {
+                            (EXTREME_DEMON_DRY, EXTREME_DEMON_WET)
+                        } else if let Some(i) =
                             SLIDE_SELECTORS.iter().position(|s| *s == e.selector)
-                            && let Some((anchor, wet)) = effects::motion_ground(actor, &e)
                         {
-                            PARTICLES
-                                .emit(if wet { SLIDE_WET } else { SLIDE_DRY } + selector, anchor);
+                            (SLIDE_DRY + i, SLIDE_WET + i)
+                        } else {
+                            continue;
+                        };
+                        if let Some((anchor, on_water)) = effects::motion_ground(actor, &e) {
+                            PARTICLES.emit(if on_water { wet } else { dry }, anchor);
                         }
                     }
                     (7, 4021) => {
@@ -146,12 +174,14 @@ impl Effects {
         }
     }
 
-    pub(super) unsafe fn demon(&mut self, actor: u32, phase: u8, dt: f32) {
+    pub(super) unsafe fn demon(&mut self, actor: u32, phase: u8, full: bool, dt: f32) {
         unsafe {
             self.history.sample(actor, phase, dt);
         }
-        if phase != self.phase {
+        let full = phase >= 2 && full;
+        if phase != self.phase || full != self.flame_full {
             self.phase = phase;
+            self.flame_full = full;
             self.until_demon = 0.;
         } else if dt <= 0. {
             return;
@@ -160,21 +190,24 @@ impl Effects {
         if phase == 0 || self.until_demon > 0. {
             return;
         }
+        // 81F872FC and 81F8B4F8 share the full-flame palette. Below full,
+        // only the trail uses the true-demon palette in both upgraded phases.
+        let glow = if full { 2 } else { usize::from(phase == 2) };
+        let trail = if full { 2 } else { usize::from(phase >= 2) };
         unsafe {
             let Some(parent) = particle::parent(actor) else {
                 return;
             };
-            let phase_index = usize::from(phase - 1);
             for (hand, joint) in BLADE_JOINTS.into_iter().enumerate() {
                 PARTICLES.emit(
-                    DEMON_GLOW + phase_index,
+                    [DEMON_GLOW, LEFT_DEMON_GLOW][hand] + glow,
                     Anchor::Joint {
                         parent,
                         joint: i16::from(joint),
                         offset: None,
                     },
                 );
-                let route = DEMON_TRAIL + hand * DEMON_PHASES + phase_index;
+                let route = DEMON_TRAIL + hand * DEMON_PHASES + trail;
                 self.bank().emit(route, Anchor::World(read(actor, 64), 0));
             }
         }

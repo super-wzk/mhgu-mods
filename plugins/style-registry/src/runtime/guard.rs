@@ -11,6 +11,8 @@ use mhgu_sdk::style::{
 };
 
 const GROUP: u16 = 32;
+const GUARD_ACTIVE: u32 = 16;
+const MIN_GUARD_STAMINA: f32 = 150.;
 static ACTOR: AtomicU32 = AtomicU32::new(0);
 static INVULNERABILITY: AtomicU32 = AtomicU32::new(0);
 static RECOIL_TIER: AtomicU32 = AtomicU32::new(0);
@@ -62,6 +64,18 @@ pub(super) fn clear(actor: u32) {
     let _ = ACTOR.compare_exchange(actor, 0, Relaxed, Relaxed);
 }
 
+unsafe fn has_guard_up(actor: u32) -> bool {
+    unsafe {
+        if *((actor + 5068) as *const u8) & 8 != 0 {
+            let has: unsafe extern "C" fn(u32, u32) -> u32 =
+                core::mem::transmute(forge::mem::text_addr() + 0x2864e0);
+            has(actor, 18) != 0
+        } else {
+            hunter::has_skill(actor, 171) || hunter::has_skill(actor, 317)
+        }
+    }
+}
+
 // Preserve GU 2F2BA0's hit exclusions and Guard Up requirement when a
 // registered style supplies its own guard cone.
 unsafe fn guardable(actor: u32, angle: u16, half_angle: u16) -> bool {
@@ -74,11 +88,19 @@ unsafe fn guardable(actor: u32, angle: u16, half_angle: u16) -> bool {
         {
             return false;
         }
-        if flags & 0x20 != 0 && !hunter::has_skill(actor, 171) && !hunter::has_skill(actor, 317) {
+        if flags & 0x20 != 0 && !has_guard_up(actor) {
             return false;
         }
         let facing = *((actor + 5280) as *const u16);
         flags & 0x40 != 0 || (facing.wrapping_sub(angle) as i16).unsigned_abs() <= half_angle
+    }
+}
+
+unsafe fn guard_below_stamina_limit(actor: u32) -> bool {
+    // 2F2BA0 checks 2A5CBC's stamina threshold before the guard flag at 282F58.
+    unsafe {
+        *((actor + 9488) as *const u32) & GUARD_ACTIVE != 0
+            && *((actor + 5088) as *const f32) < MIN_GUARD_STAMINA
     }
 }
 
@@ -88,7 +110,7 @@ unsafe fn block(actor: u32, angle: u32) -> u32 {
     unsafe {
         let (group, slot) = action::current(actor);
         let custom = action::custom(group, slot);
-        if !custom && (group != GROUP || accepted == 0) {
+        if !custom && group != GROUP {
             return accepted;
         }
         let Some(entry) = local_entry(actor) else {
@@ -99,7 +121,10 @@ unsafe fn block(actor: u32, angle: u32) -> u32 {
         };
         if accepted == 0 {
             let half_angle = entry.rules().map_or(0, |rules| rules.guard_half_angle);
-            if half_angle == 0 || !guardable(actor, angle as u16, half_angle) {
+            if half_angle == 0
+                || (!custom && !guard_below_stamina_limit(actor))
+                || !guardable(actor, angle as u16, half_angle)
+            {
                 return 0;
             }
         }

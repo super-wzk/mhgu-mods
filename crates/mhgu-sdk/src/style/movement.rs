@@ -28,6 +28,20 @@ pub unsafe fn stamina(actor: u32, amount: f32, continuous: bool) {
     unsafe { mhgu_style_stamina(actor, amount.to_bits(), entry(offset) as u32) }
 }
 
+/// Defer natural stamina recovery through GU's countdown at 29DBDC.
+/// GU lets the timer expire on its own when the action stops refreshing it.
+///
+/// # Safety
+/// The actor must be a live local hunter on the game thread.
+pub unsafe fn defer_stamina_recovery(actor: u32) {
+    unsafe {
+        let elapsed = ((actor + 28) as *const f32).read();
+        let timer = (actor + 10092) as *mut f32;
+        // Leave the timer positive after the next update at 30 or 60 Hz.
+        timer.write(timer.read().max(elapsed.max(2.) + 1.));
+    }
+}
+
 /// Use GU's running stamina latch and continuous drain together.
 ///
 /// # Safety
@@ -60,6 +74,33 @@ pub unsafe fn relative_stick_yaw(actor: u32) -> Option<u16> {
     }
 }
 
+/// Relative stick direction using the current camera azimuth during a held input.
+///
+/// # Safety
+/// The actor must be a live local hunter on the game thread.
+pub unsafe fn live_relative_stick_yaw(actor: u32) -> Option<u16> {
+    use crate::memory::{Field, Object, singleton};
+    unsafe {
+        let relative = relative_stick_yaw(actor)?;
+        if ((actor + 11990) as *const u8).read() != 1 {
+            return Some(relative);
+        }
+        // 2A79CC saves the camera azimuth at +12016 until the held-input
+        // lock clears. Replace that term of 27F5D0 without clearing GU's lock.
+        let locked_yaw = ((actor + 12016) as *const u16).read();
+        let camera =
+            singleton(0x2126504).and_then(|manager| Object::at(manager.get(Field::at(84))));
+        let live_yaw = camera.map_or(0, |camera| {
+            let [eye_x, _, eye_z] = camera.get::<[f32; 3]>(Field::at(64));
+            let [target_x, _, target_z] = camera.get::<[f32; 3]>(Field::at(96));
+            // Same argument order, scale and truncation as GU 27F5D0.
+            (libm::atan2f(target_x - eye_x, target_z - eye_z) * f32::from_bits(0x4622f983) + 0.5)
+                as i32 as u16
+        });
+        Some(relative.wrapping_add(locked_yaw).wrapping_sub(live_yaw))
+    }
+}
+
 pub const CLIMBS: &[u16] = &[137, 138, 139];
 const ROLL_OFF_LEDGE: (u16, u16) = (4, 14);
 
@@ -67,9 +108,31 @@ pub fn ground_idle(current: (u16, u16)) -> bool {
     matches!(current, (1, 0 | 46) | (2, 0 | 30))
 }
 
-/// GU 2E5810's ordinary weapon-down walk, sprint and stop phases.
+/// GU 2E5810's weapon-down walk, sprint, stop and panic-run phases.
 pub fn sheathed_movement(current: (u16, u16)) -> bool {
-    matches!(current, (2, 0..=3 | 5))
+    matches!(current, (2, 0..=3 | 5 | 13..=15))
+}
+
+/// Set both the hunter's current and target facing.
+///
+/// # Safety
+/// The actor must be a live hunter on the game thread.
+pub unsafe fn set_facing(actor: u32, yaw: u16) {
+    unsafe {
+        ((actor + 4076) as *mut u32).write(u32::from(yaw));
+        ((actor + 5280) as *mut u32).write(u32::from(yaw));
+    }
+}
+
+/// Turn relative to the hunter's current facing and update its target facing.
+///
+/// # Safety
+/// The actor must be a live hunter on the game thread.
+pub unsafe fn turn(actor: u32, offset: u16) {
+    unsafe {
+        let facing = ((actor + 4076) as *const u16).read_unaligned();
+        set_facing(actor, facing.wrapping_add(offset));
+    }
 }
 
 /// Let GU resolve the running direction, including its camera override.
@@ -84,9 +147,7 @@ pub unsafe fn steer(actor: u32) -> bool {
             return false;
         }
         let aim: unsafe extern "C" fn(u32) -> u32 = core::mem::transmute(entry(0x27f678));
-        let yaw = aim(actor) & 0xffff;
-        ((actor + 4076) as *mut u32).write(yaw);
-        ((actor + 5280) as *mut u32).write(yaw);
+        set_facing(actor, aim(actor) as u16);
         true
     }
 }

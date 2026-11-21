@@ -124,6 +124,10 @@ pub fn stick_degrees(yaw: i16) -> i16 {
     (i32::from(yaw) * 360 / 65536) as i16
 }
 
+pub fn discharge_dodge(state: u8) -> bool {
+    matches!(state, 70 | 74 | 77 | 98)
+}
+
 pub fn cursor(state: u8) -> Cursor {
     // 8121B914 checks motion, unconditional and button requests in this order.
     static RULES: BranchRules = BranchRules {
@@ -134,7 +138,18 @@ pub fn cursor(state: u8) -> Cursor {
         combo_override: None,
         art_commands: (1 << 12) | (1 << 23) | (1 << 26),
     };
-    Cursor::new(state, records(state, 1, 40), records(state, 2, 12), &RULES)
+    static DISCHARGE_RULES: BranchRules = BranchRules {
+        // Let a completed directional chord replace an equal-priority X or A
+        // follow-up while it is still waiting to execute.
+        combo_override: Some((2..=3, 17..=19)),
+        ..RULES
+    };
+    let rules = if discharge_dodge(state) {
+        &DISCHARGE_RULES
+    } else {
+        &RULES
+    };
+    Cursor::new(state, records(state, 1, 40), records(state, 2, 12), rules)
 }
 
 pub struct Strike {
@@ -164,6 +179,8 @@ pub fn strike(burst: bool, id: u16) -> Option<Strike> {
 pub const AXE_IDLE_MOTION: u8 = 14;
 pub const SWORD_IDLE_MOTION: u8 = 15;
 pub const SWORD_TO_AXE: u8 = 31;
+pub const RETRACT_START: f32 = 64.;
+pub const RETRACT_END: f32 = 76.;
 
 pub fn idle_model_motion(sword: bool) -> u8 {
     if sword {
@@ -191,7 +208,7 @@ pub fn sword_pose(model_motion: u8, frame: f32) -> bool {
         7 | 8 | SWORD_IDLE_MOTION => true,
         9 => frame < 50.,
         10 => frame >= 60.,
-        11 => frame < 64.,
+        11 => frame < RETRACT_START,
         12 => frame >= 30.,
         17 => frame >= 38.,
         18 => (10. ..62.).contains(&frame),
@@ -201,6 +218,19 @@ pub fn sword_pose(model_motion: u8, frame: f32) -> bool {
 
 pub fn charge_clip(clip: u16) -> bool {
     matches!(clip, 1488 | 1489 | 1063 | 1064)
+}
+
+// FZ 812132C4 uses param 33 for the light-sword sharpness cutoff.
+pub const AXE_RECOIL: u8 = 34;
+pub const LIGHT_SWORD_RECOIL: u8 = 35;
+pub const LIGHT_SWORD_RECOIL_CUTOFF: u32 = param(33) as u32;
+
+// FZ w12's recoil exclusion list is at directory offset 56.
+pub fn ignores_deflection(state: u8) -> bool {
+    matches!(
+        source_state(state),
+        23 | 57 | 60 | 63 | 70..=72 | 74 | 75 | 77 | 85 | 86
+    )
 }
 
 // The low two bits of the peer phial snapshot carry this tier.
@@ -308,16 +338,20 @@ pub fn charge_release(branch: u16, sword: bool, ready: bool) -> u8 {
     }
 }
 
+// The w12 exclusion table is read by 81213F18. Branch 210 turns in 81214070.
+pub fn accepts_side_turn(branch: u16) -> bool {
+    branch == 210
+        || (branch < COUNT as u16
+            && DATA[MODELS - 48 + usize::from(branch / 8)] & (1 << (branch % 8)) == 0)
+}
+
 // 81213F18 reads 818173F2 (previous action), so a charge release still
 // sees the dodge slash that started the charge.
 pub fn turn_delta(branch: u16, previous_action: Option<u8>, yaw: i16) -> i16 {
-    let magnitude = if branch == 210 {
-        0x1000
-    } else if branch >= 178
-        || DATA[MODELS - 48 + usize::from(branch / 8)] & (1 << (branch % 8)) != 0
-    {
+    if !accepts_side_turn(branch) {
         return 0;
-    } else if !matches!(previous_action, Some(106 | 152))
+    }
+    let magnitude = if !matches!(previous_action, Some(106 | 152))
         && matches!(branch, 130 | 136 | 140 | 141 | 158..=161)
     {
         0x2000

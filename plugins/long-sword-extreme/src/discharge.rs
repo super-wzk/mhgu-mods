@@ -3,7 +3,7 @@ use crate::peer::{COUNT, Slot};
 use crate::{collision, fx, native, program, read, sound};
 use core::cell::UnsafeCell;
 use mhgu_sdk::{
-    combat::collision::{Contact, ContactPool, HitShape},
+    combat::collision::{Contact, ContactPool},
     geometry::Angle,
 };
 
@@ -62,7 +62,7 @@ unsafe fn launch(slot: Slot, actor: u32, tier: usize, yaw: u16) {
         let Some(template) = collision::blade_template(actor) else {
             return;
         };
-        let Some(shape) = HitShape::load(c"player\\hit\\frontier_ls\\discharge") else {
+        let Some(shape) = collision::DISCHARGE.load() else {
             return;
         };
         let Some(rows) = shape.rows_in_first_group(4) else {
@@ -175,9 +175,9 @@ pub unsafe fn frame(slot: Slot, actor: u32, state: u8, last: f32, now: f32, yaw:
         let crossed = |at| last < at && at <= now;
         for at in [24., 54., 84.] {
             if crossed(at) {
-                // 811F5D2E, 811F60B0, 811F6026. Each chain step adds a layer.
+                // 811F5D2E / 811F60B0 / 811F6026 attach to FZ node 1 (motion root).
                 for layer in (0..chain).rev() {
-                    fx::joint(actor, 0, 8 + layer as usize);
+                    fx::joint(actor, -1, 8 + layer as usize);
                 }
                 if at == 24. && chain > 0 {
                     sound::blade(actor, u8::from(chain == 3));

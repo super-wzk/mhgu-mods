@@ -21,6 +21,8 @@ class Scene:
         g = self.g = boot((REPO / "mhgu/main.elf").read_bytes(),
                           f"[Weapons]\n{weapon}={style}\n".encode(), ("registry",))
         g.inline_hooks = g.inline_hooks | {0x2B4E7C, 0x11A4D8C}
+        if weapon == 11:
+            g.inline_hooks |= {0x11BA074, 0x169D44}
         root = REPO / "plugins" / (name + "-extreme")
         module = root.name.replace("-", "_")
         desc = load_registered_style(g, root / "dist" / root.name / "romfs/nativeNX/plugins" / (module + ".nro"))
@@ -160,16 +162,105 @@ def switch_axe():
         assert g.get(a + 13128) == float_bits((63, 72, 63)[tier])
         g.run(g.hooks[0x11A75F8], a)
         assert meters()[:2] == (filled, light)
+        # Let the last pulse land in drawn idle, during a swing, or while walking.
+        finish_swing = tier == 1
+        before_morph = (16, 0x8000 + 78) if finish_swing else (2 if tier == 2 else 1, 0)
+        s.action(*before_morph)
+        g.put(a + 1280, 0)
+        assert meters()[:2] == (filled, light)
         while light:
             g.put(a + 13128, 0)
             g.run(g.hooks[0x11A75F8], a)
             light = max(0, light - 3)
+            if light == 0:
+                assert g.get(a + 13120) == 0
+                assert g.get(a + 13096) == 1  # the upkeep hook leaves the sword pose intact
             assert meters()[:2] == (filled, light)
-        assert g.get(a + 13120) == 0 and meters()[2] == 0 and g.get(a + 13096) == 0
+        if finish_swing:
+            assert (g.half(a + 9478), g.half(a + 9482)) == before_morph
+            assert g.get(a + 13096) == 1
+            s.stub(0x2B6E5C, lambda *_: s.action(1, 0))
+            g.cpu.mem_write(a + 1206, b"\4")
+            s.tick()
+            g.cpu.mem_write(a + 1206, b"\0")
+            assert (g.half(a + 9478), g.half(a + 9482)) == (1, 0)
+            s.tick()
+        assert g.get(hud) >> 16 == 0
+        assert (g.half(a + 9478), g.half(a + 9482)) == (16, 0x8000 + 31)
+        assert g.half(a + 1204) == 1441  # clip requested from the motion fixture
+        assert g.get(a + 13096) == 1
+        for frame, sword in ((63, 1), (64, 0)):
+            g.put(a + 1280, float_bits(frame))
+            s.tick()
+            assert g.get(a + 13096) == sword
     g.put(a + 13100, 0)
     assert g.run(0x2B4E7C, a) == 1  # the unmodified axe predicate resumes at expiry
     sword_phial(Scene(8, 4, "switch-axe", 0x174D838))
-    print("Switch Axe: Riot recovery and full light, stock empty check, Energy Charge and timed light drain passed")
+    sword_deflection(Scene(8, 4, "switch-axe", 0x174D838))
+    print("Switch Axe: Riot recovery, Energy Charge, timed light drain and animated morph passed")
+
+
+def sword_deflection(s):
+    g, a = s.g, s.actor
+    equipment = g.get(a + 5060)
+    weapon_vtable = g.get(a)
+    hit = a + 12320
+    sharpness_grade = g.get(weapon_vtable + 508)
+    assert sharpness_grade == 0x26893C  # GU w08 live sharpness getter.
+    shape, manager, vt, load, row = (g.alloc(n) for n in (128, 32, 64, 4, 56))
+    target, target_vt, part, zone, factor, element, noop = (
+        g.alloc(n) for n in (48000, 1400, 32, 16, 4, 4, 4)
+    )
+    g.put(shape + 80, 1)
+    g.put(a + 12700, shape)
+    g.put(0x2126A64, manager)
+    g.put(manager, vt)
+    g.put(vt + 48, load)
+    s.stub(load, lambda _, kind, *__: shape if kind == 0x1857810 else 0)
+    for address in (0x887648, 0x887660, 0x168960, 0x1696C4, 0x2B76CC,
+                    0x2B7ED4, 0xDF814, 0xDD4C4, 0x2AD288):
+        s.stub(address, lambda *_: 0)
+    for offset in (440, 520, 536, 1400):
+        s.stub(g.get(weapon_vtable + offset), lambda *_: 0)
+    s.stub(g.originals[0x2A8A88], lambda *_: row)
+    # Supply a stationary target and let GU compute the contact factor.
+    g.put(target, target_vt)
+    g.put(target_vt + 796, noop)
+    s.stub(0xBAB60, lambda *_: zone)
+    for address in (noop, 0xBAD1C, 0x2864D4):
+        s.stub(address, lambda *_: 0)
+    s.stub(0x3A8D68, lambda *_: 5)
+    g.put(a + 11120, 100)
+    for state, frame, grade, affinity, hitzone, expected in (
+        (5, 38, 0, 30, 10, 35),
+        (5, 38, 1, 30, 10, 35),
+        (5, 38, 0, -20, 10, 35),
+        (5, 38, 2, 0, 10, 5),
+        (5, 38, 0, 0, 80, 5),
+        (70, 70, 1, 0, 10, 70),
+    ):
+        for action_id in (30, state):
+            s.action(16, 0x8000 + action_id)
+            g.put(a + 1280, 0)
+            s.tick()
+        # Affinity is stored on equipment. Sharpness changes independently on the hunter.
+        g.cpu.mem_write(equipment + 802, struct.pack("<h", affinity))
+        g.put(a + 5104, grade)
+        g.cpu.mem_write(zone, bytes((hitzone, hitzone)))
+        g.put(factor, float_bits(1.0))
+        assert g.run(sharpness_grade, a) == grade
+        assert g.run(0x2AD190, a, 0) == (affinity & 0xFFFFFFFF)
+        g.put(hit + 48, 0)
+        g.put(a + 1280, float_bits(frame))
+        s.tick()
+        assert g.get(hit + 48) and g.get(a + 13096) == 1
+        g.run(g.hooks[0x178030], 0, hit, target, part, part, a, factor, element)
+        ratio, = struct.unpack("<f", g.cpu.mem_read(factor, 4))
+        assert (ratio < 0.23) == (hitzone == 10), (grade, hitzone, ratio)
+        g.put(a + 1280, float_bits(frame + 2))
+        s.tick()
+        assert g.half(a + 9482) == 0x8000 + expected, (state, grade, affinity, hitzone, expected)
+    print("Switch Axe: GU hitzone, live sharpness, affinity independence and FZ discharge exemption passed")
 
 
 def sword_phial(s):
@@ -307,26 +398,42 @@ def dual_blades():
     g, a = s.g, s.actor
     s.action(16, 0x8000)
     s.stub(g.get(g.get(a) + 900), lambda *_: 0)  # contact flash
+    s.stub(0x3A5ED0, lambda *_: 0)
     g.put(a + 28, float_bits(2))
     row = g.alloc(56)
+    target, other = g.alloc(16), g.alloc(16)
+    hp = a + 5078
+    cases = ((False, 60, 60), (True, 60, 61), (True, 100, 100), (True, 0, 0), (False, 60, 60))
     for hand, offset in enumerate((12320, 12504)):
         hit, armed = a + offset, a + 13156 + 4 * hand
-        for active in (False, True, False):
+        for active, initial_hp, expected_hp in cases:
             g.put(a + 13144, float_bits(600 if active else 0))
+            g.cpu.mem_write(hp, struct.pack("<3h", initial_hp, 100, initial_hp))
             g.cpu.mem_write(hit + 56, struct.pack("<h", 100))
             g.run(g.hooks[0x11BAD38], a, hit, row, 1)
             assert g.get(armed) == int(active)
+            g.run(0x169D44, hit, target, 1)
+            assert g.half(hp) == initial_hp
             g.run(0x11BA9C8, a, hit, 1, 1)
             assert g.get(armed) == (2 if active else 0)
-            if active:
-                g.put(a + 13164, 3)
-                for _ in range(60):
-                    g.run(0x11BA074, a)
-                    if not g.get(armed):
-                        break
-                assert g.get(armed) == 0 and 0 < g.half(hit + 56) < 100
-                assert g.cpu.mem_read(hit + 5, 1) == b"\1"
-    print("Dual Blades: Wolf's Maw created a delayed second contact on either hand; expiry passed")
+            if not active:
+                continue
+
+            g.put(a + 13164, 3)
+            for _ in range(60):
+                g.run(0x11BA074, a)
+                if not g.get(armed):
+                    break
+            assert g.get(armed) == 0 and 0 < g.half(hit + 56) < 100
+            assert g.cpu.mem_read(hit + 5, 1) == b"\1"
+            for contact, victim, kind in ((hit, target, 0), (hit, 0, 1), (s.remote + offset, target, 1)):
+                g.run(0x169D44, contact, victim, kind)
+                assert g.half(hp) == initial_hp
+            g.run(0x169D44, hit, target, 1)
+            assert g.half(hp) == expected_hp, (hand, initial_hp, g.half(hp))
+            g.run(0x169D44, hit, other, 1)
+            assert g.half(hp) == expected_hp
+    print("Dual Blades: native Wolf's Maw follow-ups heal once per hand; base hits, expiry, cap and fainting passed")
 
 
 if __name__ == "__main__":

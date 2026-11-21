@@ -7,6 +7,7 @@ use core::{
 };
 mod attack;
 mod camera;
+mod chat;
 mod commands;
 mod deflection;
 mod effect;
@@ -16,7 +17,7 @@ mod physical;
 mod weapon;
 mod world_contact;
 use mhgu_sdk::style::{
-    ActionRequest, Input, PASS, Style, action, hunter, movement, preload,
+    ActionRequest, Input, PASS, Style, action, hunter, input, movement, preload,
     registry::{self, ServiceV1},
     remote, rules,
 };
@@ -151,7 +152,7 @@ unsafe fn actor_entry(actor: u32) -> Option<&'static Entry> {
 }
 
 unsafe fn local_entry(actor: u32) -> Option<&'static Entry> {
-    if actor == 0 || unsafe { local_hunter() } != actor {
+    if actor == 0 || unsafe { local_hunter() } != actor || !unsafe { hunter::is_quest(actor) } {
         return None;
     }
     unsafe { actor_entry(actor) }
@@ -178,7 +179,9 @@ unsafe extern "C" fn bind_rules(id: u32, rules: *const rules::Rules) -> bool {
     if rules.guard_half_angle > 0x8000 {
         return false;
     }
-    entry.rules.store(ptr::from_ref(rules).cast_mut(), Ordering::Release);
+    entry
+        .rules
+        .store(ptr::from_ref(rules).cast_mut(), Ordering::Release);
     true
 }
 
@@ -248,10 +251,7 @@ impl Entry {
 unsafe fn pack_action(packet: u32, actor: u32, flags: u32) -> u32 {
     let result = original!(packet, actor, flags);
     unsafe {
-        if actor != 0
-            && actor == local_hunter()
-            && let Some(codec) = actor_entry(actor).and_then(Entry::action_state)
-        {
+        if let Some(codec) = local_entry(actor).and_then(Entry::action_state) {
             let value = (codec.encode)(actor);
             if value <= STATE_VALUE {
                 let word = (packet + 16) as *mut u32;
@@ -309,6 +309,9 @@ unsafe fn peer_binding<T>(actor: u32, binding: impl Fn(&'static Entry) -> Option
     unsafe {
         // World contacts also call here with monster or object owners.
         remote::Roster::current()?.peer_index(actor)?;
+        if !hunter::is_quest(actor) {
+            return None;
+        }
         let mut candidates =
             entries(u32::from(hunter::equipped_weapon(actor)?)).filter_map(binding);
         let first = candidates.next()?;
@@ -370,7 +373,10 @@ unsafe fn controller_frame(actor: u32, custom_id: Option<u8>) -> u32 {
         if actor == 0 || actor != local_hunter() {
             return PASS;
         }
-        let selected = actor_entry(actor);
+        // The lobby also calls 282DA8, but its actors are too small for
+        // quest-only weapon state and must use the native dispatcher.
+        let in_quest = hunter::is_quest(actor);
+        let selected = if in_quest { actor_entry(actor) } else { None };
         if let Some(id) = custom_id
             && !selected.is_some_and(|entry| entry.style.actions.contains(id))
         {
@@ -391,7 +397,10 @@ unsafe fn controller_frame(actor: u32, custom_id: Option<u8>) -> u32 {
             guard::clear(owner);
             if let Some(stop) = prev.as_ref().and_then(|e| e.style.controller) {
                 // A previous scene's actor may already have been destroyed.
-                stop(if owner == actor { owner } else { 0 }, ptr::null());
+                stop(
+                    if owner == actor && in_quest { owner } else { 0 },
+                    ptr::null(),
+                );
             }
         }
         let Some((entry, tick)) = controller else {
@@ -406,12 +415,12 @@ unsafe fn controller_frame(actor: u32, custom_id: Option<u8>) -> u32 {
         if *((actor + 9493) as *const u8) & 4 != 0 {
             return PASS;
         }
-        if group == 1 && let Some(finish) = entry.rules().and_then(|rules| rules.ground_motion) {
+        if group == 1
+            && let Some(finish) = entry.rules().and_then(|rules| rules.ground_motion)
+        {
             weapon::finish_ground_motion(actor, entry.style, slot, finish);
         }
         *((actor + 9472) as *mut u32) &= !1;
-        let auxiliary: unsafe extern "C" fn() -> u32 =
-            core::mem::transmute(forge::mem::text_addr() + 0x65fa04);
         let pressed = if movement::sheathed_movement((group, slot))
             && *((actor + 10057) as *const u8) & 1 == 0
         {
@@ -426,7 +435,7 @@ unsafe fn controller_frame(actor: u32, custom_id: Option<u8>) -> u32 {
             weapon: *((actor + 5156) as *const [u32; 4]),
             stick_angle: *((actor + 5132) as *const u16),
             stick_strength: *((actor + 5136) as *const i16),
-            auxiliary_pressed: pressed & auxiliary(),
+            auxiliary_pressed: pressed & input::auxiliary_shoulder_mask(),
         };
         let result = tick(actor, &input);
         if result == PASS {
@@ -628,6 +637,7 @@ fn start() {
     static RULES: rules::Service = rules::Service(bind_rules);
     unsafe { rules::publish(&RULES) };
     let base = forge::mem::text_addr();
+    chat::install(base);
     forge::install_hook!(base, encode);
     forge::install_hook!(base, decode);
     forge::install_hook!(base, game_style);

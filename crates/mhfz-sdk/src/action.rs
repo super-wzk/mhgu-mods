@@ -198,6 +198,13 @@ impl Cursor {
         self.pending.map(|at| half(self.branches, at + 22))
     }
 
+    /// Clear a queued branch when its input is consumed by a different command.
+    pub fn discard_pending_command(&mut self, command: u16) {
+        self.pending = self
+            .pending
+            .filter(|&at| half(self.branches, at + 4) != command);
+    }
+
     pub fn art_window(&self, eligible: impl Fn(u16) -> bool) -> bool {
         self.branches.chunks_exact(40).any(|row| {
             self.rules

@@ -8,11 +8,9 @@ static BANKS: [Bank; 3] = [
 ];
 const TRACKS: &[u8] = include_bytes!("../target/assets/frontier_sa_sound.flse");
 
-pub(super) unsafe fn preload_draw() {
-    // Clip 1412 first plays the weapon bank at frame 4 and the blade bank at 6.
-    unsafe {
-        BANKS[2].preload();
-        BANKS[0].preload();
+pub(super) unsafe fn preload() {
+    for bank in &BANKS {
+        unsafe { bank.preload() };
     }
 }
 

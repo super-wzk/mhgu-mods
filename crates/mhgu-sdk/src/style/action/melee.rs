@@ -7,14 +7,28 @@ use crate::{
 /// Offsets from the GU hunter to the primary and secondary blade contacts.
 pub const BLADE_CONTACT_OFFSETS: [u32; 2] = [12320, 12504];
 
+const FULL_HITSTOP: u32 = 10156;
+const SLOW_HITSTOP: u32 = 10160;
+
+/// Whether GU's full-stop or slow-hit timer is active (29BEF4).
+///
+/// # Safety
+/// The actor must be a live GU hunter on the game thread.
+pub unsafe fn hitstop_active(actor: u32) -> bool {
+    unsafe {
+        ((actor + FULL_HITSTOP) as *const f32).read() > 0.
+            || ((actor + SLOW_HITSTOP) as *const f32).read() > 0.
+    }
+}
+
 /// Reset GU's full-stop and slow-hit timers on an accepted recoil transition.
 ///
 /// # Safety
 /// The actor must be the live local hunter on the game thread.
 pub unsafe fn clear_hitstop(actor: u32) {
     unsafe {
-        ((actor + 10156) as *mut f32).write(0.);
-        ((actor + 10160) as *mut f32).write(0.);
+        ((actor + FULL_HITSTOP) as *mut f32).write(0.);
+        ((actor + SLOW_HITSTOP) as *mut f32).write(0.);
     }
 }
 
@@ -72,23 +86,25 @@ pub unsafe fn equipped_tip(actor: u32, hand: usize, joint: u8) -> Option<f32> {
     }
 }
 
-pub type ContactCallback = unsafe extern "C" fn(actor:u32);
+pub type ContactCallback = unsafe extern "C" fn(actor: u32);
 #[doc(hidden)]
 #[repr(C)]
-pub struct ContactService(pub unsafe extern "C" fn(u32,ContactCallback));
-const CONTACT:&core::ffi::CStr=c"mhgu::StyleBladeContactV1";
-const CONTACT_MAGIC:u32=u32::from_le_bytes(*b"BCT1");
+pub struct ContactService(pub unsafe extern "C" fn(u32, ContactCallback));
+const CONTACT: &core::ffi::CStr = c"mhgu::StyleBladeContactV1";
+const CONTACT_MAGIC: u32 = u32::from_le_bytes(*b"BCT1");
 
 /// # Safety
 /// The registry publishes this resident service once on the game thread.
-pub unsafe fn publish_contact(api:&'static ContactService)->bool{
-    unsafe{service::publish(CONTACT,CONTACT_MAGIC,api)}
+pub unsafe fn publish_contact(api: &'static ContactService) -> bool {
+    unsafe { service::publish(CONTACT, CONTACT_MAGIC, api) }
 }
 /// # Safety
 /// The callback must remain valid for the lifetime of the registered style.
-pub unsafe fn bind_contact(id:u32,callback:ContactCallback)->bool{
-    if service::on_game_thread() && let Some(api)=unsafe{service::find::<ContactService>(CONTACT,CONTACT_MAGIC)}{
-        unsafe{(api.0)(id,callback)};
+pub unsafe fn bind_contact(id: u32, callback: ContactCallback) -> bool {
+    if service::on_game_thread()
+        && let Some(api) = unsafe { service::find::<ContactService>(CONTACT, CONTACT_MAGIC) }
+    {
+        unsafe { (api.0)(id, callback) };
         return true;
     }
     false

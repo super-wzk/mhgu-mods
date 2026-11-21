@@ -6,6 +6,8 @@ pub mod hud;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub mod hunter;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub mod input;
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub mod movement;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub mod particle;

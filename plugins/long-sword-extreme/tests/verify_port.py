@@ -231,6 +231,19 @@ def source():
     out.clear()
     fz.call(0x811FA176, player)
     assert out == [(1, 78, 4)], out
+    fz.trap(0x811F1A4A, lambda *_: 1)
+    out.clear()
+    fz.call(0x811FA7A2, player)
+    assert out == [(0, 28, 4)], out
+    fz.c.hook_del(fz.hooks.pop(0x811F1A4A))
+    fz.trap(0x8172C3D4, lambda *_: 0)
+    fz.trap(0x817C45EC, lambda *_: 1)
+    fz.trap(0x8172B7D8, lambda button, *_: int(button == 116))
+    fz.trap(0x8172B7E8, lambda *_: 0)
+    fz.trap(0x8184743A, lambda _, threshold, *__: int(threshold <= 100))
+    for mask, expected in ((1 << 14, 14), (3 << 14, 15)):
+        fz.c.mem_write(player + 3579, bytes([13]))
+        assert fz.call(0x811F1A4A, player, mask, mask, 1) == expected
     def roll_angle(_, dst, *__):
         fz.c.mem_write(dst, struct.pack("<H", yaw))
         return 1
@@ -390,6 +403,8 @@ def dash_charge_effects(g, actor, controller, set_action):
     g.put(pose + 12, 1)
     g.put(pose + 240, parent)
     g.put(pose_vt + 84, get_joint)
+    mapped = False
+    g.stub(0xC1628, lambda owner, *_: matrix if mapped else owner + 176)
     def joint(_, index, *__):
         assert index == 8
         return matrix
@@ -409,7 +424,12 @@ def dash_charge_effects(g, actor, controller, set_action):
         accepted.clear()
         set_action(16, 0x8000 + 71)
         g.put(inputs, 1 << 27)
-        for _ in range(50):
+        mapped = False
+        for _ in range(49):
+            g.run(controller, actor, inputs)
+        assert not accepted
+        mapped = True
+        for _ in range(2):
             g.run(controller, actor, inputs)
         assert sorted(selector for selector, _ in accepted) == expected, (
             exit_kind, g.half(actor + 9482), [selector for selector, _ in accepted]
@@ -420,6 +440,7 @@ def dash_charge_effects(g, actor, controller, set_action):
                                           + [(s, 0., 0., 100.) for s in range(flash, flash + flash_count)])
         for selector, unit in accepted:
             assert g.get(unit + 132) == 0x29 and g.half(unit + 194) == 8
+            assert g.cpu.mem_read(proofs[selector] + 56, 1) == (b"\x02" if selector == aura else b"\0")
             g.run(0x31CC6C, unit + 128, proofs[selector])
         for forward, origin in (((0, 0, 1), (80, 100, 50)), ((1, 0, 0), (440, 90, -30))):
             x, _, z = forward
@@ -735,13 +756,19 @@ def plugin(elf, selected):
         assert bytes(g.cpu.mem_read(out,12))==struct.pack("<fII",8.,0,40)
         g.cpu.mem_write(a+9482,struct.pack("<H",0x8000+77))
         assert g.run(g.get(d+60),a,out)==0
-        set_action = setup_controller(g, a)
+        transition_allowed = True
+
+        def allow_transition(allowed):
+            nonlocal transition_allowed
+            transition_allowed = allowed
+
+        set_action = setup_controller(g, a, accept_transition=lambda: transition_allowed)
         release_mesh_frames(g)
         dash_charge_effects(g, a, g.get(d + 20), set_action)
         instant_slash(g, a, g.get(d + 20), set_action)
         attack_rolls(g, a, g.get(d + 20), set_action)
         from verify_fidelity import replay
-        replay(g, a, d, set_action)
+        replay(g, a, d, set_action, allow_transition)
     print("GU packaged NRO registration, three art slots, guard policy and blade-color writes passed", selected)
 
 

@@ -20,9 +20,13 @@ impl Roster {
     pub unsafe fn current() -> Option<Self> {
         unsafe {
             let manager = hunter::manager()?;
+            let local = hunter::local_in(manager);
+            if local == 0 || !hunter::is_quest(local) {
+                return None;
+            }
             Some(Self {
                 players: ((manager + 28) as *const [u32; PLAYER_COUNT]).read(),
-                local: hunter::local_in(manager),
+                local,
             })
         }
     }
@@ -74,7 +78,8 @@ impl<T> PeerStates<T> {
     pub unsafe fn live(&self, index: usize, roster: &Roster, weapon: u8) -> Option<u32> {
         let recorded = self.0.get(index)?.actor.load(Ordering::Acquire);
         let actor = roster.peer(index).filter(|&actor| recorded == actor)?;
-        (unsafe { hunter::equipped_weapon(actor) } == Some(weapon)).then_some(actor)
+        (unsafe { hunter::is_quest(actor) && hunter::equipped_weapon(actor) == Some(weapon) })
+            .then_some(actor)
     }
 
     /// Retire departed hunters before visiting peers that still wield this weapon.

@@ -90,6 +90,6 @@ mod entry {
         }
         mhfz_sdk::effects::model::install();
         battle::install();
-        unsafe { mhgu_sdk::style::preload::bind(STYLE_ID, motion::preload_draw) };
+        unsafe { mhgu_sdk::style::preload::bind(STYLE_ID, motion::preload) };
     }
 }

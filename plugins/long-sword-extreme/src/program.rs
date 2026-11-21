@@ -136,6 +136,8 @@ pub(super) const CMD_EVADE_RIGHT: u16 = 6;
 pub(super) const CMD_EVADE_LEFT: u16 = 7;
 pub(super) const CMD_EVADE_BACK: u16 = 8;
 pub(super) const CMD_A: u16 = 10;
+pub(super) const CMD_SPIRIT: u16 = 14;
+pub(super) const CMD_DISCHARGE: u16 = 15;
 pub(super) const CMD_PARRY: u16 = 21;
 pub(super) const CMD_RELEASE: u16 = 23;
 
@@ -152,8 +154,8 @@ const ORDER: [u16; 26] = [
     CMD_EVADE_SLASH,
     18,
     17,
-    15,
-    14,
+    CMD_DISCHARGE,
+    CMD_SPIRIT,
     19,
     12,
     13,
@@ -176,6 +178,12 @@ static RULES: BranchRules = BranchRules {
 
 pub(super) fn cursor(state: u8) -> Cursor {
     Cursor::new(state, records(state, 1, 40), records(state, 2, 12), &RULES)
+}
+
+pub(super) fn allows_discharge(state: u8) -> bool {
+    records(state, 1, 40)
+        .chunks_exact(40)
+        .any(|row| half(row, 4) == CMD_DISCHARGE)
 }
 
 #[cfg(test)]

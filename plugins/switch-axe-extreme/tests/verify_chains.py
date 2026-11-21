@@ -1,6 +1,8 @@
 """Mash w08 attacks through GU's mapped input and the shipped LMT loop clocks."""
+import math
 import struct
 import subprocess
+from unicorn import arm_const as arm
 from verify_style import BLOCK, DISPATCH, WEAPON_DISPATCH, api_for
 from verify_branches import Frontier
 
@@ -14,6 +16,16 @@ def replay(g, root, actor, form, weapon, set_action):
     def number(offset, value):
         g.cpu.mem_write(actor + offset, struct.pack("<f", value))
 
+    def stamina():
+        return struct.unpack("<f", g.cpu.mem_read(actor + 5088, 4))[0]
+
+    def recover_stamina():
+        # Run the passive recovery block inside GU's common hunter update.
+        g.cpu.reg_write(arm.UC_ARM_REG_R4, actor)
+        g.cpu.reg_write(arm.UC_ARM_REG_R7, actor + 9478)
+        g.cpu.reg_write(arm.UC_ARM_REG_R8, actor + 10057)
+        g.run(0x29DBDC, until=0x29DE64)
+
     def state():
         return g.half(actor + 9482) - 0x8000
 
@@ -23,6 +35,7 @@ def replay(g, root, actor, form, weapon, set_action):
         g.cpu.mem_write(actor + 5108, struct.pack("<3H", held, previous & ~held, held & ~previous))
         previous = held
         g.cpu.mem_write(actor + 5140, bytes(32))
+        g.cpu.mem_write(actor + 5132, struct.pack("<H", (aim + 0x4000) & 0xffff))
         g.cpu.mem_write(actor + 5136, struct.pack("<h", stick))
         number(1280, frame)
         g.cpu.mem_write(actor + 1206, bytes([4 if wrap else 0]))
@@ -51,7 +64,6 @@ def replay(g, root, actor, form, weapon, set_action):
     aim = facing
     if 0x27F5D0 in g.traps:
         g.cpu.hook_del(g.traps.pop(0x27F5D0))
-    g.stub(0x27F5D0, lambda *_: aim)
     sectors = (
         (0, 29), (0x1FFF, 29), (0x2000, 18), (0x4000, 18), (0x6000, 18),
         (0x60B6, 18), (0x6100, 19), (0x7FFF, 19), (-0x8000, 19),
@@ -88,6 +100,56 @@ def replay(g, root, actor, form, weapon, set_action):
             pad(8)
         assert g.get(hud) & 0xffff == 300
 
+    for sword, opener in ((False, 0), (True, 5)):
+        if sword:
+            refill_light()
+        for yaw, strength, axe_action in (
+            (0, 0, 2), (0, 100, 2), (-0x4000, 49, 2), (-0x4000, 50, 107),
+            (0x4000, 100, 108), (-0x8000, 100, 106),
+        ):
+            aim = (facing - yaw) & 0xffff
+            enter(opener, sword=sword)
+            set_action(1, 0)
+            pad(0, 0x120, stick=strength)
+            g.run(g.hooks[DISPATCH], actor)
+            assert state() == (70 if sword else axe_action), (sword, yaw, strength, state())
+
+    # Both light-sword branches are open at frame 56 of the standing X slash.
+    aim = (facing + 0x4000) & 0xffff
+    for strength, target in ((49, 70), (50, 153)):
+        refill_light()
+        enter(5, sword=True)
+        assert tap(0x120, 56, stick=strength) == target, (strength, state())
+
+    # Start a thrust with the native chord, then restore its directional chord
+    # from GU's pad state when the weapon mapper omits X+A.
+    for presses, strength, target in (
+        (((4, 0x20), (72, 0x120)), 100, 153),
+        (((4, 0x100), (72, 0x120)), 100, 153),
+        (((68, 0x40), (70, 0x160)), 100, 153),
+        (((4, 0), (70, 0x160)), 100, 153),
+        (((4, 0), (90, 0x20), (92, 0x20), (94, 0x20), (96, 0x120)), 100, 153),
+        (((4, 0x20), (72, 0x120)), 49, 70),
+        (((4, 0x20), (68, 0x120), (70, 0x120)), 100, 70),
+    ):
+        refill_light()
+        aim = facing
+        enter(5, sword=True)
+        set_action(1, 0)
+        pad(0, 0x120)
+        g.run(g.hooks[DISPATCH], actor)
+        assert state() == 70
+        aim = (facing + 0x4000) & 0xffff
+        for frame, buttons in presses:
+            pad(frame, buttons, stick=strength)
+        assert state() == target, (presses, strength, state())
+
+    refill_light()
+    enter(70, sword=True)
+    assert pad(114) == 74
+    assert pad(4, 0x20) == 74
+    assert pad(30, 0x120, stick=100) == 153
+
     for sword, opener, window, base in ((False, 0, 70, 106), (True, 5, 48, 152)):
         for yaw, expected in sectors:
             assert reference.command((17, 18, 19), yaw) == expected, (yaw, expected)
@@ -120,17 +182,17 @@ def replay(g, root, actor, form, weapon, set_action):
             assert (g.half(actor + 9478), g.half(actor + 9482)) == expected, (yaw, gu_stamina)
     g.cpu.hook_del(g.traps.pop(0x2864C4))
     g.stub(0x2864C4, lambda _, skill, *__: int(skill == 156))
-    for stamina, expected in ((74, (16, 0x8005)), (75, (16, 0x8024))):
+    for reserve, expected in ((74, (16, 0x8005)), (75, (16, 0x8024))):
         aim = (facing - 0x4000) & 0xffff
         enter(5, sword=True)
-        number(5088, stamina)
+        number(5088, reserve)
         tap(0x80, 56)
-        assert (g.half(actor + 9478), g.half(actor + 9482)) == expected, stamina
+        assert (g.half(actor + 9478), g.half(actor + 9482)) == expected, reserve
     g.cpu.hook_del(g.traps.pop(0x2864C4))
     g.stub(0x2864C4, lambda *_: 0)
     aim = facing
 
-    def cycle(clip, button, entry, repeat):
+    def cycle(clip, button, entry, repeat, *, exhaust=False):
         bank = root / "dist/switch-axe-extreme/romfs/nativeNX/player/mot/frontier_sa"
         data = (bank / f"m_{clip // 100 - 10}.lmt").read_bytes()
         offset, = struct.unpack_from("<I", data, 8 + 4*(clip % 100))
@@ -141,15 +203,21 @@ def replay(g, root, actor, form, weapon, set_action):
         before = len(hits)
         n = 0
         wraps = 0
-        for tick in range(length * 2):
+        for tick in range(length * (16 if exhaust else 2)):
             n += 2
             wrap = n >= length - 1
             if wrap:
                 n = restart + n - (length - 1)
                 wraps += 1
             active = pad(n, button if tick % 5 == 0 else 0, wrap=wrap)
+            if exhaust and active not in (entry, repeat):
+                return active
             assert active in (entry, repeat) and g.half(actor + 1204) == clip, (entry, tick, active, n)
-            if active == repeat and wraps >= 3 and len(hits) >= before + 7:
+            if entry in (8, 155):
+                reserve = stamina()
+                recover_stamina()
+                assert stamina() == reserve, (active, tick, reserve, stamina())
+            if not exhaust and active == repeat and wraps >= 3 and len(hits) >= before + 7:
                 break
         else:
             raise AssertionError((entry, wraps, hits[before:]))
@@ -172,6 +240,23 @@ def replay(g, root, actor, form, weapon, set_action):
             pad(frame, 0x100 if frame == 42 else 0)
         assert state() == 8
         assert cycle(1405, 0x100, 8, 9) in (46, 47)
+        enter(45)
+        number(5088, 400)
+        assert pad(28) == 45
+        assert stamina() == 300
+        recover_stamina()
+        assert stamina() == 300
+        for elapsed in (1, 2):
+            number(28, elapsed)
+            enter(8)
+            number(5088, 250)
+            assert cycle(1405, 0x100, 8, 9, exhaust=True) in (46, 47)
+            assert stamina() == 0
+            set_action(1, 0)
+            for _ in range(3):
+                recover_stamina()
+            assert stamina() > 0
+        number(28, 2)
         for sword in (False, True):
             if sword:
                 refill_light()
@@ -183,11 +268,16 @@ def replay(g, root, actor, form, weapon, set_action):
                     number(1284, 220)
                     weapon(0x40, "000b" if sword else "001a", 162 if sword else 111)
                     previous = 0x40
+                    g.put(actor + 4076, facing)
+                    g.put(actor + 5280, facing)
+                    aim = (facing + 0x3000) & 0xffff if walking else facing
                     gate = 40 if walking else 56
                     for n in range(10, gate, 2):
                         assert pad(n, 0x40, stick=100 if walking else 0) == (162 if sword else 111)
+                    assert g.half(actor + 4076) == facing
                     holding = (163 if sword else 112) + int(walking)
                     assert pad(gate, 0x40, stick=100 if walking else 0) == holding
+                    assert (g.half(actor + 4076), g.half(actor + 5280)) == (aim, aim), (sword, walking)
                     for tick in range(32):
                         n = (tick*2) % 52 if walking else 62 + tick*2
                         assert pad(n, 0x40, stick=100 if walking else 0) == holding
@@ -215,25 +305,118 @@ def replay(g, root, actor, form, weapon, set_action):
                                 assert g.get(actor + 13100) <= 100 - 7*6 and (g.get(hud) & 0xffff) == light
         refill_light()
         # Slash evades accept held X from frame 18 and switch at frame 38.
-        for sword, slide, hold, weak, charged, moving in (
-            (False, 106, 123, 141, 127, 130), (False, 107, 124, 140, 133, 136),
-            (False, 108, 123, 141, 127, 130),
-            (True, 152, 128, 131, 134, 160), (True, 153, 129, 132, 135, 161),
-            (True, 154, 128, 131, 134, 160),
+        for sword, slide, hold, weak, charged, rush, follow in (
+            (False, 106, 123, 141, 127, 130, 142), (False, 107, 124, 140, 133, 136, 138),
+            (False, 108, 123, 141, 127, 130, 142), (True, 152, 128, 131, 134, 160, 29),
+            (True, 153, 129, 132, 135, 161, 29), (True, 154, 128, 131, 134, 160, 29),
         ):
-            for at, stick, expected in ((38, 0, weak), (40, 0, charged), (40, 100, moving)):
+            if sword:
+                refill_light()
+            for at, stick, expected in ((38, 0, weak), (40, 0, charged), (40, 100, rush)):
                 enter(slide, sword=sword)
                 assert pad(18, 0x20) == slide
                 assert pad(38, 0x20) == hold
                 assert pad(at, 0, stick=stick) == expected, (slide, at, stick, state())
-            for yaw in (-0x4000, 0x4000, -0x8000):
+
+            # Compare both turns using GU's camera-relative aim and actual X mapping.
+            for yaw, strength, follow_stick in (
+                (-0x4000, 100, 100), (0x4000, 50, 50), (0x1fff, 100, 100),
+                (-0x8000, 100, 100), (0x4000, 100, 49),
+            ):
                 enter(slide, sword=sword)
                 assert pad(18, 0x20) == slide
-                assert pad(38, 0x20) == hold
-                aim = (facing - yaw) & 65535
-                assert pad(40, 0, stick=100) == moving
-                expected = reference.turn(slide, moving, yaw, facing)
-                assert g.half(actor + 4076) == expected and g.half(actor + 5280) == expected
+                assert pad(38, 0x20) == hold, (slide, state(), g.get(hud) & 0xffff)
+                aim = (facing - yaw) & 0xffff
+                assert pad(40, 0, stick=strength) == rush
+                heading = reference.turn(slide, rush, yaw, facing)
+                assert (g.half(actor + 4076), g.half(actor + 5280)) == (heading, heading)
+                assert pad(12, stick=strength) == rush
+                assert tap(0x20, 22, stick=strength) == rush  # X is buffered from frame 22.
+                assert pad(33, stick=strength) == rush
+                assert g.half(actor + 4076) == heading
+                aim = (heading + yaw) & 0xffff
+                # A valid direction at execution overrides the queued one. If the
+                # stick returns to GU's dead zone, retain the earlier world heading.
+                relative = -yaw if follow_stick >= 50 else (heading - (facing - yaw))
+                expected = reference.turn(hold, follow, relative, heading)
+                assert pad(34, stick=follow_stick) == follow
+                assert (g.half(actor + 4076), g.half(actor + 5280)) == (expected, expected)
+
+        camera_manager = g.get(0x2126504)
+        original_camera = g.get(camera_manager + 84)
+        camera = g.alloc(112)
+
+        def camera_atan2(*_):
+            dy, dx = (
+                struct.unpack("<f", struct.pack("<I", g.cpu.reg_read(register)))[0]
+                for register in (arm.UC_ARM_REG_S0, arm.UC_ARM_REG_S1)
+            )
+            result, = struct.unpack("<I", struct.pack("<f", math.atan2(dy, dx)))
+            g.cpu.reg_write(arm.UC_ARM_REG_S0, result)
+
+        g.stub(0x13EFD70, camera_atan2)
+        try:
+            for sword, rush, follow, old_yaw, new_yaw in (
+                (False, 130, 142, 0, 0x4000),
+                (True, 160, 29, 0x4000, 0),
+            ):
+                if sword:
+                    refill_light()
+                for keep_held in (True, False):
+                    aim = (facing - old_yaw) & 0xffff
+                    enter(rush, sword=sword)
+                    # GU 2A79CC latches the camera azimuth while forward is held.
+                    g.cpu.mem_write(actor + 11990, b"\x01")
+                    g.put(actor + 12016, old_yaw)
+                    assert pad(20, stick=100) == rush
+                    assert tap(0x20, 22) == rush
+                    # Rotate the live camera 90 degrees while the attack is queued.
+                    g.cpu.mem_write(camera + 96, struct.pack("<3f", new_yaw != 0, 0, new_yaw == 0))
+                    g.put(camera_manager + 84, camera)
+                    if not keep_held:
+                        g.cpu.mem_write(actor + 11990, b"\x00")
+                        assert pad(32, stick=0) == rush
+                    assert pad(34, stick=100) == follow
+                    expected = reference.turn(0, follow, old_yaw - new_yaw, facing)
+                    heading = g.half(actor + 4076), g.half(actor + 5280)
+                    assert heading == (expected, expected), (sword, keep_held, heading, expected)
+                    assert g.cpu.mem_read(actor + 11990, 1) == bytes([keep_held])
+                    g.put(camera_manager + 84, original_camera)
+                    g.cpu.mem_write(actor + 11990, b"\x00")
+        finally:
+            g.cpu.hook_del(g.traps.pop(0x13EFD70))
+            g.put(camera_manager + 84, original_camera)
+            g.cpu.mem_write(actor + 11990, b"\x00")
+
+        for sword, attack, accept, execute, follow in (
+            (False, 0, 58, 80, 40), (True, 72, 170, 208, 75),
+            (False, 104, 70, 90, 114), (False, 126, 22, 34, 142),
+            (False, 125, 22, 34, 142), (True, 166, 22, 34, 29),
+            (True, 149, 70, 90, 17), (True, 150, 22, 34, 29),
+        ):
+            if sword:
+                refill_light()
+            for yaw in (0x4000, -0x4000):
+                for follow_stick in (49, 50):
+                    if attack == 72:
+                        enter(70, sword=True)  # Reset the discharge tier before testing the release.
+                        set_action(16, 0x8000 + attack)
+                        assert pad(156) == attack
+                    else:
+                        enter(attack, sword=sword)
+                    aim = (facing - yaw) & 0xffff
+                    assert tap(0x20, accept) == attack
+                    assert pad(execute - 1, stick=100) == attack
+                    aim = (facing + yaw) & 0xffff
+                    relative = yaw if follow_stick < 50 else -yaw
+                    if attack == 72:
+                        _, expected = reference.release(210, yaw=relative, facing=facing)
+                    else:
+                        expected = reference.turn(0, follow, relative, facing)
+                    assert pad(execute, stick=follow_stick) == follow
+                    assert (g.half(actor + 4076), g.half(actor + 5280)) == (expected, expected), (
+                        attack, follow, yaw, follow_stick,
+                    )
 
         g.cpu.hook_del(g.traps.pop(0x283238))
         for sword, slide, charge in (
@@ -313,6 +496,13 @@ def replay(g, root, actor, form, weapon, set_action):
         number(1284, 180)
         pad(180)
         assert g.get(actor + 13096) == 0
+
+        refill_light()
+        enter(155, sword=True)
+        number(5088, 200)
+        assert cycle(1065, 0x20, 155, 156, exhaust=True) in (170, 171)
+        pad(0)
+        assert g.get(hud) & 0xffff == 0 and stamina() == 200
     finally:
         g.cpu.hook_del(g.traps.pop(submit))
         g.put(0x2126A64, old_manager)
@@ -320,5 +510,7 @@ def replay(g, root, actor, form, weapon, set_action):
         number(1288, 0)
         g.cpu.mem_write(actor + 5136, bytes(2))
         g.cpu.mem_write(actor + 1206, b"\0")
-    print("GU mapped directions, X deadzone, B evade stamina, all six slash-evade charge follow-ups and empty-light morph passed.")
+    print("GU mapped directions, X deadzone, B evade stamina, buffered slash-evade and sprint follow-up turns, and empty-light morph passed.")
+    print("GU buffered Switch Axe turns use the live camera with either continuous stick input or a neutral/re-push.")
     print("GU mapped A/X continuations: seven or more strikes, release exits, standing/moving charge and charged uppercuts passed.")
+    print("GU passive stamina recovery: suppressed during axe wild swings and light flurry, resumes in idle; both loops end on depletion.")

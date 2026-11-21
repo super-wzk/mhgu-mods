@@ -27,9 +27,11 @@ mod entry {
     };
 
     static RULES: Rules = Rules {
+        // FZ 8174277A exempts w00 state 65 from the stamina gate, with a 90° cone.
+        guard_half_angle: 0x4000,
         deflection: Some(mhfz_sdk::combat::deflection),
         ground_motion: Some(finish_ground_motion),
-        ..Rules::EMPTY
+        camera_offset: None,
     };
 
     extern "C" fn finish_ground_motion(slot: u16, phase: u8, motion: u32) -> bool {
@@ -71,7 +73,7 @@ mod entry {
             forge::log::prelude::warn!("Style {}: GU rule service unavailable", EXTREME.id);
         }
         mhfz_sdk::effects::model::install();
-        unsafe { mhgu_sdk::style::preload::bind(EXTREME.id, motion::preload_draw) };
+        unsafe { mhgu_sdk::style::preload::bind(EXTREME.id, motion::preload) };
         motion::install();
         super::battle::install_peers();
         if !unsafe { mhgu_sdk::style::world_contact::bind(EXTREME.id, super::combat::expand) } {

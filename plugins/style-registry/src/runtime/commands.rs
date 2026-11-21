@@ -1,11 +1,17 @@
 //! Extend the local hunter's command table at GU's binding point.
 use core::{cell::UnsafeCell, ptr};
-use mhgu_sdk::style::action::{
-    self,
-    command::{
-        CommandSet, MAX_COMMAND_FRAME,
-        native::{CAPACITY, Command, Entry, Resource, Table, buffer, table},
+use mhgu_sdk::style::{
+    action::{
+        self,
+        command::{
+            CommandSet, MAX_COMMAND_FRAME,
+            native::{
+                ATTACK_CHORD, CAPACITY, Command, Entry, Resource, Table, WEAPON_AFTER_COMBO,
+                WEAPON_CONDITION, buffer, table,
+            },
+        },
     },
+    input,
 };
 
 const BUFFERED_INPUT: u16 = 0x0fff;
@@ -156,12 +162,22 @@ unsafe fn condition(actor: u32, command: *const Command) -> u32 {
         // GU's timing test can include the upcoming frame. An immediate
         // command still opens and closes on the current animation frame.
         let [_, close, opcode, open] = command.parameters;
-        let frame = ((actor + 1280) as *const f32).read();
-        if !(open as f32..close as f32).contains(&frame) {
+        let sample = action::MotionFrame::sample(actor);
+        let close = close as f32;
+        if !(open as f32..close).contains(&sample.frame) {
             return 0;
         }
+        let opcode = match opcode as u16 {
+            // Keep the last valid frame available for a standalone press.
+            WEAPON_AFTER_COMBO if sample.next < close && input::attack_combo_pending(actor) => {
+                return 0;
+            }
+            ATTACK_CHORD if input::attack_chord_with_shoulder(actor) => return 1,
+            WEAPON_AFTER_COMBO | ATTACK_CHORD => WEAPON_CONDITION,
+            opcode => opcode,
+        };
         let native = Command {
-            condition: opcode as u16,
+            condition: opcode,
             ..*command
         };
         original!(actor, &native)

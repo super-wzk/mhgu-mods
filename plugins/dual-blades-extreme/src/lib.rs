@@ -110,7 +110,7 @@ mod entry {
             forge::log::prelude::warn!("Style {}: GU rule service unavailable", STYLE_ID);
         }
         mhfz_sdk::effects::model::install();
-        unsafe { mhgu_sdk::style::preload::bind(STYLE_ID, motion::preload_draw) };
+        unsafe { mhgu_sdk::style::preload::bind(STYLE_ID, motion::preload) };
         battle::install();
         super::fx::install(EXTREME.id);
         super::hud::install();

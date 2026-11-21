@@ -14,6 +14,10 @@ type Keys = Vec<(u32, V3)>;
 fn word(b: &[u8], p: usize) -> u32 {
     u32::from_le_bytes(b[p..p + 4].try_into().unwrap())
 }
+fn argb_as_rgba(argb: u32) -> [u8; 4] {
+    let [alpha, red, green, blue] = argb.to_be_bytes();
+    [red, green, blue, alpha]
+}
 fn put(b: &mut [u8], p: usize, n: u32) {
     b[p..p + 4].copy_from_slice(&n.to_le_bytes());
 }
@@ -207,6 +211,13 @@ impl Facing {
     }
 }
 
+#[repr(u32)]
+#[derive(Clone, Copy)]
+enum EulerOrder {
+    LocalXyz = 0,
+    Legacy = 4,
+}
+
 #[derive(Clone)]
 struct Layer {
     mesh: u16,
@@ -228,6 +239,7 @@ struct Layer {
     uv_origin: [f32; 2],
     uv_keys: Keys,
     pulse: bool,
+    rotation_order: EulerOrder,
     facing: Facing,
     inherit_joint_rotation: bool,
     camera_depth: Keys,
@@ -258,6 +270,7 @@ impl Layer {
             uv_origin: [0.; 2],
             uv_keys: Vec::new(),
             pulse: false,
+            rotation_order: EulerOrder::Legacy,
             facing: Facing::World,
             inherit_joint_rotation: false,
             camera_depth: Vec::new(),
@@ -378,9 +391,12 @@ impl Compiler {
             model[139] = layer.mirror_axes;
             float(&mut model, 140, layer.soft_particle);
         }
-        // A949F8 reads Euler order 4 and travel axis 6 (disabled).
-        // A956D8 reads the camera mode separately at bits 8..11.
-        put(&mut model, 256, 0x64 | (layer.facing as u32) << 8);
+        // A949F8 reads the Euler order and axis 6 disables travel alignment.
+        put(
+            &mut model,
+            256,
+            0x60 | layer.rotation_order as u32 | (layer.facing as u32) << 8,
+        );
         let depth = &layer.camera_depth;
         if depth.iter().any(|&(_, v)| v[2] != 0.) {
             // A956D8 moves the final model origin along the camera-to-particle ray.
@@ -739,7 +755,9 @@ impl Compiler {
                         (vector_curve(movement_id, [0.; 3], time_scale), scale)
                     };
                     let mut position = vec(row, 0);
-                    if short_ground {
+                    if short_ground
+                        || (!wide && self.namespace == "frontier_ls" && matches!(bank, 4007 | 4036))
+                    {
                         // 113CF31B samples the absolute offset. GU travel
                         // integrates deltas, so seed the emitter at its first key.
                         for (origin, offset) in position.iter_mut().zip(movement[0].1) {
@@ -793,9 +811,21 @@ impl Compiler {
                         uv_origin,
                         uv_keys,
                         pulse: false,
+                        // FZ 81F4E4C2 and 81F4FF30 apply local X, Y, Z in sequence.
+                        rotation_order: EulerOrder::LocalXyz,
                         facing,
-                        // 81216E36 attaches the persistent sword glow to FZ node 21.
-                        inherit_joint_rotation: matches!(bank, 4016..=4019) && selector == 8,
+                        // FZ 817BD7A0 mode 0 takes the live joint basis for the
+                        // attached 4014/4015 (w12) and 4022 (w00) motion effects.
+                        // 81216E36, 81E70430 and 811F5D2E also use joint bases.
+                        inherit_joint_rotation: matches!(
+                            (bank, selector),
+                            (4014, 2 | 3)
+                                | (4015, 4 | 13)
+                                | (4022, 9 | 12)
+                                | (4016..=4019, 8)
+                                | (4023, 5)
+                                | (4007, 8..=10)
+                        ),
                         camera_depth,
                         // FZ 81F482A4 samples independent X/Y mirror signs.
                         mirror_axes: (emitter_flags as u8 >> 2) & 3,
@@ -859,9 +889,8 @@ impl Compiler {
                 let y = if mirrored { core::f32::consts::PI } else { 0. };
                 self.layer(
                     Layer {
-                        // Limit the combined brightness of the overlapping auras
-                        // before GU's HDR and bloom passes.
-                        blend: Blend::Alpha,
+                        // FZ 81FCADFA draws the m66 sprite with source-alpha addition.
+                        blend: [Blend::Additive, Blend::Alpha][kind],
                         rotation: vec![(0, [0., y, 0.]), (600, [0., y, 600. * rate])],
                         rotation_range: [0., 0., core::f32::consts::PI],
                         scale: if kind == 0 {
@@ -898,7 +927,7 @@ impl Compiler {
                 };
                 self.layer(
                     Layer {
-                        blend: Blend::Alpha,
+                        blend: [Blend::Additive, Blend::Alpha][kind],
                         rotation_range: if kind == 0 {
                             [0., 0., core::f32::consts::PI]
                         } else {
@@ -1310,29 +1339,14 @@ impl Compiler {
         self.layer(slash, None)?;
         self.route(first);
 
-        // The original shader colours are ARGB. The extreme variants come
-        // from the dual-blades parameter block at offsets 172 and 176.
-        let rgba = |offset| {
-            let [alpha, red, green, blue] = word(params, offset).to_be_bytes();
-            [red, green, blue, alpha]
-        };
-        let modes = [
-            ([255, 51, 51, 51], [255, 51, 51, 255]),
-            ([255, 100, 20, 51], [255, 100, 20, 255]),
-            (rgba(172), rgba(176)),
+        self.dual_blade_glows(params, false)?;
+        let colors = [
+            [255, 51, 51, 255],
+            [255, 100, 20, 255],
+            argb_as_rgba(word(params, 176)),
         ];
-        for (glow_color, _) in modes {
-            let first = self.count;
-            let mut glow = Layer::legacy(59, 8);
-            // Both blades refresh before the previous pair fades. Composite their
-            // coverage before GU's bloom pass, as for the sustained charge aura.
-            glow.blend = Blend::Alpha;
-            glow.color = vec![(0, glow_color), (6, glow_color), (8, [0; 4])];
-            self.layer(glow, None)?;
-            self.route(first);
-        }
         for hand in [502, 503] {
-            for (_, color) in modes {
+            for color in colors {
                 let first = self.count;
                 let mut trail = Layer::legacy(hand, 6);
                 trail.blend = Blend::Alpha;
@@ -1340,6 +1354,30 @@ impl Compiler {
                 self.layer(trail, None)?;
                 self.route(first);
             }
+        }
+        Ok(())
+    }
+
+    pub fn dual_blade_glows(&mut self, params: &[u8], left: bool) -> Result<()> {
+        use core::f32::consts::{FRAC_PI_2, PI};
+        let colors = [
+            [255, 51, 51, 51],
+            [255, 100, 20, 51],
+            argb_as_rgba(word(params, 172)),
+        ];
+        for color in colors {
+            let first = self.count;
+            let mut glow = Layer::legacy(59, 8);
+            // 81F871F8 turns the mesh 90 degrees about each blade's local X.
+            // For node 18 it first adds a half turn about the blade's local Z.
+            glow.rotation = vec![(0, [FRAC_PI_2, 0., if left { PI } else { 0. }])];
+            glow.rotation_order = EulerOrder::LocalXyz;
+            glow.inherit_joint_rotation = true;
+            // Composite the periodic glow coverage before GU's bloom pass.
+            glow.blend = Blend::Alpha;
+            glow.color = vec![(0, color), (6, color), (8, [0; 4])];
+            self.layer(glow, None)?;
+            self.route(first);
         }
         Ok(())
     }

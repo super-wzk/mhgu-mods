@@ -108,6 +108,8 @@ mod entry {
     };
 
     static RULES: Rules = Rules {
+        // FZ weapon row 7 uses 90°. GU 2F2BA0 rejects Guard Up hits for w07.
+        guard_half_angle: 0x4000,
         deflection: Some(mhfz_sdk::combat::deflection),
         camera_offset: Some(mhfz_sdk::camera::offset),
         ..Rules::EMPTY
@@ -151,7 +153,7 @@ mod entry {
         if !unsafe { mhgu_sdk::style::remote::bind(STYLE_ID, super::peer::tick) } {
             forge::log::prelude::warn!("Extreme LS: remote action playback unavailable");
         }
-        unsafe { mhgu_sdk::style::preload::bind(STYLE_ID, motion::preload_draw) };
+        unsafe { mhgu_sdk::style::preload::bind(STYLE_ID, motion::preload) };
         battle::install();
         super::hud::install();
     }

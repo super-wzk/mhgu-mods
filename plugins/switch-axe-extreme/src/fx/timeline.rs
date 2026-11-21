@@ -2,94 +2,57 @@
 //! Source motion frames and joint numbers are preserved here.
 use super::{Lifetime, Visuals};
 
-pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8, unlocked: bool) {
+pub(super) fn play(v: &Visuals, clip: u16, state: u8, tier: u8, unlocked: bool) {
     let monster_guard = matches!(state, 90 | 92);
     match clip {
-        1003 => {
-            if v.crossed(8.0) && model_motion == 5 {
-                v.joint(4015, 4, 21, [-10.0, 0.0, 60.0], Lifetime::Natural);
-                v.joint(4014, 2, 21, [0.0, 0.0, 30.0], Lifetime::Natural);
-            }
-        }
-        1009 => {
-            if v.crossed(6.0) && model_motion == 5 {
-                v.joint(4015, 4, 21, [-30.0, 0.0, 90.0], Lifetime::Natural);
-                v.joint(4014, 2, 21, [0.0, 0.0, 30.0], Lifetime::Natural);
-            }
-        }
         1052 => {
             if v.crossed(12.0) {
-                v.swing(v.phial.bank, 31, [0.0, 130.0, 100.0], [0.0, 0.0, 15.0], 1.1);
-            }
-            if v.crossed(12.0) && state == 166 {
-                v.pose(v.phial.bank, 28, 0, [0.0, 0.0, 0.0], Lifetime::Natural);
+                v.swing(v.phial.bank, 31, [0.0, 130.0, 100.0], [0.0, 15.0], 1.1);
+                if state == 166 {
+                    v.pose(v.phial.bank, 28, 0, [0.0; 3], Lifetime::Natural);
+                }
             }
         }
         1053 => {
             if v.crossed(12.0) {
-                v.swing(v.phial.bank, 31, [0.0, 130.0, 50.0], [0.0, 0.0, 345.0], 1.1);
-            }
-            if v.crossed(12.0) && state == 135 {
-                v.pose(v.phial.bank, 29, 0, [0.0, 0.0, 0.0], Lifetime::Natural);
+                v.swing(v.phial.bank, 31, [0.0, 130.0, 50.0], [0.0, 345.0], 1.1);
+                if state == 135 {
+                    v.pose(v.phial.bank, 29, 0, [0.0; 3], Lifetime::Natural);
+                }
             }
         }
         1054 => {
             if v.crossed(12.0) {
-                v.swing(
-                    v.phial.bank,
-                    31,
-                    [0.0, 130.0, 100.0],
-                    [0.0, 0.0, 345.0],
-                    1.1,
-                );
-            }
-            if v.crossed(12.0) && state == 161 {
-                v.pose(v.phial.bank, 29, 0, [0.0, 0.0, 0.0], Lifetime::Natural);
+                v.swing(v.phial.bank, 31, [0.0, 130.0, 100.0], [0.0, 345.0], 1.1);
+                if state == 161 {
+                    v.pose(v.phial.bank, 29, 0, [0.0; 3], Lifetime::Natural);
+                }
             }
         }
         1055 | 1479 => {
             if v.crossed(22.0) {
-                v.pose(v.phial.bank, 14, 0, [0.0, 70.0, -110.0], Lifetime::Natural);
-                v.rotated_pose(
-                    v.phial.bank,
-                    16,
-                    0,
-                    [0.0, 60.0, -10.0],
-                    Lifetime::Natural,
-                    None,
-                );
+                v.pose(v.phial.bank, 14, 0, [0.0, 70.0, -110.0], Lifetime::Sprint);
+                v.pose(v.phial.bank, 16, 0, [0.0, 60.0, -10.0], Lifetime::Sprint);
             }
             if v.crossed(34.0) {
-                v.pose(v.phial.bank, 16, 21, [-10.0, 0.0, 0.0], Lifetime::Natural);
+                v.pose(v.phial.bank, 16, 21, [-10.0, 0.0, 0.0], Lifetime::Sprint);
             }
             if v.crossed(38.0) {
-                v.pose(v.phial.bank, 16, 21, [-10.0, 0.0, 0.0], Lifetime::Natural);
+                v.pose(v.phial.bank, 16, 21, [-10.0, 0.0, 0.0], Lifetime::Sprint);
             }
         }
         1057 => {
             if v.crossed(24.0) {
-                v.swing(
-                    v.phial.bank,
-                    31,
-                    [0.0, 100.0, 100.0],
-                    [0.0, 0.0, 267.0],
-                    1.1,
-                );
+                v.swing(v.phial.bank, 31, [0.0, 100.0, 100.0], [0.0, 267.0], 1.1);
             }
             if v.crossed(74.0) {
-                v.swing(v.phial.bank, 31, [0.0, 110.0, 0.0], [0.0, 0.0, 262.0], 1.3);
+                v.swing(v.phial.bank, 31, [0.0, 110.0, 0.0], [0.0, 262.0], 1.3);
                 v.pose(v.phial.bank, 30, 0, [0.0, 0.0, 0.0], Lifetime::Natural);
             }
         }
         1058 => {
             if v.crossed(12.0) {
-                v.swing(
-                    v.phial.bank,
-                    31,
-                    [0.0, 120.0, -50.0],
-                    [0.0, 0.0, 230.0],
-                    1.1,
-                );
+                v.swing(v.phial.bank, 31, [0.0, 120.0, -50.0], [0.0, 230.0], 1.1);
             }
             if v.crossed(16.0) {
                 v.pose(v.phial.bank, 14, 0, [0.0, 80.0, 100.0], Lifetime::Natural);
@@ -106,7 +69,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
                     Lifetime::Natural,
                     Some(-0x4000),
                 );
-                v.swing(v.phial.bank, 31, [0.0, 110.0, 50.0], [0.0, 0.0, 110.0], 1.1);
+                v.swing(v.phial.bank, 31, [0.0, 110.0, 50.0], [0.0, 110.0], 1.1);
             }
             if v.crossed(16.0) {
                 v.pose(v.phial.bank, 14, 0, [-100.0, 80.0, 0.0], Lifetime::Natural);
@@ -122,13 +85,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
                     Lifetime::Natural,
                     Some(0x4000),
                 );
-                v.swing(
-                    v.phial.bank,
-                    31,
-                    [0.0, 110.0, -50.0],
-                    [0.0, 0.0, 250.0],
-                    1.1,
-                );
+                v.swing(v.phial.bank, 31, [0.0, 110.0, -50.0], [0.0, 250.0], 1.1);
             }
             if v.crossed(16.0) {
                 v.pose(v.phial.bank, 14, 0, [100.0, 80.0, 0.0], Lifetime::Natural);
@@ -136,30 +93,18 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
         }
         1061 => {
             if v.crossed(12.0) {
-                v.swing(
-                    v.phial.bank,
-                    31,
-                    [-20.0, 130.0, 50.0],
-                    [0.0, 0.0, 15.0],
-                    1.1,
-                );
-            }
-            if v.crossed(12.0) && state == 134 {
-                v.pose(v.phial.bank, 28, 0, [0.0, 0.0, 0.0], Lifetime::Natural);
+                v.swing(v.phial.bank, 31, [-20.0, 130.0, 50.0], [0.0, 15.0], 1.1);
+                if state == 134 {
+                    v.pose(v.phial.bank, 28, 0, [0.0; 3], Lifetime::Natural);
+                }
             }
         }
         1062 => {
             if v.crossed(12.0) {
-                v.swing(
-                    v.phial.bank,
-                    31,
-                    [-20.0, 130.0, 100.0],
-                    [0.0, 0.0, 15.0],
-                    1.1,
-                );
-            }
-            if v.crossed(12.0) && state == 160 {
-                v.pose(v.phial.bank, 28, 0, [0.0, 0.0, 0.0], Lifetime::Natural);
+                v.swing(v.phial.bank, 31, [-20.0, 130.0, 100.0], [0.0, 15.0], 1.1);
+                if state == 160 {
+                    v.pose(v.phial.bank, 28, 0, [0.0; 3], Lifetime::Natural);
+                }
             }
         }
         1403 => {
@@ -198,22 +143,10 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
                 v.pose(v.phial.bank, 24, 0, [0.0, 0.0, 100.0], Lifetime::Natural);
             }
             if v.crossed(16.0) {
-                v.swing(
-                    v.phial.bank,
-                    13,
-                    [90.0, -160.0, 200.0],
-                    [-5.0, 0.0, 15.0],
-                    1.0,
-                );
+                v.swing(v.phial.bank, 13, [90.0, -160.0, 200.0], [-5.0, 15.0], 1.0);
             }
             if v.crossed(16.0) && state == 125 {
-                v.swing(
-                    v.phial.bank,
-                    23,
-                    [90.0, -160.0, 200.0],
-                    [-5.0, 0.0, 15.0],
-                    1.0,
-                );
+                v.swing(v.phial.bank, 23, [90.0, -160.0, 200.0], [-5.0, 15.0], 1.0);
             }
             if v.crossed(18.0) && state == 125 {
                 v.pose(v.phial.bank, 14, 0, [0.0, 100.0, 250.0], Lifetime::Natural);
@@ -221,13 +154,13 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
         }
         1420 => {
             if v.crossed(40.0) && unlocked {
-                v.swing(v.phial.bank, 0, [0.0, 130.0, 50.0], [0.0, 0.0, 197.0], 1.0);
+                v.swing(v.phial.bank, 0, [0.0, 130.0, 50.0], [0.0, 197.0], 1.0);
                 v.sound(0, 27);
             }
         }
         1421 => {
             if v.crossed(48.0) && unlocked {
-                v.swing(v.phial.bank, 0, [-20.0, 150.0, 0.0], [0.0, 0.0, 20.0], 1.0);
+                v.swing(v.phial.bank, 0, [-20.0, 150.0, 0.0], [0.0, 20.0], 1.0);
                 v.sound(0, 27);
             }
         }
@@ -313,7 +246,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
         }
         1429 => {
             if v.crossed(18.0) && unlocked {
-                v.swing(v.phial.bank, 0, [0.0, 80.0, 30.0], [0.0, 0.0, 102.0], 1.0);
+                v.swing(v.phial.bank, 0, [0.0, 80.0, 30.0], [0.0, 102.0], 1.0);
                 v.sound(0, 27);
             }
         }
@@ -341,14 +274,14 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
                     v.phial.bank,
                     13,
                     [-50.0, -100.0, 400.0],
-                    [-20.0, 0.0, 345.0],
+                    [-20.0, 345.0],
                     1.0,
                 );
                 v.swing(
                     v.phial.bank,
                     23,
                     [-50.0, -100.0, 400.0],
-                    [-20.0, 0.0, 345.0],
+                    [-20.0, 345.0],
                     1.0,
                 );
             }
@@ -358,13 +291,13 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
         }
         1444 => {
             if v.crossed(8.0) && unlocked {
-                v.swing(v.phial.bank, 0, [0.0, 130.0, 80.0], [0.0, 0.0, 197.0], 1.0);
+                v.swing(v.phial.bank, 0, [0.0, 130.0, 80.0], [0.0, 197.0], 1.0);
                 v.sound(0, 27);
             }
         }
         1445 | 1446 => {
             if v.crossed(10.0) && unlocked {
-                v.swing(v.phial.bank, 0, [0.0, 130.0, 80.0], [0.0, 0.0, 197.0], 1.0);
+                v.swing(v.phial.bank, 0, [0.0, 130.0, 80.0], [0.0, 197.0], 1.0);
                 v.sound(0, 27);
             }
         }
@@ -379,7 +312,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
         }
         1454 => {
             if v.crossed(44.0) {
-                v.swing(v.phial.bank, 0, [0.0, 140.0, 100.0], [0.0, 0.0, 315.0], 1.0);
+                v.swing(v.phial.bank, 0, [0.0, 140.0, 100.0], [0.0, 315.0], 1.0);
                 v.ground(14, [0.0, 0.0, 50.0]);
             }
             if v.crossed(46.0) {
@@ -392,7 +325,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
                 );
             }
             if v.crossed(88.0) {
-                v.swing(v.phial.bank, 0, [0.0, 140.0, 100.0], [0.0, 0.0, 45.0], 1.0);
+                v.swing(v.phial.bank, 0, [0.0, 140.0, 100.0], [0.0, 45.0], 1.0);
                 v.ground(14, [0.0, 0.0, 50.0]);
             }
             if v.crossed(92.0) {
@@ -448,7 +381,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
         }
         1456 => {
             if v.crossed(24.0) {
-                v.swing(v.phial.bank, 0, [0.0, 100.0, 150.0], [0.0, 0.0, 90.0], 1.0);
+                v.swing(v.phial.bank, 0, [0.0, 100.0, 150.0], [0.0, 90.0], 1.0);
                 v.ground(15, [0.0, 0.0, 50.0]);
             }
             if v.crossed(24.0) && tier == 3 {
@@ -458,7 +391,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
                 v.pose(v.phial.bank, 19, 0, [0.0, 100.0, 200.0], Lifetime::Natural);
             }
             if v.crossed(70.0) {
-                v.swing(v.phial.bank, 0, [0.0, 100.0, 150.0], [0.0, 0.0, 6.0], 1.0);
+                v.swing(v.phial.bank, 0, [0.0, 100.0, 150.0], [0.0, 6.0], 1.0);
             }
             if v.crossed(70.0) && tier == 3 {
                 v.pose(v.phial.bank, 9, 0, [0.0, 100.0, 150.0], Lifetime::Natural);
@@ -528,16 +461,16 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
         }
         1458 => {
             if v.crossed(6.0) && unlocked {
-                v.swing(v.phial.bank, 0, [0.0, 80.0, 30.0], [0.0, 0.0, 102.0], 1.0);
+                v.swing(v.phial.bank, 0, [0.0, 80.0, 30.0], [0.0, 102.0], 1.0);
                 v.sound(0, 27);
             }
         }
         1468 => {
             if v.crossed(44.0) && unlocked {
-                v.swing(v.phial.bank, 0, [0.0, 110.0, 50.0], [0.0, 0.0, 250.0], 0.9);
+                v.swing(v.phial.bank, 0, [0.0, 110.0, 50.0], [0.0, 250.0], 0.9);
             }
             if v.crossed(76.0) && unlocked {
-                v.swing(v.phial.bank, 0, [0.0, 100.0, 50.0], [0.0, 0.0, 240.0], 1.1);
+                v.swing(v.phial.bank, 0, [0.0, 100.0, 50.0], [0.0, 240.0], 1.1);
             }
         }
         1469 => {
@@ -589,7 +522,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
                 );
             }
             if v.crossed(126.0) {
-                v.swing(v.phial.bank, 0, [0.0, 100.0, 50.0], [0.0, 0.0, 188.0], 1.0);
+                v.swing(v.phial.bank, 0, [0.0, 100.0, 50.0], [0.0, 188.0], 1.0);
             }
             if v.crossed(132.0) {
                 v.ground(10, [0.0, 0.0, 120.0]);
@@ -613,13 +546,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
                 );
             }
             if v.crossed(24.0) {
-                v.swing(
-                    v.phial.bank,
-                    13,
-                    [320.0, 100.0, 130.0],
-                    [10.0, 0.0, 88.0],
-                    0.9,
-                );
+                v.swing(v.phial.bank, 13, [320.0, 100.0, 130.0], [10.0, 88.0], 0.9);
             }
             if v.crossed(50.0) {
                 v.joint(
@@ -631,20 +558,8 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
                 );
             }
             if v.crossed(72.0) {
-                v.swing(
-                    v.phial.bank,
-                    13,
-                    [260.0, 80.0, 140.0],
-                    [2.0, 0.0, 83.0],
-                    1.0,
-                );
-                v.swing(
-                    v.phial.bank,
-                    23,
-                    [260.0, 80.0, 140.0],
-                    [2.0, 0.0, 83.0],
-                    1.0,
-                );
+                v.swing(v.phial.bank, 13, [260.0, 80.0, 140.0], [2.0, 83.0], 1.0);
+                v.swing(v.phial.bank, 23, [260.0, 80.0, 140.0], [2.0, 83.0], 1.0);
             }
             if v.crossed(76.0) {
                 v.pose(
@@ -658,13 +573,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
         }
         1483 => {
             if v.crossed(12.0) {
-                v.swing(
-                    v.phial.bank,
-                    13,
-                    [-230.0, 320.0, 130.0],
-                    [-5.0, 0.0, 230.0],
-                    1.0,
-                );
+                v.swing(v.phial.bank, 13, [-230.0, 320.0, 130.0], [-5.0, 230.0], 1.0);
             }
             if v.crossed(16.0) {
                 v.pose(v.phial.bank, 14, 0, [0.0, 80.0, 100.0], Lifetime::Natural);
@@ -683,13 +592,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
                 );
             }
             if v.crossed(14.0) {
-                v.swing(
-                    v.phial.bank,
-                    13,
-                    [380.0, 230.0, 140.0],
-                    [-5.0, 0.0, 110.0],
-                    1.0,
-                );
+                v.swing(v.phial.bank, 13, [380.0, 230.0, 140.0], [-5.0, 110.0], 1.0);
             }
             if v.crossed(16.0) {
                 v.pose(v.phial.bank, 14, 0, [-100.0, 80.0, 0.0], Lifetime::Natural);
@@ -707,13 +610,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
                 );
             }
             if v.crossed(14.0) {
-                v.swing(
-                    v.phial.bank,
-                    13,
-                    [-380.0, 210.0, 140.0],
-                    [5.0, 0.0, 250.0],
-                    1.0,
-                );
+                v.swing(v.phial.bank, 13, [-380.0, 210.0, 140.0], [5.0, 250.0], 1.0);
             }
             if v.crossed(16.0) {
                 v.pose(v.phial.bank, 14, 0, [100.0, 80.0, 0.0], Lifetime::Natural);
@@ -728,20 +625,8 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, model_motion: u8, tier: u8
                 v.pose(v.phial.bank, 24, 0, [0.0, 0.0, 100.0], Lifetime::Natural);
             }
             if v.crossed(14.0) {
-                v.swing(
-                    v.phial.bank,
-                    13,
-                    [40.0, -100.0, 400.0],
-                    [-20.0, 0.0, 15.0],
-                    1.0,
-                );
-                v.swing(
-                    v.phial.bank,
-                    23,
-                    [40.0, -100.0, 400.0],
-                    [-20.0, 0.0, 15.0],
-                    1.0,
-                );
+                v.swing(v.phial.bank, 13, [40.0, -100.0, 400.0], [-20.0, 15.0], 1.0);
+                v.swing(v.phial.bank, 23, [40.0, -100.0, 400.0], [-20.0, 15.0], 1.0);
             }
             if v.crossed(16.0) {
                 v.pose(v.phial.bank, 14, 0, [0.0, 100.0, 400.0], Lifetime::Natural);

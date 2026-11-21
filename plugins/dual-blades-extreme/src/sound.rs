@@ -8,8 +8,7 @@ static BANKS: [Bank; 3] = [
 ];
 const TRACKS: &[u8] = include_bytes!("../target/assets/frontier_db_sound.fdse");
 
-pub(super) unsafe fn preload_draw() {
-    // Draw into Extreme Demon mode (1440, 1448) uses all three banks.
+pub(super) unsafe fn preload() {
     for bank in &BANKS {
         unsafe { bank.preload() };
     }
