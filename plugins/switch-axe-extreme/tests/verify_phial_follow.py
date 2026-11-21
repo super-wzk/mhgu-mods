@@ -1,0 +1,111 @@
+"""Move the equipped joint after birth and read the same glow at GU draw submission."""
+import math
+import struct
+
+from verify_native_fx import model_renderer
+from verify_style import Game
+
+
+def moving_blade(root, glow_proofs):
+    nx = root / "dist/switch-axe-extreme/romfs/nativeNX"
+    effects = nx / "effect/frontier_sa"
+    g = Game((root.parents[1] / "mhgu/main.elf").read_bytes())
+    load, camera, draw = model_renderer(g, nx)
+
+    def floats(address, count):
+        return struct.unpack(f"<{count}f", g.cpu.mem_read(address, 4 * count))
+
+    def put(address, *values):
+        g.cpu.mem_write(address, struct.pack(f"<{len(values)}f", *values))
+
+    def matrix(address, c, s, xyz):
+        put(address, c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, *xyz, 1)
+
+    # The scene supplies a live equipment handle. GU's C1628 resolves its
+    # logical joint 0 to the world matrix, independently of the hunter root.
+    equipment, vtable, bones, mapping = (g.alloc(n) for n in (1200, 100, 320, 256))
+    handle, handle_vt = g.alloc(16), g.alloc(8)
+    g.put(equipment, vtable)
+    g.put(equipment + 12, 1)
+    g.put(equipment + 240, handle)
+    g.put(equipment + 1172, bones)
+    g.put(equipment + 1176, mapping)
+    g.cpu.mem_write(mapping, b"\x01")
+    g.put(vtable + 84, 0xC1628)
+    g.put(handle, handle_vt)
+    for offset, result in ((0, 1), (4, equipment)):
+        callback = g.alloc(4)
+        g.put(handle_vt + offset, callback)
+        g.stub(callback, lambda *_, value=result: value)
+    g.put(0x2126504, g.alloc(1800))
+    # Step the EFL stages below, directly after the native unit updated its pose.
+    g.stub(0x9B90F8, lambda *_: 0)
+
+    pel = (effects / "particles.pel").read_bytes()
+    pos = 16
+    seen = set()
+    blade_layers = 0
+    for _ in range(struct.unpack_from("<I", pel, 12)[0]):
+        pos += 1 + pel[pos]
+        pos += 1 + pel[pos]
+        row = pel[pos:pos + 160]
+        pos += 160
+        layer = struct.unpack_from("<H", row, 48)[0]
+        if layer not in glow_proofs:
+            continue
+        seen.add(layer)
+        owner, proof, record, bank, entries, desc = (g.alloc(n) for n in (416, 256, 160, 144, 4, 32))
+        g.put(owner + 52, bank)
+        g.put(bank + 104, 1)
+        g.put(bank + 116, entries)
+        g.put(entries, desc)
+        g.cpu.mem_write(proof + 48, glow_proofs[layer])
+        g.put(proof + 48 + 192, handle)
+        g.cpu.mem_write(record, row)
+        g.run(0x32A548, owner, proof, record)
+        unit = g.alloc(896)
+        g.run(0x3273F0, unit, owner, proof)
+        g.put(unit + 244, load((effects / f"e{layer}.efl").read_bytes()))
+        assert g.run(0x9BDA64, unit) == 1
+        g.put(unit + 272, 1)
+        gen = g.get(unit + 496)
+        blade = g.string(g.get(gen + 52) + 80).endswith(r"\m121")
+        blade_layers += int(blade)
+
+        visible_frames = 0
+        for frame in range(35):
+            c, s = (0, 1) if visible_frames >= 2 else (1, 0)
+            x = 100 if visible_frames == 0 else 600
+            matrix(bones + 176, c, s, (x, 60, -20))
+            matrix(camera, 1, 0, (x, 80, 1000))
+            g.run(0x327948, unit)
+            origin = floats(unit + 64, 3)
+            assert math.dist(origin, (x - 10*c + 20*s, 60, -20 + 10*s + 20*c)) < .001
+            # Supply unit scale and the resolved position to the render step.
+            put(unit + 96, 1, 1, 1)
+            put(unit + 256, 1)
+            put(unit + 352, *origin)
+            g.run(0x9B839C, unit)
+            g.run(0x9B9668, unit)
+            g.run(0xA5A48C, gen)
+            g.run(0x9B975C, unit)
+            g.run(0xA94C10, gen)
+            draws = draw(gen)
+            if not draws:
+                continue
+            position = draws[0].position
+            if visible_frames == 0:
+                before = position
+            elif visible_frames == 1:
+                assert abs(position[0] - before[0] - 500) < 5, (layer, position, before)
+            if blade:
+                axis = draws[0].normal
+                length = math.dist(axis, (0, 0, 0))
+                assert length > 0
+                assert math.dist(tuple(v / length for v in axis), (s, 0, c)) < .001, (layer, frame, axis)
+            visible_frames += 1
+            if visible_frames == 3:
+                break
+        assert visible_frames >= 3, (layer, visible_frames)
+    assert seen == glow_proofs.keys() and blade_layers == 4
+    print(f"GU live glow: {len(seen)} layers followed a moving joint; all four blade axes turned with a 90-degree swing.")

@@ -45,8 +45,8 @@ unsafe extern "C" fn mhgu_style_melee_factor(hit: u32) -> u64 {
         if *((hit + 16) as *const u8) == 0
             && *((hit + 48) as *const u32) & 0x100020 == 0x20
             && owner != 0
-            && super::local_hunter() == owner
-            && let Some(entry) = super::actor_entry(owner)
+            && let Some(style) = super::playback_style(owner)
+            && let Some(entry) = super::registered_entry(style.id)
             && let Some(rule) = entry.physical.load(Ordering::Acquire).as_ref()
             && (matches!(rule.scope, Scope::WeaponContacts)
                 || BLADE_CONTACT_OFFSETS.contains(&hit.wrapping_sub(owner)))

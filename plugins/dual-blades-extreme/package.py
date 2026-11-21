@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -39,6 +40,33 @@ def unpack(archive, destination, prefix, kinds):
         path = destination / f"{name}.{kinds[kind]}"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(raw)
+
+
+def package_peer_trails(directory):
+    # Each render callback is keyed by model path. Give each peer its own
+    # five strip models and redirect just those EFL entries in its PEL.
+    prefix = rb"effect\\frontier_db\\"
+    strips = re.compile(prefix + rb"m50([1-5])(?=\x00)")
+    pel = (directory / "particles.pel").read_bytes()
+    layers = [(p, p.read_bytes()) for p in directory.glob("e*.efl")]
+    for slot, letter in enumerate("abcd", 1):
+        output = pel
+        for path, layer in layers:
+            if not strips.search(layer):
+                continue
+            old_name = path.stem
+            new_name = letter + old_name[1:]
+            old = ("effect\\frontier_db\\" + old_name).encode() + b"\0"
+            new = ("effect\\frontier_db\\" + new_name).encode() + b"\0"
+            if old not in output:
+                raise ValueError(f"Missing particle layer {old_name}")
+            output = output.replace(old, new)
+            renamed = strips.sub(lambda m: m[0][:-2] + str(slot).encode() + m[1], layer)
+            (directory / (new_name + ".efl")).write_bytes(renamed)
+        (directory / f"peer{slot}.pel").write_bytes(output)
+        for channel in range(1, 6):
+            for ext in ("mod", "mrl"):
+                shutil.copyfile(directory / f"m50{channel}.{ext}", directory / f"m5{slot}{channel}.{ext}")
 
 
 def package(dat, romfs):
@@ -86,6 +114,7 @@ def package(dat, romfs):
         unpack(assets / f"{sex}.arc", nx, "player/mot/frontier_db/", MOTION)
     unpack(sound, nx, "sound/se/pl/frontier_db/", SOUND)
     unpack(effects / "geometry.arc", nx, "effect/frontier_db/", EFFECT)
+    package_peer_trails(nx / "effect/frontier_db")
     (nx / "plugins").mkdir(parents=True, exist_ok=True)
     shutil.copy2(ROOT / "dual_blades_extreme.nro", nx / "plugins/dual_blades_extreme.nro")
     return overlay

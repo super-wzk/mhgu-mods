@@ -175,6 +175,10 @@ mod native {
             self.0 = pending;
         }
 
+        pub fn pending(&self) -> bool {
+            self.0
+        }
+
         /// Track a GU climb/fall/landing until the hunter can sprint again.
         ///
         /// # Safety

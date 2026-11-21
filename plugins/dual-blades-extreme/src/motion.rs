@@ -15,6 +15,14 @@ static BANKS: MotionBanks = MotionBanks::new([
     ],
 ]);
 
+pub(super) unsafe extern "C" fn preload_draw(actor: u32) {
+    unsafe {
+        BANKS.preload(actor, 1002);
+        BANKS.preload(actor, 1413);
+        crate::sound::preload_draw();
+    }
+}
+
 pub(super) unsafe fn source_clip(actor: u32, packed: u16) -> Option<u16> {
     unsafe { BANKS.decode(actor, packed) }
 }

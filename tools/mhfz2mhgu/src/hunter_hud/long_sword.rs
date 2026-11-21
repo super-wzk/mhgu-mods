@@ -156,6 +156,10 @@ impl Sprites<'_> {
     }
 
     fn sequence(&self, tile: &mut [u8], seq: usize, frame: usize) -> Result<()> {
+        self.sequence_at(tile,seq,frame,40.,15.)
+    }
+
+    fn sequence_at(&self,tile:&mut [u8],seq:usize,frame:usize,x:f32,y:f32)->Result<()> {
         let s = section(self.layout, 2)?;
         let start = half(s, word(s, 8)? + seq * 2)?;
         let nodes = word(s, 16)? + start * 20;
@@ -166,8 +170,8 @@ impl Sprites<'_> {
             "unexpected sword HUD sequence"
         );
         let mut origin = Pose {
-            x: 40.,
-            y: 15.,
+            x,
+            y,
             sx: SCALE,
             sy: SCALE,
             alpha: 1.,
@@ -265,4 +269,27 @@ pub fn convert(dat: &Path) -> Result<Vec<u8>> {
         }
     }
     mhgu_resource::tex::rgba8_unmipped((COLS * W) as u32, ATLAS_H as u32, &atlas)
+}
+
+// The w12 extreme branch of 8121C0AC draws sequence 55 for slash energy,
+// then 40/42 for the locked/ready light gauge or 41 while the stance is active.
+pub fn switch_axe(dat:&Path)->Result<Vec<u8>>{
+    let data=pac::decode(crate::read(&dat.join("mhf.bin"))?)?;
+    let layout=pac::member(&data,20)?;
+    let sprites=Sprites {layout:&layout,texture:image::decode(&pac::member(&data,4)?)?};
+    let mut atlas=vec![0;W*COLS*ATLAS_H*4];
+    // Each gauge has 101 independent percentage samples; the two HUD sprites
+    // choose their frames separately, including during an interrupted change.
+    for (group,(seq,end)) in [(55,120),(40,360),(42,360),(41,360)].into_iter().enumerate(){
+        for percent in 0..=100 {
+            let mut tile=vec![0;W*H*4];
+            sprites.sequence_at(&mut tile,seq,percent*end/100,2.,3.)?;
+            let index=group*101+percent;
+            for (y,row) in tile.chunks_exact(W*4).enumerate(){
+                let dst=((index/COLS*H+y)*W*COLS+index%COLS*W)*4;
+                atlas[dst..dst+row.len()].copy_from_slice(row);
+            }
+        }
+    }
+    mhgu_resource::tex::rgba8_unmipped((COLS*W) as u32,ATLAS_H as u32,&atlas)
 }

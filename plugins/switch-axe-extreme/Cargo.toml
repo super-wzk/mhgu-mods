@@ -1,0 +1,19 @@
+[package]
+name = "switch-axe-extreme"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+doctest = false
+
+[target.'cfg(all(target_arch = "arm", target_endian = "little"))'.dependencies]
+mhfz-sdk = { path = "../../crates/mhfz-sdk" }
+libm = "0.2"
+mhgu-forge = "1.5.0"
+mhgu-sdk = { path = "../../crates/mhgu-sdk" }
+
+[dev-dependencies]
+mhfz-sdk = { path = "../../crates/mhfz-sdk" }
+mhgu-sdk = { path = "../../crates/mhgu-sdk" }

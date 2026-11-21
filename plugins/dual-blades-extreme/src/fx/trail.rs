@@ -24,6 +24,7 @@ struct Poses {
 
 #[derive(Default)]
 pub(super) struct History {
+    pub(super) slot: usize,
     poses: Poses,
     area: Option<u8>,
     fraction: f32,
@@ -46,10 +47,10 @@ const EMPTY: Poses = Poses {
     swing_hands: EMPTY_HANDS,
     active: [false; 5],
 };
-static POSES: Shared<(u32, Poses)> = Shared::new((0, EMPTY));
+static POSES: [Shared<(u32, Poses)>; 5] = [const { Shared::new((0, EMPTY)) }; 5];
 
-fn publish(poses: &Poses) {
-    POSES.with(|(version, state)| {
+fn publish(slot: usize, poses: &Poses) {
+    POSES[slot].with(|(version, state)| {
         *version = version.wrapping_add(1).max(1);
         *state = *poses;
     });
@@ -64,8 +65,8 @@ impl History {
         self.swing_time = 0.;
         self.poses.active[0] = false;
         self.poses.active[3..].fill(false);
-        unsafe { super::SWINGS.stop() };
-        publish(&self.poses);
+        unsafe { super::stop_swings(self.slot) };
+        publish(self.slot, &self.poses);
     }
 
     pub(super) unsafe fn sharpen(&mut self, actor: u32, phase: u8, ticks: u16) {
@@ -96,7 +97,7 @@ impl History {
                     0.
                 };
                 if self.swing_time == 0. {
-                    super::SWINGS.stop();
+                    super::stop_swings(self.slot);
                 }
             }
             self.sharpen_time = (self.sharpen_time - dt).max(0.);
@@ -136,7 +137,7 @@ impl History {
             } else {
                 return;
             }
-            publish(&self.poses);
+            publish(self.slot, &self.poses);
         }
     }
 }
@@ -156,13 +157,13 @@ fn update_hand(past: &mut [Blade; 6], blade: Option<Blade>, reset: bool, advance
 
 impl Drop for History {
     fn drop(&mut self) {
-        unsafe { super::SWINGS.stop() };
-        publish(&EMPTY);
+        unsafe { super::stop_swings(self.slot) };
+        publish(self.slot, &EMPTY);
     }
 }
 
-unsafe extern "C" fn snapshot<const CHANNEL: usize>(out: *mut Sample) -> u32 {
-    POSES.with(|(version, state)| {
+unsafe extern "C" fn snapshot<const SLOT: usize, const CHANNEL: usize>(out: *mut Sample) -> u32 {
+    POSES[SLOT].with(|(version, state)| {
         if !state.active[CHANNEL] {
             return 0;
         }
@@ -182,11 +183,50 @@ unsafe extern "C" fn snapshot<const CHANNEL: usize>(out: *mut Sample) -> u32 {
 }
 
 pub(super) fn install() {
+    unsafe fn bind<const SLOT: usize>(paths: [&'static core::ffi::CStr; 5]) {
+        unsafe {
+            trail::bind(paths[0], snapshot::<SLOT, 0>);
+            trail::bind(paths[1], snapshot::<SLOT, 1>);
+            trail::bind(paths[2], snapshot::<SLOT, 2>);
+            trail::bind(paths[3], snapshot::<SLOT, 3>);
+            trail::bind(paths[4], snapshot::<SLOT, 4>);
+        }
+    }
     unsafe {
-        trail::bind(c"effect\\frontier_db\\m501", snapshot::<0>);
-        trail::bind(c"effect\\frontier_db\\m502", snapshot::<1>);
-        trail::bind(c"effect\\frontier_db\\m503", snapshot::<2>);
-        trail::bind(c"effect\\frontier_db\\m504", snapshot::<3>);
-        trail::bind(c"effect\\frontier_db\\m505", snapshot::<4>);
+        bind::<0>([
+            c"effect\\frontier_db\\m501",
+            c"effect\\frontier_db\\m502",
+            c"effect\\frontier_db\\m503",
+            c"effect\\frontier_db\\m504",
+            c"effect\\frontier_db\\m505",
+        ]);
+        bind::<1>([
+            c"effect\\frontier_db\\m511",
+            c"effect\\frontier_db\\m512",
+            c"effect\\frontier_db\\m513",
+            c"effect\\frontier_db\\m514",
+            c"effect\\frontier_db\\m515",
+        ]);
+        bind::<2>([
+            c"effect\\frontier_db\\m521",
+            c"effect\\frontier_db\\m522",
+            c"effect\\frontier_db\\m523",
+            c"effect\\frontier_db\\m524",
+            c"effect\\frontier_db\\m525",
+        ]);
+        bind::<3>([
+            c"effect\\frontier_db\\m531",
+            c"effect\\frontier_db\\m532",
+            c"effect\\frontier_db\\m533",
+            c"effect\\frontier_db\\m534",
+            c"effect\\frontier_db\\m535",
+        ]);
+        bind::<4>([
+            c"effect\\frontier_db\\m541",
+            c"effect\\frontier_db\\m542",
+            c"effect\\frontier_db\\m543",
+            c"effect\\frontier_db\\m544",
+            c"effect\\frontier_db\\m545",
+        ]);
     }
 }

@@ -88,14 +88,16 @@ pub enum Weapon {
     GreatSword = 0,
     DualBlades = 6,
     LongSword = 7,
+    SwitchAxe = 12,
 }
 
 pub fn motions(dat: &Path, female: bool, weapon: Weapon) -> Result<Vec<u8>> {
     let sex = if female { "f" } else { "m" };
-    let (source, stem, last) = match weapon {
-        Weapon::GreatSword => ("w00", "frontier_gs", 80),
-        Weapon::DualBlades => ("w06", "frontier_db", 60),
-        Weapon::LongSword => ("w07", "frontier_ls", 60),
+    let (source, stem, slots) = match weapon {
+        Weapon::GreatSword => ("w00", "frontier_gs", [100, 15, 80]),
+        Weapon::DualBlades => ("w06", "frontier_db", [100, 15, 60]),
+        Weapon::LongSword => ("w07", "frontier_ls", [100, 15, 60]),
+        Weapon::SwitchAxe => ("w12", "frontier_sa", [70, 25, 100]),
     };
     let model = pac::decode(read(&dat.join(format!("parts/{sex}00/{sex}_editpl.bin")))?)?;
     let rig = Rig::parse(&pac::member(&model, 1)?)?;
@@ -106,10 +108,9 @@ pub fn motions(dat: &Path, female: bool, weapon: Weapon) -> Result<Vec<u8>> {
     let b = pac::decode(read(&dat.join(format!("motion/{source}.mot")))?)?;
     let mot = MotionArchive::from_directory(&b)?;
     ensure!(
-        mot.groups
-            .iter()
-            .map(|g| g.motion_offsets.len())
-            .eq([100, 100, 15, 15, last, last, 0]),
+        mot.groups.iter().map(|g| g.motion_offsets.len()).eq([
+            slots[0], slots[0], slots[1], slots[1], slots[2], slots[2], 0
+        ]),
         "unrecognized Frontier {source} motion directory"
     );
     let instant_travel = if weapon == Weapon::LongSword {
@@ -193,9 +194,12 @@ pub fn motions(dat: &Path, female: bool, weapon: Weapon) -> Result<Vec<u8>> {
             if stepping_slash && slot == 1 {
                 // 811F98BC adds 7.5 forward on ticks 40..56 in state 12 only.
                 // Private clip 1460 lets GU apply this movement against terrain.
-                let root = tracks.iter_mut().find(|t| t.usage == Usage::RootTranslation)
+                let root = tracks
+                    .iter_mut()
+                    .find(|t| t.usage == Usage::RootTranslation)
                     .context("stepping slash lacks a root translation track")?;
-                root.samples.resize(frames as usize, *root.samples.last().unwrap());
+                root.samples
+                    .resize(frames as usize, *root.samples.last().unwrap());
                 for (frame, point) in root.samples.iter_mut().enumerate() {
                     point.z += 7.5 * ((frame.saturating_sub(38) as f32 * 0.5).min(8.));
                 }
@@ -207,6 +211,7 @@ pub fn motions(dat: &Path, female: bool, weapon: Weapon) -> Result<Vec<u8>> {
                 match weapon {
                     Weapon::DualBlades => dual_blades_equipment(&mut w, slot, motion, frames)?,
                     Weapon::GreatSword => equipment(&mut w, slot, motion)?,
+                    Weapon::SwitchAxe => switch_axe_equipment(&mut w, slot, motion)?,
                     Weapon::LongSword => long_sword_equipment(&mut w, slot, motion)?,
                 }
             }
@@ -218,6 +223,21 @@ pub fn motions(dat: &Path, female: bool, weapon: Weapon) -> Result<Vec<u8>> {
         });
     }
     arc::encode(&assets)
+}
+
+// FZ 8120F906, sampled with the drawn flag set. Runs use durations, not end frames.
+fn switch_axe_equipment(w: &mut Writer, slot: usize, clip: usize) -> Result<()> {
+    let runs: &[(u32, u32)] = match clip {
+        1002 => &[(4, 6), (1, 52), (2, 0)],
+        1003 | 1009 | 1499 => &[(2, 34), (1, 58), (4, 0)],
+        1412 => &[(2, 4), (1, 28), (2, 0)],
+        1422 => &[(2, 36), (1, 76), (2, 0)],
+        1423 => &[(1, 0)],
+        1425 => &[(1, 52), (2, 0)],
+        1493 => &[(1, 46), (2, 0)],
+        _ => &[(2, 0)],
+    };
+    w.equipment_timeline(slot, &[1, 3, 2], runs)
 }
 
 // Vita 819070E2, weapon 7, integer playback frames. GU w07's equipment
@@ -362,18 +382,29 @@ pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
         Weapon::GreatSword => (74, b"FGSA"),
         Weapon::DualBlades => (89, b"FDBA"),
         Weapon::LongSword => (85, b"FLSA"),
+        Weapon::SwitchAxe => (178, b"FSAA"),
     };
     let n = word(data, weapon)?;
     ensure!(n == states, "unrecognized Frontier state table: {n} states");
     let records = word(data, weapon + 4)?;
     let mut out = magic.to_vec();
-    out.extend(2u16.to_le_bytes());
+    out.extend((if kind == Weapon::SwitchAxe { 4u16 } else { 2u16 }).to_le_bytes());
     out.extend((n as u16).to_le_bytes());
     // The first SDT bank is the hunter melee bank (selector 0). FZ copies one
     // 40-byte row when spawning a contact; callbacks can compute the ID at run time.
-    ensure!(sdt.get(2..4) == Some(&[0, 0]), "expected SDT hunter bank 0");
-    let attacks = u16::from_le_bytes(sdt.get(4..6).context("short SDT bank")?.try_into()?);
-    let start = word(&sdt, 8)?;
+    // Switch Axe event 4 constructs family 106 (81163D4C).
+    let (bank, family) = if kind == Weapon::SwitchAxe {
+        (6 * 28, 106)
+    } else {
+        (0, 0)
+    };
+    ensure!(word(&sdt, bank)? == family << 16, "unexpected SDT family");
+    let attacks = u16::from_le_bytes(
+        sdt.get(bank + 4..bank + 6)
+            .context("short SDT bank")?
+            .try_into()?,
+    );
+    let start = word(&sdt, bank + 8)?;
     ensure!(attacks > 0 && start >= 28, "empty SDT hunter table");
     let rows = sdt
         .get(start..)
@@ -402,6 +433,59 @@ pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
             out[20 + index..24 + index].copy_from_slice(&ptr.to_le_bytes());
             out.extend_from_slice(src);
         }
+    }
+    if kind == Weapon::SwitchAxe {
+        // PC DAT 0xa88 corresponds to the Vita parameter directory at +2692.
+        let directory = word(data, 0xa88)?;
+        ensure!(
+            data.get(directory..directory + 2) == Some(&75u16.to_le_bytes()),
+            "unknown w12 parameter layout"
+        );
+        let params = word(data, directory + 24)?;
+        let bank = 7 * 28;
+        ensure!(
+            word(&sdt, bank)? == 107 << 16 && word(&sdt, bank + 4)? == 4 << 16 | 6,
+            "unknown discharge bank"
+        );
+        let discharge = word(&sdt, bank + 8)?;
+        // 812102B8 selects slash-powered actions even during temporary sword poses.
+        // 81213F18 skips its pre-transition turn for these states. 81212276
+        // installs the discharge counter callback only on the listed blade rows.
+        for (count_field, table_field, limit) in [(20, 60, 256), (4, 48, 256), (16, 44, 128)] {
+            let count = u16::from_le_bytes(data[directory+count_field..][..2].try_into()?) as usize;
+            let start = word(data, directory + table_field)?;
+            let mut mask = vec![0u8; limit / 8];
+            for row in data.get(start..start+2*count).context("short switch axe selector list")?.chunks_exact(2) {
+                let id = usize::from(u16::from_le_bytes(row.try_into()?));
+                ensure!(id < limit, "switch axe selector exceeds bitmap");
+                mask[id / 8] |= 1 << (id % 8);
+            }
+            out.extend(mask);
+        }
+        let models = word(data, directory+64)?;
+        let count = u16::from_le_bytes(data[directory+10..directory+12].try_into()?) as usize;
+        ensure!(count == 72, "unexpected w12 model motion count");
+        out.extend(data.get(models..models+8*count).context("short w12 model motions")?);
+        let shape_dir=word(&sdt,bank+16)?;
+        let offsets=word(&sdt,bank+20)?;
+        // 81164796..811649BA use the first three SDT parameters for the
+        // explosion anchor. Node 126 is the fixed origin at effect +68.
+        for i in 0..4 {
+            let center=offsets+32*i;
+            let shape=word(&sdt,shape_dir+32*i)?;
+            out.extend(sdt.get(center..center+12).context("short discharge offset")?);
+            out.extend(sdt.get(shape+12..shape+16).context("short discharge radius")?);
+        }
+        out.extend(b"SAFX");
+        out.extend(
+            sdt.get(discharge..discharge + 6 * 40)
+                .context("short w12 discharge table")?,
+        );
+        out.extend(
+            data.get(params..params + 150)
+                .context("short w12 parameters")?,
+        );
+        return Ok(out);
     }
     if kind == Weapon::LongSword {
         // 817C3E88 indexes 32-byte parameter groups. 811FA43E and 81847470
@@ -505,4 +589,45 @@ pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
     out.extend(record);
     out.extend(capsule);
     Ok(out)
+}
+
+pub fn switch_axe_shapes(dat: &Path, output: &Path) -> Result<()> {
+    let sdt = pac::decode(read(&dat.join("mhfsdt.bin"))?)?;
+    let word = |at| -> Result<usize> {
+        Ok(u32::from_le_bytes(
+            sdt.get(at..at + 4)
+                .context("short SDT pointer")?
+                .try_into()?,
+        ) as usize)
+    };
+    for (bank, family, count) in [(6 * 28, 106, 7), (7 * 28, 107, 4)] {
+        ensure!(
+            word(bank)? == family << 16 && word(bank + 4)? >> 16 == count,
+            "unexpected w12 shape bank"
+        );
+        for selector in 0..count {
+            let row = word(word(bank + 16)? + selector * 32)?;
+            let shape = sdt.get(row..row + 42).context("short w12 shape")?;
+            ensure!(shape[40..42] == [255, 255], "expected one w12 shape");
+            let joint = match u16::from_le_bytes(shape[..2].try_into()?) {
+                14 => BONES[12],
+                0 | 126 => 0,
+                node => anyhow::bail!("unknown w12 shape joint {node}"),
+            };
+            let mut hts = b"HTS\0".to_vec();
+            for value in [0x20131015u32, 1, 0, 1, 24] {
+                hts.extend(value.to_le_bytes());
+            }
+            hts.extend(u16::from(joint).to_le_bytes());
+            hts.extend([0, 0]);
+            hts.extend(&shape[2..4]);
+            hts.extend([0; 6]);
+            hts.extend(&shape[12..28]);
+            hts.extend([0; 4]);
+            hts.extend(&shape[28..40]);
+            hts.extend([0; 4]);
+            super::save(&output.join(format!("hit_{family}_{selector}.hts")), hts)?;
+        }
+    }
+    Ok(())
 }

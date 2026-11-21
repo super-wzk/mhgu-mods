@@ -23,6 +23,65 @@ pub unsafe fn publish_release(api: &'static ReleaseService) -> bool {
     unsafe { service::publish(RELEASE_SERVICE, RELEASE_MAGIC, api) }
 }
 
+/// Subscribe to particle releases before retaining any native unit pointers.
+pub fn on_release(style: u32, released: OnRelease) -> bool {
+    service::on_game_thread()
+        && unsafe { service::find::<ReleaseService>(RELEASE_SERVICE, RELEASE_MAGIC) }
+            .is_some_and(|api| (api.0)(style, released))
+}
+
+const MODEL_SERVICE: &CStr = c"mhgu::ParticleModelV1";
+const MODEL_MAGIC: u32 = u32::from_le_bytes(*b"PMD1");
+
+/// GU 1.4's synchronous type-5 model draw.
+pub type DrawModel = unsafe extern "C" fn(generator: u32, context: u32, gain: u32) -> u32;
+
+#[repr(C)]
+pub struct ModelRenderer {
+    /// Select this renderer from the live particle definition.
+    pub matches: unsafe extern "C" fn(params: u32) -> bool,
+    /// Draw synchronously. The native continuation borrows the same GU objects.
+    pub draw: unsafe extern "C" fn(
+        DrawModel,
+        generator: u32,
+        params: u32,
+        context: u32,
+        gain: u32,
+    ) -> u32,
+}
+
+#[doc(hidden)]
+#[repr(C)]
+pub struct ModelService(pub unsafe extern "C" fn(*const ModelRenderer));
+
+/// # Safety
+/// Publish once from the registry on the Forge init thread.
+#[doc(hidden)]
+pub unsafe fn publish_model(api: &'static ModelService) -> bool {
+    unsafe { service::publish(MODEL_SERVICE, MODEL_MAGIC, api) }
+}
+
+/// Attach a process-lifetime renderer for a set of private GU models.
+pub fn bind_model(renderer: &'static ModelRenderer) -> bool {
+    if !service::on_game_thread() {
+        return false;
+    }
+    let Some(api) = (unsafe { service::find::<ModelService>(MODEL_SERVICE, MODEL_MAGIC) }) else {
+        return false;
+    };
+    unsafe { (api.0)(renderer) };
+    true
+}
+
+/// End a live, release-tracked unit on GU's particle thread.
+///
+/// # Safety
+/// The caller must remove the handle on native release and before stopping it.
+pub unsafe fn stop_unit(unit: u32) {
+    let stop: unsafe extern "C" fn(u32, u32) = unsafe { core::mem::transmute(entry(0x32a400)) };
+    unsafe { stop(unit, 1) };
+}
+
 /// Tracks particle units owned by one action, including units waiting to emit.
 pub struct TrackedUnits<const N: usize> {
     units: [AtomicU32; N],
@@ -38,9 +97,7 @@ impl<const N: usize> TrackedUnits<N> {
     }
 
     pub fn bind(&'static self, style: u32, released: OnRelease) -> bool {
-        let ready = service::on_game_thread()
-            && unsafe { service::find::<ReleaseService>(RELEASE_SERVICE, RELEASE_MAGIC) }
-                .is_some_and(|api| (api.0)(style, released));
+        let ready = on_release(style, released);
         self.ready.store(ready, Ordering::Release);
         ready
     }
@@ -54,12 +111,18 @@ impl<const N: usize> TrackedUnits<N> {
     /// # Safety
     /// Call on the particle system's game thread.
     pub unsafe fn stop(&self) {
-        let stop: unsafe extern "C" fn(u32, u32) = unsafe { core::mem::transmute(entry(0x32a400)) };
-        for slot in &self.units {
+        unsafe { self.stop_slots(0..N) };
+    }
+
+    /// Stop the units tracked for one owner, including pending emissions.
+    /// # Safety
+    /// Call on the particle system's game thread.
+    pub unsafe fn stop_slots(&self, range: core::ops::Range<usize>) {
+        for slot in &self.units[range] {
             let unit = slot.swap(0, Ordering::AcqRel);
             if unit != 0 {
                 // End live children and cancel units still waiting to emit.
-                unsafe { stop(unit, 1) };
+                unsafe { stop_unit(unit) };
             }
         }
     }
@@ -93,6 +156,11 @@ impl<const N: usize> TrackedUnits<N> {
 pub enum Anchor {
     World([f32; 3], u16),
     RotatedWorld([f32; 3], [u16; 3]),
+    ScaledWorld {
+        position: [f32; 3],
+        angles: [u16; 3],
+        scale: f32,
+    },
     Joint {
         parent: u32,
         joint: i16,
@@ -178,10 +246,18 @@ impl Bank {
     /// # Safety
     /// Call on the game thread. A joint anchor must have a live particle parent.
     pub unsafe fn emit(&self, route: usize, anchor: Anchor) {
+        unsafe { self.emit_tracked(route, anchor, |_| {}) };
+    }
+
+    /// Report every accepted unit, including routes with more than 32 layers.
+    ///
+    /// # Safety
+    /// The same game thread and attachment requirements as `emit` apply.
+    pub unsafe fn emit_tracked(&self, route: usize, anchor: Anchor, mut accepted: impl FnMut(u32)) {
         let Some((first, count)) = self.route(route) else {
             return;
         };
-        unsafe { self.emit_selectors(anchor, first..first + count, |_, _| {}) };
+        unsafe { self.emit_selectors(anchor, first..first + count, |_, unit| accepted(unit)) };
     }
 
     fn route(&self, route: usize) -> Option<(u16, u16)> {
@@ -281,6 +357,16 @@ impl Bank {
                 match anchor {
                     Anchor::World(position, yaw) => world(position, [0, yaw, 0]),
                     Anchor::RotatedWorld(position, angles) => world(position, angles),
+                    Anchor::ScaledWorld {
+                        position,
+                        angles,
+                        scale,
+                    } => {
+                        world(position, angles);
+                        // 31C3A8 property 30 multiplies the unit scales at +48.
+                        proof.set(Field::at(4), 0x4000_000au32);
+                        proof.set(Field::at(48), [scale; 3]);
+                    }
                     Anchor::Joint {
                         parent,
                         joint,

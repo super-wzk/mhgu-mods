@@ -17,6 +17,14 @@ impl Bank {
         }
     }
 
+    /// Cache the native sound request and its resources without playing a cue.
+    ///
+    /// # Safety
+    /// Call on the game thread after the resource manager has initialized.
+    pub unsafe fn preload(&self) {
+        unsafe { self.load() };
+    }
+
     unsafe fn load(&self) -> Option<u32> {
         unsafe {
             let cached = self.resource.load(Ordering::Acquire);

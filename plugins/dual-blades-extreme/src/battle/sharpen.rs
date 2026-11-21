@@ -3,10 +3,11 @@ use super::{OWNER, Relaxed};
 use core::sync::atomic::AtomicU32;
 use mhgu_sdk::style::physical::{self, Rule, Scope};
 
-static LEVEL: AtomicU32 = AtomicU32::new(0);
+static LEVEL: [AtomicU32; 5] = [const { AtomicU32::new(0) }; 5];
 
 #[derive(Default)]
 pub(super) struct Polish {
+    pub(super) slot: usize,
     stacks: u8,
     remaining: f32,
     held: f32,
@@ -21,14 +22,14 @@ impl Polish {
         self.stacks = (self.stacks + 1).min(4);
         // Before the first activation the event only prepares a stack.
         if self.active() {
-            LEVEL.store(u32::from(self.stacks), Relaxed);
+            LEVEL[self.slot].store(u32::from(self.stacks), Relaxed);
         }
     }
 
     pub fn activate(&mut self, duration: f32) {
         self.held = duration;
         self.remaining = duration;
-        LEVEL.store(u32::from(self.stacks), Relaxed);
+        LEVEL[self.slot].store(u32::from(self.stacks), Relaxed);
     }
 
     pub fn leave_action(&mut self) {
@@ -45,25 +46,28 @@ impl Polish {
         }
         if self.stacks != 0 && (!drawn || !in_attack_chain || (was_active && !self.active())) {
             self.stacks = 0;
-            clear_active_level();
+            LEVEL[self.slot].store(0, Relaxed);
         }
     }
 }
 
 pub(super) fn clear_active_level() {
-    LEVEL.store(0, Relaxed);
+    LEVEL[0].store(0, Relaxed);
 }
 
 pub(super) fn active_level() -> u32 {
-    LEVEL.load(Relaxed)
+    LEVEL[0].load(Relaxed)
 }
 
 unsafe extern "C" fn adjust(actor: u32, raw: i32) -> i32 {
-    if OWNER.load(Relaxed) == actor {
-        raw * (100 + 5 * active_level() as i32) / 100
+    let slot = if OWNER.load(Relaxed) == actor {
+        Some(0)
     } else {
-        raw
-    }
+        super::peer::slot_of(actor)
+    };
+    slot.map_or(raw, |slot| {
+        raw * (100 + 5 * LEVEL[slot].load(Relaxed) as i32) / 100
+    })
 }
 
 pub(super) unsafe fn install() {
@@ -73,5 +77,11 @@ pub(super) unsafe fn install() {
     };
     if !unsafe { physical::bind(crate::STYLE_ID, &POWER) } {
         forge::log::prelude::warn!("Extreme DB: physical power service unavailable");
+    }
+}
+
+impl Drop for Polish {
+    fn drop(&mut self) {
+        LEVEL[self.slot].store(0, Relaxed);
     }
 }

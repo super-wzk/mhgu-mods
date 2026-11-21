@@ -103,4 +103,4 @@ pub fn dual_blades() -> Result<Vec<u8>> {
 }
 
 mod long_sword;
-pub use long_sword::convert as long_sword;
+pub use long_sword::{convert as long_sword,switch_axe};

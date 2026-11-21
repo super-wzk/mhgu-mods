@@ -1,13 +1,13 @@
 //! GU weapon-specific entry points used by registered styles.
 use super::{local_style, resolve_request};
-use mhgu_sdk::style::{ActionRequest, Style, action};
+use mhgu_sdk::style::{ActionRequest, Style, action, rules::GroundMotion};
 
 fn great_sword_art(slot: u16) -> bool {
     // w00_m Hunter Art entries and their continuations in 1160A04.
     matches!(slot, 51..=57 | 62..=65 | 90 | 91)
 }
 
-pub(super) unsafe fn finish_ground_motion(actor: u32, style: &Style, slot: u16) {
+pub(super) unsafe fn finish_ground_motion(actor: u32, style: &Style, slot: u16, finish: GroundMotion) {
     unsafe {
         let packed = *((actor + 1204) as *const u16);
         if !(0x800..0x1000).contains(&packed) {
@@ -16,10 +16,7 @@ pub(super) unsafe fn finish_ground_motion(actor: u32, style: &Style, slot: u16) 
         let Some(decode) = style.decode else { return };
         let phase = *((actor + 5) as *const u8);
         // 2CD978, 2CDB38 and 2CF8A4 wait on 950BCC for these phases.
-        if matches!(
-            (slot, phase, decode(actor, packed.into())),
-            (1, 1, 5002) | (2, 1, 5003) | (6, 2, 5012 | 5013)
-        ) {
+        if finish(slot, phase, decode(actor, packed.into())) {
             action::signal_stopped_motion(actor);
         }
     }
@@ -62,8 +59,11 @@ pub(super) unsafe fn resolve_stock_slot(
     slot: u16,
     flags: u16,
 ) -> Option<u16> {
-    // The shared weapon dispatcher (2B81A0) owns these mounted knife attacks.
-    if matches!(slot, 803..=805 | 810) {
+    // GU's shared weapon dispatcher (2B81A0) owns the kick and mounted
+    // knife attacks. Drawn special input still belongs to the style.
+    if matches!(slot, 803..=805 | 810)
+        || (slot == 800 && unsafe { *((actor + 10057) as *const u8) & 1 == 0 })
+    {
         return Some(slot);
     }
     unsafe {
@@ -165,6 +165,12 @@ unsafe fn long_sword_draw_route(actor: u32, kind: u32) -> u32 {
     unsafe { draw_route(actor, native, 7) }
 }
 
+#[forge::hook(offset = 0x119fcf4)]
+unsafe fn switch_axe_draw_route(actor:u32,kind:u32)->u32 {
+    let native=original!(actor,kind);
+    if matches!(kind,0|1|4) {unsafe{draw_route(actor,native,8)}} else {native}
+}
+
 #[forge::hook(offset = 0x11ba2a0)]
 unsafe fn dual_blades_draw_route(actor: u32, kind: u32) -> u32 {
     let native = original!(actor, kind);
@@ -193,4 +199,5 @@ pub(super) fn install(base: u32) {
     forge::install_hook!(base, great_sword_draw_route);
     forge::install_hook!(base, dual_blades_draw_route);
     forge::install_hook!(base, long_sword_draw_route);
+    forge::install_hook!(base, switch_axe_draw_route);
 }

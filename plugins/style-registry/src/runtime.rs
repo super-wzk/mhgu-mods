@@ -6,6 +6,7 @@ use core::{
     sync::atomic::{AtomicPtr, AtomicU32, Ordering},
 };
 mod attack;
+mod camera;
 mod commands;
 mod deflection;
 mod effect;
@@ -15,8 +16,9 @@ mod physical;
 mod weapon;
 mod world_contact;
 use mhgu_sdk::style::{
-    ActionRequest, Input, PASS, Style, action, hunter, movement,
+    ActionRequest, Input, PASS, Style, action, hunter, movement, preload,
     registry::{self, ServiceV1},
+    remote, rules,
 };
 
 struct Entry {
@@ -25,9 +27,14 @@ struct Entry {
     details: CString,
     next: *mut Entry,
     remote: AtomicU32,
+    peer_frame: AtomicU32,
+    action_state: AtomicPtr<remote::ActionState>,
     physical: AtomicPtr<mhgu_sdk::style::physical::Rule>,
     world_contact: AtomicU32,
+    blade_contact: AtomicU32,
     particle_release: AtomicU32,
+    prepare: AtomicU32,
+    rules: AtomicPtr<rules::Rules>,
 }
 
 // Published entries live until exit. Zero selections skip the list entirely.
@@ -71,9 +78,14 @@ unsafe extern "C" fn register(
             details,
             next: head,
             remote: AtomicU32::new(0),
+            peer_frame: AtomicU32::new(0),
+            action_state: AtomicPtr::new(ptr::null_mut()),
             physical: AtomicPtr::new(ptr::null_mut()),
             world_contact: AtomicU32::new(0),
+            blade_contact: AtomicU32::new(0),
             particle_release: AtomicU32::new(0),
+            prepare: AtomicU32::new(0),
+            rules: AtomicPtr::new(ptr::null_mut()),
         }));
         match HEAD.compare_exchange(head, node, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => return 0,
@@ -138,16 +150,146 @@ unsafe fn actor_entry(actor: u32) -> Option<&'static Entry> {
     active(u32::from(unsafe { hunter::equipped_weapon(actor) }?))
 }
 
-unsafe fn local_style(actor: u32) -> Option<&'static Style> {
+unsafe fn local_entry(actor: u32) -> Option<&'static Entry> {
     if actor == 0 || unsafe { local_hunter() } != actor {
         return None;
     }
-    unsafe { actor_entry(actor) }.map(|e| e.style)
+    unsafe { actor_entry(actor) }
 }
 
-static REMOTE: mhgu_sdk::style::remote::Service = mhgu_sdk::style::remote::Service(bind_remote);
+unsafe fn local_style(actor: u32) -> Option<&'static Style> {
+    Some(unsafe { local_entry(actor) }?.style)
+}
 
-unsafe extern "C" fn bind_remote(id: u32, tick: mhgu_sdk::style::remote::Tick) {
+impl Entry {
+    fn rules(&self) -> Option<&'static rules::Rules> {
+        // Only process-lifetime descriptors are bound during style init.
+        unsafe { self.rules.load(Ordering::Acquire).as_ref() }
+    }
+}
+
+unsafe extern "C" fn bind_rules(id: u32, rules: *const rules::Rules) -> bool {
+    let Some(entry) = registered_entry(id) else {
+        return false;
+    };
+    let Some(rules) = (unsafe { rules.as_ref() }) else {
+        return false;
+    };
+    if rules.guard_half_angle > 0x8000 {
+        return false;
+    }
+    entry.rules.store(ptr::from_ref(rules).cast_mut(), Ordering::Release);
+    true
+}
+
+static PRELOAD: preload::Service = preload::Service(bind_preload);
+
+unsafe extern "C" fn bind_preload(id: u32, prepare: preload::Prepare) -> bool {
+    let Some(entry) = registered_entry(id) else {
+        return false;
+    };
+    entry.prepare.store(prepare as u32, Ordering::Release);
+    true
+}
+
+// GU 29B7D4 finishes hunt setup, including the weapon-specific initializer.
+#[forge::hook(offset = 0x29b7d4)]
+unsafe fn init_hunter(actor: u32) -> u32 {
+    let result = original!(actor);
+    if let Some(entry) = unsafe { local_entry(actor) } {
+        let addr = entry.prepare.load(Ordering::Acquire);
+        if addr != 0 {
+            let prepare: preload::Prepare = unsafe { core::mem::transmute(addr) };
+            unsafe { prepare(actor) };
+        }
+    }
+    result
+}
+
+static REMOTE: remote::Service = remote::Service {
+    bind: bind_remote,
+    observe: bind_peer_frame,
+    bind_action_state,
+};
+
+unsafe extern "C" fn bind_peer_frame(id: u32, callback: remote::Observe) -> bool {
+    let Some(entry) = registered_entry(id) else {
+        return false;
+    };
+    entry.peer_frame.store(callback as u32, Ordering::Release);
+    true
+}
+
+unsafe extern "C" fn bind_action_state(id: u32, state: &'static remote::ActionState) -> bool {
+    // These weapons leave the packet flag nibble at bits 16..19 free.
+    let Some(entry) = registered_entry(id).filter(|e| matches!(e.style.weapon, 0 | 8 | 11)) else {
+        return false;
+    };
+    entry
+        .action_state
+        .store(ptr::from_ref(state).cast_mut(), Ordering::Release);
+    true
+}
+
+// Retail 1FED90 and 1FF308 use bits 16..19 at packet +16 only for
+// weapon 4, 6 and 14. W00, W08 and W11 ignore that nibble.
+const STATE_PRESENT: u8 = 0b1000;
+const STATE_VALUE: u8 = 0b0111;
+const STATE_SHIFT: u32 = 16;
+
+impl Entry {
+    fn action_state(&self) -> Option<&'static remote::ActionState> {
+        // bind_action_state stores a resident descriptor with a static lifetime.
+        unsafe { self.action_state.load(Ordering::Acquire).as_ref() }
+    }
+}
+
+#[forge::hook(offset = 0x1fed90)]
+unsafe fn pack_action(packet: u32, actor: u32, flags: u32) -> u32 {
+    let result = original!(packet, actor, flags);
+    unsafe {
+        if actor != 0
+            && actor == local_hunter()
+            && let Some(codec) = actor_entry(actor).and_then(Entry::action_state)
+        {
+            let value = (codec.encode)(actor);
+            if value <= STATE_VALUE {
+                let word = (packet + 16) as *mut u32;
+                let mask = u32::from(STATE_PRESENT | STATE_VALUE) << STATE_SHIFT;
+                word.write(
+                    (word.read() & !mask) | (u32::from(STATE_PRESENT | value) << STATE_SHIFT),
+                );
+            }
+        }
+    }
+    result
+}
+
+#[forge::hook(offset = 0x1ff308)]
+unsafe fn unpack_action(packet: u32, actor: u32) -> u32 {
+    let result = original!(packet, actor);
+    unsafe {
+        if packet == 0 || actor == 0 {
+            return result;
+        }
+        if let Some(codec) = peer_binding(actor, Entry::action_state) {
+            let group = *((packet + 54) as *const u16);
+            let slot = *((packet + 56) as *const u16);
+            if action::current(actor) == (group, slot) {
+                let bits = (*((packet + 16) as *const u32) >> STATE_SHIFT) as u8;
+                let value = if bits & STATE_PRESENT != 0 {
+                    bits & STATE_VALUE
+                } else {
+                    u8::MAX
+                };
+                (codec.decode)(actor, value);
+            }
+        }
+    }
+    result
+}
+
+unsafe extern "C" fn bind_remote(id: u32, tick: remote::Tick) {
     if let Some(entry) = registered_entry(id) {
         entry.remote.store(tick as u32, Ordering::Release);
     }
@@ -157,13 +299,20 @@ unsafe extern "C" fn bind_remote(id: u32, tick: mhgu_sdk::style::remote::Tick) {
 // of the receiver's equipment-box selection. V1 private IDs are per weapon.
 unsafe fn peer_entry(actor: u32) -> Option<&'static Entry> {
     unsafe {
-        use mhgu_sdk::style::remote::Roster;
+        peer_binding(actor, |e| {
+            (e.remote.load(Ordering::Acquire) != 0).then_some(e)
+        })
+    }
+}
+
+unsafe fn peer_binding<T>(actor: u32, binding: impl Fn(&'static Entry) -> Option<T>) -> Option<T> {
+    unsafe {
         // World contacts also call here with monster or object owners.
-        Roster::current()?.peer_index(actor)?;
-        let mut candidates = entries(u32::from(hunter::equipped_weapon(actor)?))
-            .filter(|entry| entry.remote.load(Ordering::Acquire) != 0);
-        let entry = candidates.next()?;
-        candidates.next().is_none().then_some(entry)
+        remote::Roster::current()?.peer_index(actor)?;
+        let mut candidates =
+            entries(u32::from(hunter::equipped_weapon(actor)?)).filter_map(binding);
+        let first = candidates.next()?;
+        candidates.next().is_none().then_some(first)
     }
 }
 
@@ -257,8 +406,8 @@ unsafe fn controller_frame(actor: u32, custom_id: Option<u8>) -> u32 {
         if *((actor + 9493) as *const u8) & 4 != 0 {
             return PASS;
         }
-        if group == 1 && matches!(slot, 1 | 2 | 6) && matches!(entry.style.weapon, 0 | 11) {
-            weapon::finish_ground_motion(actor, entry.style, slot);
+        if group == 1 && let Some(finish) = entry.rules().and_then(|rules| rules.ground_motion) {
+            weapon::finish_ground_motion(actor, entry.style, slot, finish);
         }
         *((actor + 9472) as *mut u32) &= !1;
         let auxiliary: unsafe extern "C" fn() -> u32 =
@@ -292,6 +441,16 @@ unsafe fn controller_frame(actor: u32, custom_id: Option<u8>) -> u32 {
 }
 #[forge::hook(offset = 0x282da8)]
 unsafe fn dispatch(actor: u32) -> u32 {
+    if actor != 0 && actor == unsafe { local_hunter() } {
+        for entry in registered_entries() {
+            let callback = entry.peer_frame.load(Ordering::Acquire);
+            if callback != 0 {
+                let poll: mhgu_sdk::style::remote::Observe =
+                    unsafe { core::mem::transmute(callback) };
+                unsafe { poll(actor) };
+            }
+        }
+    }
     let result = unsafe { crate::runtime::controller_frame(actor, None) };
     if result != mhgu_sdk::style::PASS {
         return result;
@@ -466,6 +625,8 @@ fn start() {
     if !unsafe { registry::publish(&API) } {
         return;
     }
+    static RULES: rules::Service = rules::Service(bind_rules);
+    unsafe { rules::publish(&RULES) };
     let base = forge::mem::text_addr();
     forge::install_hook!(base, encode);
     forge::install_hook!(base, decode);
@@ -476,10 +637,17 @@ fn start() {
     forge::install_hook!(base, dispatch);
     forge::install_hook!(base, weapon_dispatch);
     forge::install_hook!(base, change_action);
-    unsafe { mhgu_sdk::style::remote::publish(&REMOTE) };
+    if unsafe { preload::publish(&PRELOAD) } {
+        forge::install_hook!(base, init_hunter);
+    }
+    if unsafe { remote::publish(&REMOTE) } {
+        forge::install_hook!(base, pack_action);
+        forge::install_hook!(base, unpack_action);
+    }
     attack::install(base);
     deflection::install(base);
     world_contact::install(base);
+    camera::install(base);
     unsafe { physical::install(base) };
     commands::install(base);
     effect::install(base);

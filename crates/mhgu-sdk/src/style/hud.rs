@@ -112,10 +112,19 @@ impl GaugePlate {
             if sprite == 0 {
                 return;
             }
+            self.show_sprite(sprite,frame,self.stock);
+        }
+    }
+
+    /// Apply a private cell to a known weapon sprite, or restore its captured native crop.
+    /// # Safety
+    /// The sprite must be live on the GUI thread and owned by this gauge.
+    pub unsafe fn show_sprite(&self,sprite:u32,frame:Option<u32>,stock:[f32;4]){
+        unsafe {
             let id = read::<u32>(sprite, 256);
             let rect = if let Some(frame) = frame {
                 if id != self.id {
-                    if read::<[f32; 4]>(sprite, 268) != self.stock {
+                    if read::<[f32; 4]>(sprite, 268) != stock {
                         return;
                     }
                     let Some(desc) = self.atlas() else { return };
@@ -134,7 +143,7 @@ impl GaugePlate {
             } else if id == self.id {
                 let bind: unsafe extern "C" fn(u32, u32) = core::mem::transmute(entry(0xa4faf0));
                 bind(sprite, self.stock_id.load(Ordering::Relaxed));
-                self.stock
+                stock
             } else {
                 return;
             };

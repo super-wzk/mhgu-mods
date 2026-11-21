@@ -1,4 +1,36 @@
-//! Frontier SDT timing for blade contacts submitted to GU.
+//! Frontier attack and guard timing on GU's motion clock.
+
+/// FZ 816FD8A2 consumes the first matching contact of either blade, even
+/// when the effective hitzone is soft enough to keep swinging.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub extern "C" fn deflection(factor: f32) -> mhgu_sdk::style::rules::Deflection {
+    use mhgu_sdk::style::rules::Deflection;
+    if factor < 0.23 {
+        Deflection::Recoil
+    } else {
+        Deflection::CloseWindow
+    }
+}
+
+/// Extra motion frames for Frontier guard windows. GU 2F4A2C applies the
+/// stronger Guard skill first, including the two compound skills.
+///
+/// # Safety
+/// The actor must be a live, equipped GU hunter on the game thread.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn guard_bonus_frames(actor: u32) -> u16 {
+    use mhgu_sdk::style::hunter::has_skill;
+    if [168, 279, 297]
+        .into_iter()
+        .any(|id| unsafe { has_skill(actor, id) })
+    {
+        4
+    } else if unsafe { has_skill(actor, 169) } {
+        2
+    } else {
+        0
+    }
+}
 
 pub struct HitWindow {
     pub delay: f32,

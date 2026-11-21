@@ -49,6 +49,56 @@ pub fn effect(template: &[u8], name: &str, atlas: &str, wrap: bool) -> Result<Ve
     }
     Ok(out)
 }
+/// Assemble the stock model-particle shader for every draw strip of one FX mesh.
+pub fn effect_set(
+    template: &[u8],
+    names: &[String],
+    paths: &[String],
+    wrap: bool,
+) -> Result<Vec<u8>> {
+    ensure!(
+        !names.is_empty() && names.len() == paths.len(),
+        "missing FX material binding"
+    );
+    if names.len() == 1 {
+        return effect(template, &names[0], &paths[0], wrap);
+    }
+    let count = names.len();
+    let rows = 28 + 76 * count;
+    let mut out = template.get(..28).context("short effect MRL")?.to_vec();
+    out.resize(rows + 60 * count, 0);
+    out.patch(8, u32::try_from(count)?);
+    out.patch(12, u32::try_from(count)?);
+    out.patch(20, 28u32);
+    out.patch(24, u32::try_from(rows)?);
+    for (i, (name, path)) in names.iter().zip(paths).enumerate() {
+        let single = effect(template, name, path, wrap)?;
+        let texture = word(&single, 20)? as usize;
+        let source_row = word(&single, 24)? as usize;
+        let source_block = word(&single, source_row + 52)? as usize;
+        let size = word(&single, source_row + 8)? as usize;
+        let row = rows + 60 * i;
+        out[28 + 76 * i..28 + 76 * (i + 1)].copy_from_slice(&single[texture..texture + 76]);
+        out[row..row + 60].copy_from_slice(&single[source_row..source_row + 60]);
+        out.resize(out.len().next_multiple_of(16), 0);
+        let block = out.len();
+        out.extend_from_slice(
+            single
+                .get(source_block..source_block + size)
+                .context("short FX material block")?,
+        );
+        out.patch(row + 52, u32::try_from(block)?);
+        // The original MRL has one bound texture. Keep unbound samplers at zero.
+        for param in 0..(word(&out, row + 24)? & 0xfff) as usize {
+            let field = block + param * 12;
+            if word(&out, field)? & 15 == 3 && word(&out, field + 4)? == 1 {
+                out.patch(field + 4, u32::try_from(i + 1)?);
+            }
+        }
+    }
+    Ok(out)
+}
+
 struct Template<'a> {
     row: &'a [u8],
     block: &'a [u8],

@@ -45,9 +45,10 @@ def source():
 
 def replay(weapon, style, plugin, recoil, recoil_clip):
     elf = (PLUGINS.parent / "mhgu/main.elf").read_bytes()
-    g = boot(elf, f"[Weapons]\n{weapon}={style}\n".encode(), ("registry",))
-    dist = PLUGINS / plugin / "dist" / plugin / "romfs/nativeNX/plugins"
     dual = weapon == 11
+    order = ("registry", "sword") if dual else ("registry",)
+    g = boot(elf, f"[Weapons]\n{weapon}={style}\n".encode(), order)
+    dist = PLUGINS / plugin / "dist" / plugin / "romfs/nativeNX/plugins"
     trails = {}
     if dual:
         bind = g.get(api_for(g, b"mhgu::StyleBladeTrailV1", b"SBT1"))
@@ -57,10 +58,13 @@ def replay(weapon, style, plugin, recoil, recoil_clip):
             trails[g.string(model)] = snapshot
 
         observe = g.cpu.hook_add(UC_HOOK_CODE, capture, begin=bind, end=bind)
-    descriptor = load_registered_style(g, dist / (plugin.replace("-", "_") + ".nro"))
+    descriptor = load_registered_style(g, dist / (plugin.replace("-", "_") + ".nro"), base=0x9300000)
     if dual:
         g.cpu.hook_del(observe)
-        assert list(trails) == [rf"effect\frontier_db\m{model}" for model in range(501, 506)]
+        assert list(trails) == [
+            rf"effect\frontier_db\m{501 + 10 * slot + model}"
+            for slot in range(5) for model in range(5)
+        ]
         assert 0xA956F4 not in g.hooks
     controller = g.get(descriptor + 20)
     actor, eq, remote = hunters(g)

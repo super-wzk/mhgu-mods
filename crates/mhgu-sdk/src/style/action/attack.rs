@@ -38,4 +38,24 @@ impl Attack {
     pub unsafe fn submit(&self, actor: u32) -> bool {
         unsafe { super::super::registry::submit_attack(actor, self) }
     }
+
+    /// Submit a strike and scale its native attacker hitstop factor.
+    ///
+    /// # Safety
+    /// The actor and shape must satisfy the requirements of `submit`.
+    /// The scale must be finite and nonnegative.
+    pub unsafe fn submit_with_hitstop_scale(&self, actor: u32, scale: f32) -> bool {
+        unsafe {
+            if !self.submit(actor) {
+                return false;
+            }
+            let hand = usize::from(self.flags & Self::SECONDARY != 0);
+            let hit = actor + super::melee::BLADE_CONTACT_OFFSETS[hand];
+            // GU 168960 has decoded HDP byte 37. Scale the resulting
+            // contact value so 16DB68 still chooses the native reaction.
+            let factor = (hit + 108) as *mut u8;
+            factor.write((f32::from(factor.read()) * scale + 0.5) as u8);
+            true
+        }
+    }
 }

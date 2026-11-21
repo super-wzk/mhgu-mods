@@ -1,5 +1,8 @@
 //! Frontier motion effect rows and their GU playback transforms.
 
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub mod model;
+
 use mhgu_sdk::style::action::MotionFrame;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 use mhgu_sdk::style::particle::{Anchor, ground_heights, world_offset};

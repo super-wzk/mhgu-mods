@@ -26,3 +26,11 @@ pub unsafe fn equipped_weapon(actor: u32) -> Option<u8> {
         (equipment != 0).then(|| ((equipment + 1236) as *const u8).read())
     }
 }
+
+/// # Safety
+/// The actor must be a live, equipped GU hunter on the game thread.
+pub unsafe fn has_skill(actor: u32, skill: u32) -> bool {
+    let has: unsafe extern "C" fn(u32, u32) -> u32 =
+        unsafe { core::mem::transmute(entry(0x2864c4)) };
+    unsafe { has(actor, skill) != 0 }
+}

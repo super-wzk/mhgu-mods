@@ -104,3 +104,44 @@ pub unsafe fn roll_off_ledge(actor: u32) -> bool {
         action::current(actor) == ROLL_OFF_LEDGE
     }
 }
+
+/// Probe a slide's movement direction before entering GU's native falling action.
+///
+/// # Safety
+/// The actor must be a live hunter on the game thread.
+pub unsafe fn step_off_ledge(actor: u32, offset: u16) -> bool {
+    unsafe {
+        use crate::memory::{Field, Object};
+        let Some(actor) = Object::at(actor) else {
+            return false;
+        };
+        let probe: unsafe extern "C" fn(u32) -> u32 = core::mem::transmute(entry(0x2a8458));
+        let facing = actor.get::<u32>(Field::at(4076));
+        let yaw = (facing as u16).wrapping_add(offset);
+        let airborne = actor.get::<u8>(Field::at(9477)) == 2;
+        if !airborne {
+            // GU's ledge probe caches a result for the current facing.
+            if offset != 0 {
+                actor.set(Field::at(4076), u32::from(yaw));
+                actor.set(Field::at(11956), 0u32);
+            }
+            let ledge = probe(actor.addr()) == 1;
+            if offset != 0 {
+                actor.set(Field::at(4076), facing);
+                actor.set(Field::at(11956), 0u32);
+            }
+            if !ledge {
+                return false;
+            }
+        }
+        let target_yaw = actor.get::<u32>(Field::at(5280));
+        actor.set(Field::at(4076), u32::from(yaw));
+        actor.set(Field::at(5280), u32::from(yaw));
+        if roll_off_ledge(actor.addr()) {
+            return true;
+        }
+        actor.set(Field::at(4076), facing);
+        actor.set(Field::at(5280), target_yaw);
+        false
+    }
+}

@@ -76,6 +76,14 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Build the independent Frontier Switch Axe F motion, action, hit and sound resources.
+    SwitchAxe {
+        dat: PathBuf,
+        #[arg(long)]
+        gu_weapon: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Convert the original long sword effect banks and animation sounds.
     LongSwordEffects {
         dat: PathBuf,
@@ -316,6 +324,28 @@ fn main() -> Result<()> {
             &output,
             hunter::motions(&dat, female, hunter::Weapon::GreatSword)?,
         ),
+        Command::SwitchAxe { dat, gu_weapon, output } => {
+            fs::create_dir_all(&output)?;
+            save(&output.join("gauge.tex"),hunter_hud::switch_axe(&dat)?)?;
+            hunter_fx::switch_axe(&dat, &output.join("effects"), &gu_weapon)?;
+            for (sex, female) in [("m", false), ("f", true)] {
+                save(
+                    &output.join(format!("{sex}.arc")),
+                    hunter::motions(&dat, female, hunter::Weapon::SwitchAxe)?,
+                )?;
+            }
+            save(
+                &output.join("switch_axe.fsaa"),
+                hunter::actions(&dat, hunter::Weapon::SwitchAxe)?,
+            )?;
+            hunter::switch_axe_shapes(&dat, &output)?;
+            let (assets, timeline) = sound::switch_axe(&dat)?;
+            save(&output.join("frontier_sa_sound.flse"), timeline)?;
+            save(
+                &output.join("sound.arc"),
+                mhgu_resource::arc::encode(&assets)?,
+            )
+        }
         Command::LongSwordSound { dat, output } => {
             let (assets, timeline) = sound::long_sword(&dat)?;
             save(&output.with_extension("flse"), timeline)?;

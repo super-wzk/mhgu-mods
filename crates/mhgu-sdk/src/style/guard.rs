@@ -1,4 +1,4 @@
-//! A style's response to a block already accepted by GU.
+//! A style's response to an incoming guardable hit and GU's confirmed recoil.
 
 #[derive(Default)]
 #[repr(C)]

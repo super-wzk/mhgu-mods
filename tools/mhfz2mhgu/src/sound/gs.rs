@@ -60,7 +60,10 @@ pub(super) fn timeline(dat: &Path, weapon: usize) -> Result<(Vec<u8>, [BTreeSet<
     // The fourth charge cue is triggered by gameplay, not the motion table.
     // Contact and deflection are played by GU's own melee resolver.
     let mut cues = [BTreeSet::new(), BTreeSet::new(), BTreeSet::new()];
-    if weapon == 7 {
+    if weapon == 12 {
+        cues[0].extend([1, 2, 12, 13, 20, 21, 22, 23, 24, 25, 26, 27, 28]);
+        cues[1].extend([78, 79]);
+    } else if weapon == 7 {
         cues[0].extend([0, 1, 2, 3, 8, 9, 10, 11, 12]);
         cues[2].insert(12);
         cues[1].insert(235);
@@ -75,6 +78,7 @@ pub(super) fn timeline(dat: &Path, weapon: usize) -> Result<(Vec<u8>, [BTreeSet<
         0 => include_str!("gs_native.txt"),
         6 => include_str!("db_native.txt"),
         7 => include_str!("ls_native.txt"),
+        12 => "",
         _ => anyhow::bail!("unsupported weapon sound timeline {weapon}"),
     };
     for l in native.lines().filter(|l| !l.starts_with('#')) {
@@ -149,6 +153,10 @@ pub(super) fn timeline(dat: &Path, weapon: usize) -> Result<(Vec<u8>, [BTreeSet<
                 6 => 0,
                 _ => continue,
             }; // footsteps, armour: GU scene
+            if weapon == 12 && h(r + 4)? == 4 {
+                // Conditional sheathing accent. The controller emits it in sword form.
+                continue;
+            }
             ensure!(h(r + 4)? == 0, "unsupported w{weapon:02} cue condition");
             let mut choices = Vec::new();
             for k in 0..4 {

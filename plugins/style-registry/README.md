@@ -27,6 +27,10 @@ V1 注册服务同时提供攻击提交与格挡结果。GU 从武器动作组�
 
 `art_slots` 指定狩技槽位数（0–3），装备、充能和发动由 GU 处理。`independent` 使 GU 的固定长度风格表使用索引 0，并停用勇气槽。仅替换动作资源的风格可以省略控制器。
 
+四种极之型使用同一个[预读入口](../../crates/mhgu-sdk/src/style/preload.rs)。GU `29B7D4` 完成任务初始化后，注册器只调用本地猎人当前风格的预读回调。各武器声明拔刀需要的动作和音效，斩斧及太刀额外准备起手粒子表。预读沿用原生资源缓存，动作库在实际播放时绑定到猎人。
+
+武器插件通过 [ParticleModelV1](../../crates/mhgu-sdk/src/style/particle.rs) 登记模型粒子绘制回调。注册器负责保存和恢复 GU 的绘制状态，并派发粒子释放回调。
+
 构建注册器和[极型大剑](../great-sword-extreme/README.md)后，用装有 Unicorn 的 Python 运行 `plugins/great-sword-extreme/tests/verify_style.py` 和 `verify_menu.py`。后者执行 GU 的列表光标、确认框和原版装备写入，覆盖选择、取消、跨页、保存以及切回原版。使用内存文件和渲染替身，不接触玩家存档。
 
-大剑、双剑和太刀通过攻击标志 `Attack::DEFLECTABLE` 指定可弹刀的刀身事件。注册器在 GU 近战解算后按猎人、动作槽和左右刀的打击序号匹配首次接触，使用斩味修正后的肉质决定弹刀。动作控制器通过 `mhgu::BladeDeflectionV1` 取得结果。GU 的心眼与相关豁免在这次命中的刀身上判定。
+内容插件可通过 [StyleRulesV1](../../crates/mhgu-sdk/src/style/rules.rs) 登记格挡半角、公共动作结束条件、弹刀与镜头回调。注册器在 GU 近战解算后按猎人、动作槽和刀身的打击序号匹配 `Attack::DEFLECTABLE` 标记的命中，并用 GU 的斩味修正、心眼与相关豁免完成判定。动作控制器通过 `mhgu::BladeDeflectionV1` 取得结果。

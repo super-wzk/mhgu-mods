@@ -393,7 +393,7 @@ def replay(g, actor, descriptor, set_action):
     g.put(view + 2140, actor)
     g.cpu.mem_write(actor + 64, bytes(12))
     seen = []
-    stub(0x898AC0, lambda camera, *_: seen.append(number(camera + 68)) or 0)
+    stub(g.originals[0x898AC0], lambda camera, *_: seen.append(number(camera + 68)) or 0)
     for index, amp, duration in ((54, 4, 10), (60, 10, 20), (65, 12, 30)):
         begin(index)
         put_float(actor + 1284, 10)

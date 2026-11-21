@@ -1,5 +1,5 @@
 //! Carry one accepted style block through GU collision, cost and recoil.
-use super::local_style;
+use super::local_entry;
 use core::sync::atomic::{
     AtomicPtr, AtomicU32,
     Ordering::{Acquire, Relaxed, Release},
@@ -7,6 +7,7 @@ use core::sync::atomic::{
 use mhgu_sdk::style::{
     action,
     guard::{self, Decision, GuardResult},
+    hunter,
 };
 
 const GROUP: u16 = 32;
@@ -61,19 +62,46 @@ pub(super) fn clear(actor: u32) {
     let _ = ACTOR.compare_exchange(actor, 0, Relaxed, Relaxed);
 }
 
+// Preserve GU 2F2BA0's hit exclusions and Guard Up requirement when a
+// registered style supplies its own guard cone.
+unsafe fn guardable(actor: u32, angle: u16, half_angle: u16) -> bool {
+    unsafe {
+        let flags = *((actor + 12820) as *const u16);
+        let kind = *((actor + 12822) as *const u8);
+        if *((actor + 12828) as *const i16) < 0
+            || flags & 0x100 != 0
+            || matches!(kind, 0x19..=0x1d | 0x3a | 0x43 | 0x44 | 0x46)
+        {
+            return false;
+        }
+        if flags & 0x20 != 0 && !hunter::has_skill(actor, 171) && !hunter::has_skill(actor, 317) {
+            return false;
+        }
+        let facing = *((actor + 5280) as *const u16);
+        flags & 0x40 != 0 || (facing.wrapping_sub(angle) as i16).unsigned_abs() <= half_angle
+    }
+}
+
 #[forge::hook(offset = 0x2f2ba0)]
 unsafe fn block(actor: u32, angle: u32) -> u32 {
     let accepted = original!(actor, angle);
     unsafe {
-        if accepted == 0 {
+        let (group, slot) = action::current(actor);
+        let custom = action::custom(group, slot);
+        if !custom && (group != GROUP || accepted == 0) {
             return accepted;
         }
-        let Some(policy) = local_style(actor).and_then(|s| s.guard) else {
+        let Some(entry) = local_entry(actor) else {
             return accepted;
         };
-        let (group, slot) = action::current(actor);
-        if group != GROUP && !action::custom(group, slot) {
+        let Some(policy) = entry.style.guard else {
             return accepted;
+        };
+        if accepted == 0 {
+            let half_angle = entry.rules().map_or(0, |rules| rules.guard_half_angle);
+            if half_angle == 0 || !guardable(actor, angle as u16, half_angle) {
+                return 0;
+            }
         }
         clear(actor);
         let mut result = GuardResult::default();
@@ -85,7 +113,7 @@ unsafe fn block(actor: u32, angle: u32) -> u32 {
                 RECOIL_TIER.store(result.recoil, Relaxed);
                 SHARPNESS_POWER.store(result.sharpness_power, Relaxed);
                 ACTOR.store(actor, Release);
-                accepted
+                accepted.max(1)
             }
         }
     }

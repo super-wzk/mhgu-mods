@@ -16,3 +16,5 @@ pub mod quest;
 #[doc(hidden)]
 pub mod service;
 pub mod style;
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub mod sync;

@@ -1,6 +1,11 @@
-//! FZ extension +648 lets the first contact of either blade decide recoil.
-use mhfz_sdk::sync::Shared;
-use mhgu_sdk::style::action::{self, melee};
+//! Match native blade contacts to a registered style's deflection window.
+use mhgu_sdk::{
+    style::{
+        action::{self, melee},
+        rules::Deflection,
+    },
+    sync::Shared,
+};
 
 struct Window {
     actor: u32,
@@ -66,32 +71,37 @@ unsafe fn record(actor: u32, hit: u32, target: u32, part: u32, ratio: *const f32
     else {
         return;
     };
-    if target == 0 || unsafe { super::local_style(actor) }.is_none() {
+    if target == 0 {
         return;
     }
-    let (current, serial) = unsafe { (action::current(actor), contact_serial(hit)) };
-    let first_contact = WINDOW.with(|window| {
-        let Some(active) = window else { return false };
-        if !active.matches(actor, current) || active.serials[hand] != Some(serial) {
-            return false;
-        }
-        active.serials = [None; 2];
-        true
-    });
-    if !first_contact {
+    let Some(policy) = unsafe { super::local_entry(actor) }
+        .and_then(|entry| entry.rules())
+        .and_then(|rules| rules.deflection)
+    else {
         return;
-    }
-    let factor = unsafe {
-        if *((part + 10) as *const u16) & 0x2000 != 0 {
-            0.
-        } else {
-            ratio.read()
-        }
     };
-    // FZ 816FD8A2 uses a strict 0.23 threshold. Disarm even on soft flesh.
+    let (current, serial) = unsafe { (action::current(actor), contact_serial(hit)) };
+    let response = WINDOW.with(|window| {
+        let active = window.as_mut()?;
+        if !active.matches(actor, current) || active.serials[hand] != Some(serial) {
+            return None;
+        }
+        let factor = unsafe {
+            if *((part + 10) as *const u16) & 0x2000 != 0 {
+                0.
+            } else {
+                ratio.read()
+            }
+        };
+        let result = policy(factor);
+        if result != Deflection::KeepWindow {
+            active.serials = [None; 2];
+        }
+        Some(result)
+    });
     // Run GU's equipment and status callbacks outside the lock, then
     // recheck ownership before publishing the result.
-    if factor < 0.23 && !unsafe { ignores_deflection(actor, hit) } {
+    if response == Some(Deflection::Recoil) && !unsafe { ignores_deflection(actor, hit) } {
         WINDOW.with(|window| {
             if let Some(active) = window
                 .as_mut()
@@ -104,8 +114,7 @@ unsafe fn record(actor: u32, hit: u32, target: u32, part: u32, ratio: *const f32
 }
 
 // GU 2A87A8 normally takes the stronger grade across the hunter's hands.
-// Evaluate its grade-zero exemptions for this blade so a previous offhand
-// contact cannot mask the Frontier strike's first hard contact.
+// Evaluate its grade-zero exemptions for the contact that invoked the policy.
 unsafe fn ignores_deflection(actor: u32, hit: u32) -> bool {
     unsafe {
         let base = forge::mem::text_addr();
@@ -153,7 +162,7 @@ unsafe fn hunter(
     element: u32,
 ) -> u32 {
     let result = original!(manager, hit, target, part, point, actor, factor, element);
-    unsafe { record(actor, hit, target, part, factor) };
+    unsafe { notify_contact(actor, hit, target); record(actor, hit, target, part, factor) };
     result
 }
 
@@ -169,11 +178,30 @@ unsafe fn alternate(
     element: u32,
 ) -> u32 {
     let result = original!(manager, hit, target, part, point, actor, factor, element);
-    unsafe { record(actor, hit, target, part, factor) };
+    unsafe { notify_contact(actor, hit, target); record(actor, hit, target, part, factor) };
     result
 }
 
+unsafe extern "C" fn bind_contact(id:u32, callback:melee::ContactCallback){
+    if let Some(entry)=super::registered_entry(id){entry.blade_contact.store(callback as u32,core::sync::atomic::Ordering::Release);}
+}
+
+unsafe fn notify_contact(actor:u32,hit:u32,target:u32){
+    if actor==0 || target==0 || hit.wrapping_sub(actor)!=melee::BLADE_CONTACT_OFFSETS[0] {return;}
+    unsafe{
+        if let Some(entry)=super::playback_style(actor).and_then(|s| super::registered_entry(s.id)){
+            let callback=entry.blade_contact.load(core::sync::atomic::Ordering::Acquire);
+            if callback!=0 {
+                let call:melee::ContactCallback=core::mem::transmute(callback);
+                call(actor);
+            }
+        }
+    }
+}
+
 pub(super) fn install(base: u32) {
+    static CONTACT:melee::ContactService=melee::ContactService(bind_contact);
+    unsafe{melee::publish_contact(&CONTACT);}
     if unsafe { melee::publish_deflection(&API) } {
         forge::install_hook!(base, hunter);
         forge::install_hook!(base, alternate);

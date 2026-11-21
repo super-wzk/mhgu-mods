@@ -8,17 +8,19 @@ const CHARGE_JOINT: u8 = 2;
 
 pub(crate) struct ChargeEffect {
     level: u8,
+    slot: usize,
     aura_pending: u32,
     flash_pending: u32,
     played_sustain: bool,
 }
 
 impl ChargeEffect {
-    pub(crate) unsafe fn start(p: u32) -> Self {
+    pub(crate) unsafe fn start(p: u32, slot: usize) -> Self {
         unsafe {
             crate::sound::charge(p, 28);
         }
         Self {
+            slot,
             level: 0,
             aura_pending: u32::MAX,
             flash_pending: 0,
@@ -30,6 +32,7 @@ impl ChargeEffect {
         unsafe {
             if self.aura_pending != 0 {
                 self.aura_pending = route_layers(
+                    self.slot,
                     p,
                     CHARGE_ROUTE,
                     Attachment::Follow(CHARGE_JOINT),
@@ -52,6 +55,7 @@ impl ChargeEffect {
             }
             if self.flash_pending != 0 {
                 self.flash_pending = route_layers(
+                    self.slot,
                     p,
                     CHARGE_ROUTE + usize::from(level),
                     Attachment::Follow(CHARGE_JOINT),
@@ -64,6 +68,6 @@ impl ChargeEffect {
 
 impl Drop for ChargeEffect {
     fn drop(&mut self) {
-        super::stop_charge();
+        super::stop_charge(self.slot);
     }
 }

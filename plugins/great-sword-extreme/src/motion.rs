@@ -28,6 +28,14 @@ static BANKS: MotionBanks = MotionBanks::new([
     ],
 ]);
 
+pub(super) unsafe extern "C" fn preload_draw(actor: u32) {
+    unsafe {
+        BANKS.preload(actor, 1002);
+        BANKS.preload(actor, 1410);
+        crate::sound::preload_draw();
+    }
+}
+
 pub(super) static ROLL: DrawnRoll = DrawnRoll::new(1012, 1013);
 
 pub(super) unsafe fn roll_yaw(actor: u32) -> u16 {
@@ -121,7 +129,11 @@ pub(super) unsafe fn source_clip(actor: u32, packed: u16) -> Option<u16> {
 #[forge::hook(offset = 0x308834)]
 unsafe fn equipment_grip(gear: u32, player: u32, weapon: u32) -> u32 {
     unsafe {
-        if weapon == 0 && crate::battle::local(player) && at::<f32>(player, 1268) > 0. {
+        if player != 0
+            && weapon == 0
+            && at::<f32>(player, 1268) > 0.
+            && (crate::battle::local(player) || crate::battle::peer_action(player))
+        {
             // FZ 819070E2 keeps these grips until its interpolation clock
             // (+516) finishes. GU's matching clock is +1268; LMT events take
             // over afterwards, including draws started partway into a clip.

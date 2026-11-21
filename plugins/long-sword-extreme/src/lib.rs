@@ -7,8 +7,6 @@ extern crate alloc;
 #[cfg(target_arch = "arm")]
 mod battle;
 #[cfg(target_arch = "arm")]
-mod camera;
-#[cfg(target_arch = "arm")]
 mod collision;
 #[cfg(target_arch = "arm")]
 mod discharge;
@@ -104,7 +102,16 @@ unsafe extern "C" fn expand_world_contact(owner: u32, hit: u32) -> u32 {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 mod entry {
     use super::{STYLE_ID, WEAPON, battle, motion};
-    use mhgu_sdk::style::{Style, StyleRegistry};
+    use mhgu_sdk::style::{
+        Style, StyleRegistry,
+        rules::{self, Rules},
+    };
+
+    static RULES: Rules = Rules {
+        deflection: Some(mhfz_sdk::combat::deflection),
+        camera_offset: Some(mhfz_sdk::camera::offset),
+        ..Rules::EMPTY
+    };
 
     static EXTREME: Style = Style {
         id: STYLE_ID,
@@ -131,6 +138,10 @@ mod entry {
             forge::log::prelude::warn!("Extreme LS registration failed: {err:?}");
             return;
         }
+        if !rules::bind(STYLE_ID, &RULES) {
+            forge::log::prelude::warn!("Style {}: GU rule service unavailable", STYLE_ID);
+        }
+        mhfz_sdk::effects::model::install();
         let bound =
             unsafe { mhgu_sdk::style::world_contact::bind(STYLE_ID, super::expand_world_contact) };
         super::WORLD_CONTACT.store(bound, super::Relaxed);
@@ -140,6 +151,7 @@ mod entry {
         if !unsafe { mhgu_sdk::style::remote::bind(STYLE_ID, super::peer::tick) } {
             forge::log::prelude::warn!("Extreme LS: remote action playback unavailable");
         }
+        unsafe { mhgu_sdk::style::preload::bind(STYLE_ID, motion::preload_draw) };
         battle::install();
         super::hud::install();
     }

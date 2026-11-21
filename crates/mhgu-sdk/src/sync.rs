@@ -1,4 +1,4 @@
-//! Serialize Frontier state shared by game and render callbacks.
+//! Serialize state shared by game and render callbacks.
 use core::{
     cell::UnsafeCell,
     sync::atomic::{AtomicBool, Ordering},

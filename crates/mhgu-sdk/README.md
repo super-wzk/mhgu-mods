@@ -62,8 +62,10 @@ fn spawn(resource: &DirectedShellResource<'_>, launch: ShellLaunch) -> bool {
 
 GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提供 GU 已解析的公共和武器指令，`request` 处理 GU 已接受的拔刀和武器切招请求。公共动作可返回 `PASS` 交给 GU。空输入通知插件结束，actor 为 0 时代表旧猎人已失效。
 
-[remote](src/style/remote.rs) 提供 GU 玩家槽查询和远端动作状态的存储。读取远端装备前按当前名册核对猎人，角色离场、换武器或槽位更换时释放旧状态。风格插件负责根据 GU 接收的动作回放各自的招式。
+[remote](src/style/remote.rs) 提供 GU 玩家槽查询和远端动作状态的存储。读取远端装备前按当前名册核对猎人，角色离场、换武器或槽位更换时释放旧状态。风格插件负责根据 GU 接收的动作回放各自的招式。插件可以分别登记动作回放（`bind`）、逐帧观察（`observe`）和可选的动作状态收发（`bind_action_state`）。注册器校验当前武器的动作包是否有可用位，插件定义状态值的含义。
 
 [physical](src/style/physical.rs) 提供统一的物理攻击力回调登记。回调可限定在 GU 的左右刀身碰撞槽，也可覆盖同一猎人的独立武器碰撞。风格插件负责数值与生效条件。
+
+[rules](src/style/rules.rs) 为已注册的风格提供可选的格挡半角、公共动作结束条件、弹刀和镜头回调。[particle](src/style/particle.rs) 提供模型粒子绘制与释放回调的登记接口。
 
 `Style::commands` 可在 GU 装载命令表时追加一组有序的武器派生，由 GU 缓冲先接收的输入并在指定帧切换动作。`action::enter` 走 GU 的公共动作切换。已判定的单条派生可通过 `action::transition` 提交，狩技使用 `Transition::HUNTER_ART`。`action::play_motion` 使用猎人的原生动作编码。`Attack::submit` 把动作值和形状交给 GU 的攻击构造器及武器修正。注册器在大剑的首个有效攻击事件处理兽魂附身。`guard::Policy` 提供一次格挡结果，注册器负责把结果交给 GU 的受击、斩味和回正流程，内容插件可以用 `guard::take` 进入后续招式。

@@ -24,12 +24,7 @@ impl<const GROUPS: usize> MotionBanks<GROUPS> {
     pub unsafe fn encode(&self, actor: u32, group: usize, slot: u8) -> Option<u16> {
         let slot = u32::from(slot);
         unsafe {
-            let equipment = ((actor + 5060) as *const u32).read();
-            if equipment == 0 {
-                return None;
-            }
-            let sex = usize::from(((equipment + 1240) as *const u8).read());
-            let resource = self.resource(sex, group, slot)?;
+            let resource = self.resource(actor, group, slot)?;
             let mut free = None;
             for bank in (8..16).rev() {
                 let r = ((actor + 3844 + 4 * bank) as *const u32).read();
@@ -46,6 +41,14 @@ impl<const GROUPS: usize> MotionBanks<GROUPS> {
             bind(actor, resource, bank);
             Some((bank * 256 + slot) as u16)
         }
+    }
+
+    /// Cache a motion resource without taking a runtime bank on the hunter.
+    ///
+    /// # Safety
+    /// Call on the game thread with a live hunter and initialized resource manager.
+    pub unsafe fn preload(&self, actor: u32, group: usize, slot: u8) {
+        unsafe { self.resource(actor, group, u32::from(slot)) };
     }
 
     /// Resolve the caller's group from a packed GU motion ID.
@@ -68,10 +71,15 @@ impl<const GROUPS: usize> MotionBanks<GROUPS> {
         })
     }
 
-    unsafe fn resource(&self, sex: usize, group: usize, slot: u32) -> Option<u32> {
-        let cache = self.resources.get(sex)?.get(group)?;
-        let path = self.paths[sex][group];
+    unsafe fn resource(&self, actor: u32, group: usize, slot: u32) -> Option<u32> {
         unsafe {
+            let equipment = ((actor + 5060) as *const u32).read();
+            if equipment == 0 {
+                return None;
+            }
+            let sex = usize::from(((equipment + 1240) as *const u8).read());
+            let cache = self.resources.get(sex)?.get(group)?;
+            let path = self.paths[sex][group];
             let has_clip: unsafe extern "C" fn(u32, u32) -> u32 =
                 core::mem::transmute(crate::memory::entry(0xb49e54));
             let cached = cache.load(Ordering::Acquire);

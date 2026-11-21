@@ -23,6 +23,7 @@ const CHARGE_AURA_MESH: u16 = 66;
 
 #[derive(Clone, Copy)]
 enum WeaponEffect {
+    SwitchAxe,
     GreatSword,
     DualBlades,
     LongSword,
@@ -95,13 +96,30 @@ pub fn long_sword(dat: &Path, out: &Path, gu_weapon: &Path) -> Result<()> {
     convert(dat, out, gu_weapon, WeaponEffect::LongSword)
 }
 
+pub fn switch_axe(dat: &Path, out: &Path, gu_weapon: &Path) -> Result<()> {
+    convert(dat, out, gu_weapon, WeaponEffect::SwitchAxe)
+}
+
 pub fn dual_blades(dat: &Path, out: &Path, gu_weapon: &Path) -> Result<()> {
     convert(dat, out, gu_weapon, WeaponEffect::DualBlades)
 }
 
+const SWITCH_AXE_PHIAL: &[u16] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31];
+
 fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect) -> Result<()> {
     let (namespace, effects): (_, &[(u16, &[u16])]) = match weapon_effect {
         WeaponEffect::GreatSword => ("frontier_gs", BANKS),
+        WeaponEffect::SwitchAxe => ("frontier_sa", &[
+            (4013, &[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27]),
+            (4014, &[0,1,2,3,4,5,6,7,8,10,11,12,13,16,17,18,19,20,21,22,23,24,25,26]),
+            (4015, &[0,1,2,3,4,13]),
+            (4035, &[0,5,6,7,8,10,11,12,13,14,15,16,17]),
+            (4036, &[0,5,6,7,8,10,11,12,13,14,15,16,17]),
+            (4019, SWITCH_AXE_PHIAL),
+            (4018, SWITCH_AXE_PHIAL),
+            (4016, SWITCH_AXE_PHIAL),
+            (4017, SWITCH_AXE_PHIAL),
+        ]),
         WeaponEffect::LongSword => (
             "frontier_ls",
             &[
@@ -158,6 +176,19 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
     let mhfdat = pac::decode(read(&dat.join("mhfdat.bin"))?)?;
     let dual_blades = matches!(weapon_effect, WeaponEffect::DualBlades);
     let weapon_id = match weapon_effect {
+        WeaponEffect::SwitchAxe => {
+            let mut keys = Vec::new();
+            for &(bank, selectors) in effects {
+                for selector in selectors {
+                    keys.extend(bank.to_le_bytes());
+                    keys.extend(selector.to_le_bytes());
+                }
+            }
+            save(&out.join("selectors.bin"), keys)?;
+            playback.footfalls()?;
+            playback.switch_axe_cartridge()?;
+            12
+        }
         WeaponEffect::GreatSword => {
             playback.bank(&load_bank(4022)?, 4022, &[4, 9, 11, 12, 13])?;
             playback.bank(&load_bank(4035)?, 4035, &[3, 4, 14])?;
@@ -218,13 +249,6 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
         for (vertex, uv) in mesh.vertices.iter_mut().zip(original_uv) {
             vertex.uv = glam::Vec2::from_array(*uv);
         }
-        let (index, strip) = mesh.strips.pop_first().context("missing FX draw strip")?;
-        ensure!(
-            mesh.strips.is_empty(),
-            "unsupported layered material on FX mesh {id}"
-        );
-        mesh.strips.insert(0, strip);
-        let mat = mats.get(index as usize).context("missing FX material")?;
         let render = model
             .rendering_block(id)?
             .context("missing FX render state")?;
@@ -237,45 +261,54 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
             1 => false,
             mode => anyhow::bail!("unsupported FX texture addressing {mode}"),
         };
-        let [ordinal] = mat.texture_indices.as_slice() else {
-            anyhow::bail!("expected one effect atlas");
-        };
-        let img = textures
-            .get(*ordinal as usize)
-            .context("missing FX texture binding")?
-            .image_id;
         let path = format!(r"effect\{namespace}\m{id}");
-        let atlas = format!(r"effect\{namespace}\t{img}");
-        let png = match atlases.entry(img) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => {
-                let png = image::decode(&pac::member(&images, img as usize)?)?;
+        let mut names = Vec::new();
+        let mut material_atlases = Vec::new();
+        let mut images_used = Vec::new();
+        for (index, strip) in std::mem::take(&mut mesh.strips) {
+            mesh.strips.insert(u32::try_from(names.len())?, strip);
+            let mat = mats.get(index as usize).context("missing FX material")?;
+            let [ordinal] = mat.texture_indices.as_slice() else {
+                anyhow::bail!("expected one effect atlas");
+            };
+            let img = textures
+                .get(*ordinal as usize)
+                .context("missing FX texture binding")?
+                .image_id;
+            let atlas = format!(r"effect\{namespace}\t{img}");
+            let png = match atlases.entry(img) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let png = image::decode(&pac::member(&images, img as usize)?)?;
+                    assets.push(Asset {
+                        name: atlas.clone(),
+                        kind: arc::TEXTURE,
+                        data: tex::rgba8_unmipped(png.width, png.height, &png.rgba)?,
+                    });
+                    entry.insert(png)
+                }
+            };
+            let material_atlas = if id == usize::from(CHARGE_AURA_MESH) {
+                let masked_atlas = format!("{path}_alpha");
                 assets.push(Asset {
-                    name: atlas.clone(),
+                    name: masked_atlas.clone(),
                     kind: arc::TEXTURE,
-                    data: tex::rgba8_unmipped(png.width, png.height, &png.rgba)?,
+                    data: charge_aura_texture(png)?,
                 });
-                entry.insert(png)
-            }
-        };
-        let material_atlas = if id == usize::from(CHARGE_AURA_MESH) {
-            let masked_atlas = format!("{path}_alpha");
-            assets.push(Asset {
-                name: masked_atlas.clone(),
-                kind: arc::TEXTURE,
-                data: charge_aura_texture(png)?,
-            });
-            masked_atlas
-        } else {
-            atlas
-        };
-        let name = model::material_name(index as usize);
+                masked_atlas
+            } else {
+                atlas
+            };
+            let name = model::material_name(index as usize);
+            names.push(name);
+            images_used.push(img);
+            material_atlases.push(material_atlas);
+            bindings.push_str(&format!("{id}\t{index}\t0\t{img}\n"));
+        }
         assets.push(Asset {
-            name: path.clone(),
-            kind: arc::MATERIAL,
-            data: mhgu_resource::mrl::effect(&mrl, &name, &material_atlas, wrap)?,
+            name: path.clone(), kind: arc::MATERIAL,
+            data: mhgu_resource::mrl::effect_set(&mrl,&names,&material_atlases,wrap)?,
         });
-        bindings.push_str(&format!("{id}\t{index}\t0\t{img}\n"));
         // FMOD stores colours as floating-point byte values (0..255).
         let colors = obj.colors().map(|c| {
             c.values
@@ -283,13 +316,14 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
                 .map(|rgba| rgba.map(|x| x / 255.))
                 .collect::<Vec<_>>()
         });
-        let names = [name];
         assets.push(Asset {
             name: path,
             kind: arc::MODEL,
             data: mhgu_resource::model::static_colored(&mesh, &names, colors.as_deref())?,
         });
         for sheet in playback.sheets.iter().filter(|s| usize::from(s.mesh) == id) {
+            let [img] = images_used.as_slice() else { anyhow::bail!("animated atlas spans multiple materials on FX mesh {id}"); };
+            let png = atlases.get(img).context("missing FX sheet image")?;
             let path = sheet.path(namespace);
             assets.push(Asset {
                 name: path.clone(),
@@ -345,6 +379,7 @@ fn motion_fx(data: &[u8], weapon_id: usize) -> Result<Vec<u8>> {
                 (_, _, 8) => false, // 817BD8FE immediately returns.
                 (0, 1465 | 1476, 5..=7) => (bank, selector) != (4022, 8), // Alpha stays zero.
                 (6, 1444..=1447, 0 | 3 | 5 | 7) | (6, 1450, 0) => true,
+                (12, _, 1 | 5..=7) => true,
                 (7, _, _) => match (kind, bank, selector, row[8], row[9]) {
                     (0, 5, _, 0, 0)
                     | (1, 0 | 3 | 4 | 7 | 10 | 20, 100, 0 | 5 | 8 | 10, 0)

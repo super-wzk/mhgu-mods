@@ -8,6 +8,7 @@
 | [crates/mhfz-sdk](../crates/mhfz-sdk/README.md) | 极型武器共用的 Frontier 动作程序、输入、音效和粒子适配，依赖 mhgu-sdk。 |
 | [plugins/style-registry](../plugins/style-registry/README.md) | 扩展装备箱的原版风格页，按武器保存选择，转接公共动作、狩技、命中、防御和粒子绘制。 |
 | [plugins/great-sword-extreme](../plugins/great-sword-extreme/README.md) / [plugins/dual-blades-extreme](../plugins/dual-blades-extreme/README.md) / [plugins/long-sword-extreme](../plugins/long-sword-extreme/README.md) | 动作程序、风格输入与派生、专属音效和特效。双剑还提供刃打和火焰槽 HUD。 |
+| [plugins/switch-axe-extreme](../plugins/switch-axe-extreme/README.md) | 极之型斩斧 F 的操作、双槽与吸收机制、当前移植缺口和离线回放。 |
 | [plugins/monster-registry](../plugins/monster-registry/README.md) / [plugins/monster-espinas](../plugins/monster-espinas/README.md) | 独立物种、任务和怪物行为的接入实例。 |
 | [tools](../tools/) | 宿主资源转换 CLI。`mhf-resource` 读 FZ 格式，`mhgu-resource` 读写 GU 格式，`src/hunter.rs` 等负责具体移植映射。 |
 
@@ -31,6 +32,7 @@ python3 plugins/style-registry/package.py
 python3 plugins/great-sword-extreme/package.py "$MHFZ_DAT"
 python3 plugins/dual-blades-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 python3 plugins/long-sword-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
+python3 plugins/switch-axe-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 ```
 
 打包脚本先把源数据转换到 `target/assets/`，再构建 NRO 并组装 `dist/<插件名>/romfs/nativeNX`。动作程序由 `include_bytes!` 编入 NRO。资源已经生成且本次只改 Rust 时，可以用 `(cd plugins/dual-blades-extreme && cargo forge build --release)` 增量构建，产物在插件目录的 `dual_blades_extreme.nro`。安装时取这次生成的 NRO，或先把它同步到 `dist` 中的同名文件。
@@ -40,6 +42,8 @@ python3 plugins/long-sword-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 已有导出时可用 `rg -n 'func-address: 0x2b72d4' mhgu/out/decompiled.c` 定位攻击构造器，再跟到调用者、虚表或数据资源。记录游戏版本、函数相对地址、输入与返回语义。反编译推断不确定时才核对该入口的指令。带浮点数的原生调用还要确认参数走通用寄存器还是 VFP 寄存器，优先复用 SDK 现有的桥接函数。
 
 运行时在所属游戏线程使用活对象及借用指针。注册描述符和提供给引擎长期读取的表使用常驻存储。切换动作、场景或角色时，按实际生命周期清理插件状态，确认旧对象仍有效后再访问它。
+
+项目尚未发布，SDK 服务默认使用 V1。修改接口签名后，一起重建并安装注册器与使用该接口的插件。
 
 ## 安装和确认
 

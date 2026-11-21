@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parents[1]
 sys.path.insert(0, str(REPO / "plugins/great-sword-extreme/tests"))
 from verify_assets import Machine, MEM
-from verify_style import DECODE, ENCODE, MANAGER, boot, hunters, load_registered_style, service, setup_controller
+from verify_style import DECODE, ENCODE, MANAGER, SUBMIT_MODEL, boot, hunters, load_registered_style, service, setup_controller
 from unicorn import arm_const
 
 NX = ROOT / "dist/long-sword-extreme/romfs/nativeNX"
@@ -658,6 +658,7 @@ def attack_rolls(g, actor, controller, set_action):
 def startup_camera(elf):
     # All three styles loaded, before a hunter exists or any style is selected.
     g = boot(elf, b"[Weapons]\n", ("registry", "sword"))
+    submit = g.hooks[SUBMIT_MODEL]
     create = g.hook
 
     def hook(ret, addr, detour, saved):
@@ -679,6 +680,7 @@ def startup_camera(elf):
         exports = g.load(path, base)
         for entry in ("forge_onLoad", "forge_onInit"):
             g.run(exports[entry], MANAGER)
+        assert g.hooks[SUBMIT_MODEL] == submit
 
     view = g.alloc(160)
     vtable = 0x1730C28

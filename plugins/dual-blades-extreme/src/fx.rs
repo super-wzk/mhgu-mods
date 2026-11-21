@@ -8,6 +8,12 @@ use mhgu_sdk::style::{
 mod trail;
 
 static PARTICLES: Bank = Bank::new(c"effect\\frontier_db\\particles", ROUTES);
+static PEER_BANKS: [Bank; 4] = [
+    Bank::new(c"effect\\frontier_db\\peer1", ROUTES),
+    Bank::new(c"effect\\frontier_db\\peer2", ROUTES),
+    Bank::new(c"effect\\frontier_db\\peer3", ROUTES),
+    Bank::new(c"effect\\frontier_db\\peer4", ROUTES),
+];
 const ROUTES: &[u8] = include_bytes!("../target/assets/effects/routes.bin");
 const MOTION_ROWS: &[[u8; 18]] = include_bytes!("../target/assets/effects/motion_fx.bin")
     .as_chunks::<18>()
@@ -24,7 +30,11 @@ const SLIDE_SELECTORS: [u16; 5] = [2, 5, 6, 12, 13];
 const SLIDE_DRY: usize = 17;
 const SLIDE_WET: usize = SLIDE_DRY + SLIDE_SELECTORS.len();
 const SWING_ROUTE: usize = SLIDE_WET + SLIDE_SELECTORS.len();
-static SWINGS: TrackedUnits<2> = TrackedUnits::new();
+static SWINGS: TrackedUnits<10> = TrackedUnits::new();
+
+unsafe fn stop_swings(slot: usize) {
+    unsafe { SWINGS.stop_slots(2 * slot..2 * slot + 2) };
+}
 
 extern "C" fn release(unit: u32) {
     SWINGS.forget(unit);
@@ -47,6 +57,16 @@ pub(super) struct Effects {
 }
 
 impl Effects {
+    pub(super) fn set_slot(&mut self, slot: usize) {
+        self.history.slot = slot;
+    }
+    fn bank(&self) -> &'static Bank {
+        match self.history.slot.checked_sub(1) {
+            Some(index) => &PEER_BANKS[index],
+            None => &PARTICLES,
+        }
+    }
+
     pub(super) fn seek(&mut self, clip: u16, frame: f32) {
         self.motion.seek(clip, frame);
     }
@@ -64,11 +84,17 @@ impl Effects {
                     (0, 2) => {
                         let duration = 2. * f32::from(e.selector + 2) - late;
                         if duration > 0. {
-                            SWINGS.stop();
+                            stop_swings(self.history.slot);
                             self.history.swing(actor, self.phase, duration);
                             let anchor = Anchor::World(read(actor, 64), 0);
                             for hand in 0..2 {
-                                SWINGS.emit_layers(&PARTICLES, SWING_ROUTE + hand, anchor, 1, hand);
+                                SWINGS.emit_layers(
+                                    self.bank(),
+                                    SWING_ROUTE + hand,
+                                    anchor,
+                                    1,
+                                    2 * self.history.slot + hand,
+                                );
                             }
                         }
                     }
@@ -149,7 +175,7 @@ impl Effects {
                     },
                 );
                 let route = DEMON_TRAIL + hand * DEMON_PHASES + phase_index;
-                PARTICLES.emit(route, Anchor::World(read(actor, 64), 0));
+                self.bank().emit(route, Anchor::World(read(actor, 64), 0));
             }
         }
         // The final two 30 Hz keys overlap the next emission as they fade out.
@@ -159,7 +185,8 @@ impl Effects {
     pub(super) unsafe fn sharpen_slash(&mut self, actor: u32, ticks: u16) {
         unsafe {
             self.history.sharpen(actor, self.phase, ticks);
-            PARTICLES.emit(SHARPEN_SLASH, Anchor::World(read(actor, 64), 0));
+            self.bank()
+                .emit(SHARPEN_SLASH, Anchor::World(read(actor, 64), 0));
         }
     }
 

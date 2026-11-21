@@ -14,6 +14,11 @@ use mhgu_sdk::{
 };
 
 static PARTICLES: Bank = Bank::new(c"effect\\frontier_ls\\particles", ROUTES);
+
+pub(super) unsafe fn preload_draw() {
+    // Sheathed deflect (1450) emits its first particle at frame 6.
+    unsafe { PARTICLES.resource() };
+}
 const ROUTES: &[u8; 320] = include_bytes!("../target/assets/effects/routes.bin");
 
 const fn route_layers(route: usize) -> usize {

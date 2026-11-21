@@ -26,7 +26,7 @@ const MOTION_ROWS: &[[u8; 18]] = include_bytes!("../target/assets/effects/motion
     .as_chunks::<18>()
     .0;
 static PARTICLES: Bank = Bank::new(c"effect\\frontier_gs\\particles", ROUTES);
-static CHARGE_UNITS: TrackedUnits<4> = TrackedUnits::new();
+static CHARGE_UNITS: TrackedUnits<20> = TrackedUnits::new();
 
 unsafe fn field<T: Copy>(p: u32, off: u32) -> T {
     unsafe { ((p + off) as *const T).read_unaligned() }
@@ -66,13 +66,13 @@ unsafe fn route(p: u32, route: usize, mode: Attachment) {
     }
 }
 
-unsafe fn route_layers(p: u32, route: usize, mode: Attachment, pending: u32) -> u32 {
+unsafe fn route_layers(slot: usize, p: u32, route: usize, mode: Attachment, pending: u32) -> u32 {
     unsafe {
         let Some(anchor) = attachment(p, mode) else {
             return pending;
         };
         if route == CHARGE_ROUTE {
-            CHARGE_UNITS.emit_layers(&PARTICLES, route, anchor, pending, 0)
+            CHARGE_UNITS.emit_layers(&PARTICLES, route, anchor, pending, 4 * slot)
         } else {
             PARTICLES.emit_layers(route, anchor, pending, |_, _| {})
         }
@@ -212,8 +212,8 @@ pub(super) unsafe fn radiance_ready(p: u32) {
     // Frontier binds 4022:21 to hunter node 18, retargeted to GU joint 12.
     unsafe { route(p, 8, Attachment::Follow(12)) }
 }
-fn stop_charge() {
-    unsafe { CHARGE_UNITS.stop() };
+fn stop_charge(slot: usize) {
+    unsafe { CHARGE_UNITS.stop_slots(4 * slot..4 * slot + 4) };
 }
 
 extern "C" fn release_charge(unit: u32) {

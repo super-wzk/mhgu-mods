@@ -1,8 +1,9 @@
 """Focused checks against GU's ARM EFL loader, emitters and draw router."""
 import math
 import struct
-from unicorn import arm_const as arm
-from verify_style import Game, REPO, NX, boot, effect_routes, hunters, DRAW_ROUTE
+from typing import NamedTuple
+from unicorn import UC_HOOK_CODE, arm_const as arm
+from verify_style import Game, REPO, NX, boot, effect_routes, hunters, DRAW_ROUTE, SUBMIT_MODEL
 
 
 def resources(g):
@@ -85,13 +86,23 @@ def binding_stack(g):
     print("GU draw at binding stack depths 4 and 5 preserves live and outer bindings")
 
 
-def emission(g):
+class ModelDraw(NamedTuple):
+    position: tuple[float, float, float]
+    uv: tuple[float, float]
+    normal: tuple[float, float, float]
+    basis_x: tuple[float, float, float]
+    rgb: tuple[int, int, int]
+    alpha: int
+    flags: int
+
+
+def model_renderer(g, nx, depth_scene=False):
     # Only host memory, resource lookup and math imports are supplied here.
     # The EFL loader, joint setup, emitter allocation and particle ticks are GU code.
     for addr in (0x13EFD7C, 0x13EFDAC, 0x13EFDC4):
         g.stub(addr, lambda dest, n, *_: g.cpu.mem_write(dest, bytes(n)) or dest)
     g.stub(0x13EFEFC, lambda dest, n, value, _: g.cpu.mem_write(dest, bytes([value & 255]) * n) or dest)
-    for addr in (0x13EFE30, 0x13EFDD0):
+    for addr in (0x13EFE30, 0x13EFDD0, 0x13EFFF8):
         g.stub(addr, lambda dest, src, n, _: g.cpu.mem_write(dest, bytes(g.cpu.mem_read(src, n))) or dest)
     g.stub(0x887660, lambda *_: 0)
     g.stub(0x887648, lambda *_: 0)
@@ -134,30 +145,43 @@ def emission(g):
     g.put(model + 120, 1)
     # The shared draw hook uses GU's five binding snapshots and depth word.
     context, cache, camera = g.alloc(0x308E8), g.alloc(640), g.alloc(64)
+    if depth_scene:
+        view = g.alloc(0x100)
+        g.put(context + 0xD7C, view)
+        camera = view + 0xB0
+        for address, z in ((view + 0x70, -1000), (camera, 1000)):
+            g.cpu.mem_write(address, struct.pack(
+                "<16f", 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,z,1))
     g.put(cache + 112, model)
     g.put(cache + 140, 1)
     g.stub(0xBAE520, lambda *_: cache)
     g.stub(0xA74880, lambda *_: 0)
     g.stub(0xA9AF40, lambda *_: 0)
     g.stub(0x885824, lambda *_: camera)
-    normals = []
     submissions = []
 
     def submit(effect, ctx, mesh, matrix):
-        normals.append(struct.unpack("<3f", g.cpu.mem_read(matrix + 32, 12)))
         sp = g.cpu.reg_read(arm.UC_ARM_REG_SP)
         uv = g.get(sp + 16)
-        submissions.append((struct.unpack("<3f", g.cpu.mem_read(matrix + 48, 12)),
-                            struct.unpack("<2f", g.cpu.mem_read(uv, 8))))
+        red, green, blue, alpha = g.cpu.mem_read(g.get(sp), 4)
+        submissions.append(ModelDraw(
+            position=struct.unpack("<3f", g.cpu.mem_read(matrix + 48, 12)),
+            uv=struct.unpack("<2f", g.cpu.mem_read(uv, 8)),
+            normal=struct.unpack("<3f", g.cpu.mem_read(matrix + 32, 12)),
+            basis_x=struct.unpack("<3f", g.cpu.mem_read(matrix, 12)),
+            rgb=(red, green, blue),
+            alpha=alpha,
+            flags=g.get(g.get(sp + 8) + 4),
+        ))
         return 0
 
-    g.stub(0xC90380, submit)
+    g.stub(getattr(g, "originals", {}).get(SUBMIT_MODEL, SUBMIT_MODEL), submit)
     manager = obj(4)
     g.put(0x2126A64, manager)
 
     def load(owner, dti, name, flags):
         assert dti == 0x21251C8 and flags == 1
-        path = NX / (g.string(name).replace("\\", "/") + ".mod")
+        path = nx / (g.string(name).replace("\\", "/") + ".mod")
         assert path.is_file(), path
         return model
 
@@ -166,6 +190,24 @@ def emission(g):
     data = b""
     slot(stream, 76, lambda *_: len(data))
     slot(stream, 52, lambda owner, dest, n, _: g.cpu.mem_write(dest, data[:n]) or n)
+
+    def load_efl(raw):
+        nonlocal data
+        data = raw
+        resource = g.alloc(160)
+        assert g.run(0xB5C5CC, resource, stream) == 1
+        return resource
+
+    def draw(generator):
+        submissions.clear()
+        g.run(0xA956D8, generator, context, 256)
+        return tuple(submissions)
+
+    return load_efl, camera, draw
+
+
+def emission(g):
+    load_efl, camera, draw = model_renderer(g, NX)
     routes = effect_routes()
     fourth, third = routes[1], routes[2]
     release, ready, charge = routes[7:10]
@@ -195,8 +237,7 @@ def emission(g):
             continue
         following = layer in ready
         counter = layer in counter_layers or layer in blade_layers
-        resource = g.alloc(160)
-        assert g.run(0xB5C5CC, resource, stream) == 1
+        resource = load_efl(data)
         unit = g.alloc(528)
         g.run(0x9B8DF8, unit)
         g.put(unit + 244, resource)
@@ -227,33 +268,27 @@ def emission(g):
             g.run(0x9B975C, unit)
             g.run(0xA94C10, gen)
             if layer == debris and frame in (2, 3):
-                submissions.clear()
-                g.run(0xA956D8, gen, context, 256)
-                (position, _), = submissions
-                debris_positions.append(position)
+                packet, = draw(gen)
+                debris_positions.append(packet.position)
             depth_age = frame + 1 - (6 if layer == release[5] else 0)
             if layer in depth_layers and depth_age in (6, 7, 8):
                 g.cpu.mem_write(camera, struct.pack(
                     "<16f", 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,1000,1))
-                submissions.clear()
-                g.run(0xA956D8, gen, context, 256)
-                (position, _), = submissions
-                assert math.dist(position, (0, 0, 62. * (depth_age - 6))) < 0.01, (
-                    layer, depth_age, position)
+                packet, = draw(gen)
+                assert math.dist(packet.position, (0, 0, 62. * (depth_age - 6))) < 0.01, (
+                    layer, depth_age, packet.position)
             if (following and frame in (6, 9)) or (layer == release[2] and frame in (3, 5)):
                 x = 180 if following and frame >= 8 else 0
                 g.cpu.mem_write(camera, struct.pack("<16f", 1,0,0,0, 0,1,0,0, 0,0,1,0, x,0,1000,1))
-                submissions.clear()
-                g.run(0xA956D8, gen, context, 256)
-                (position, uv), = submissions
+                packet, = draw(gen)
                 if following:
-                    assert abs(position[0] - x) < 0.01, (layer, frame, position)
+                    assert abs(packet.position[0] - x) < 0.01, (layer, frame, packet.position)
                 # Independent source lifetimes. GU evaluates age 1 on the first tick.
                 life = g.get(g.get(resource + 104) + (struct.unpack_from("<I", data, 56)[0] >> 8) + 4)
                 cols = math.ceil(math.sqrt(life + 1))
                 rows = math.ceil((life + 1) / cols)
                 age = frame + 1
-                assert math.dist(uv, ((age % cols) / cols, (age // cols) / rows)) < 1e-6, (layer, frame, uv)
+                assert math.dist(packet.uv, ((age % cols) / cols, (age // cols) / rows)) < 1e-6, (layer, frame, packet.uv)
             if frame == delay + 4 and layer in uppercut_mesh:
                 mesh = uppercut_mesh[layer]
                 assert g.string(g.get(gen + 52) + 80) == rf"effect\frontier_gs\m{mesh}"
@@ -263,14 +298,12 @@ def emission(g):
                     g.cpu.mem_write(camera, struct.pack(
                         "<16f", c, 0, -s, 0, s*b, a, c*b, 0, s*a, -b, c*a, 0, 0, 0, 0, 1,
                     ))
-                    normals.clear()
-                    submissions.clear()
-                    g.run(0xA956D8, gen, context, 256)
-                    normal, = normals
+                    packet, = draw(gen)
+                    normal = packet.normal
                     if fourth_wave:
                         local_x, local_z = offsets[fourth.index(layer) // 3]
                         rise = 0 if mesh == 0 else 5 * 200 / 32
-                        (world, _), = submissions
+                        world = packet.position
                         assert math.dist(world, (1200 + local_z, 85 + rise, -700 - local_x)) < 0.01, (layer, world)
                     expected = (s, 0, c) if mesh == 0 else (s*a, -b, c*a)
                     assert math.dist([v / math.hypot(*normal) for v in normal], expected) < 0.001
@@ -285,9 +318,7 @@ def emission(g):
                 scaled = all(v != 0 for v in size) if counter else all(v > 0 for v in size)
                 if alpha > 0 and scaled and not visible:
                     if counter:
-                        submissions.clear()
-                        g.run(0xA956D8, gen, context, 256)
-                        assert submissions, path
+                        assert draw(gen), path
                         mesh = NX / g.string(g.get(gen + 52) + 80).replace("\\", "/")
                         material = mesh.with_suffix(".mrl").read_bytes()
                         tex_slot = struct.unpack_from("<I", material, 20)[0] + 12
@@ -329,9 +360,86 @@ def draw(g):
     print("GU native X+A command and draw routes: idle, walking, sprinting and isolation passed")
 
 
+def soft_particles(g):
+    load, _, draw = model_renderer(g, NX, depth_scene=True)
+    layer = effect_routes()[8][1]
+    data = (NX / f"effect/frontier_gs/e{layer}.efl").read_bytes()
+    unit = g.alloc(528)
+    g.run(0x9B8DF8, unit)
+    g.put(unit + 244, load(data))
+    assert g.run(0x9BDA64, unit) == 1
+    gen = g.get(unit + 496)
+    g.put(unit + 272, 1)
+    params = g.get(gen + 52)
+    assert g.cpu.mem_read(params + 136, 3) == b"FZF"
+    assert abs(struct.unpack("<f", g.cpu.mem_read(params + 140, 4))[0] - .03) < 1e-7
+    for _ in range(25):
+        g.run(0x9B9668, unit)
+        g.run(0xA5A48C, gen)
+        g.run(0x9B975C, unit)
+        g.run(0xA94C10, gen)
+
+    # Unicorn runs NEON VNEG.F32, but MHGURecomp aborts on the SIMD encoding.
+    # Mask off the D, M and Q bits so all register assignments are checked.
+    def check_instruction(cpu, address, size, _):
+        word, = struct.unpack("<I", cpu.mem_read(address, 4))
+        assert word & 0xFFBF0F90 != 0xF3B90780, f"unsupported NEON VNEG.F32 at {address:#x}"
+
+    provider = g.hooks[SUBMIT_MODEL] & ~0xFFFFF
+    g.cpu.hook_add(
+        UC_HOOK_CODE, check_instruction, begin=provider, end=provider + 0xFFFFF,
+    )
+
+    # Compare the same live particle's original and adapted draw packets.
+    signature = bytes(g.cpu.mem_read(params + 136, 8))
+    path_start = bytes(g.cpu.mem_read(params + 80, 1))
+    g.cpu.mem_write(params + 136, b"\0" * 8)
+    g.cpu.mem_write(params + 80, b"_")
+    original, = draw(gen)
+    g.cpu.mem_write(params + 80, path_start)
+    expected_rgb = tuple((channel * 7 + 5) // 10 for channel in original.rgb)
+    assert expected_rgb != original.rgb
+    # GU A956D8 passes particle + 24 to the draw. B007FC reads bits 5-15.
+    node = g.get(gen + 176)
+    particle_flags = g.get(node + 24)
+    for selector in (0, 1, 6):
+        g.put(node + 24, (particle_flags & ~0xFFE0) | (selector << 5))
+        full, = draw(gen)
+        assert full.rgb == (original.rgb if selector == 6 else expected_rgb), (selector, full)
+        assert full.alpha == original.alpha
+    g.put(node + 24, particle_flags)
+    g.cpu.mem_write(params + 136, signature)
+    # FZ HD pixel shader 0x37 divides the normalized depth delta by c165.x.
+    for threshold in (.03, .01):
+        g.cpu.mem_write(params + 140, struct.pack("<f", threshold))
+        near, far = draw(gen)
+        assert near.rgb == far.rgb == expected_rgb
+        assert near.alpha + far.alpha == original.alpha
+        assert not (near.flags | far.flags) & 0x18
+        assert near.uv == far.uv == original.uv
+        for sample, fraction in ((near, .25), (far, .75)):
+            expected = threshold * fraction / 0.00020028039580211043
+            delta = original.position[2] - sample.position[2]
+            assert abs(delta - expected) < .001, (threshold, delta, expected)
+            assert abs(math.hypot(*sample.basis_x) / math.hypot(*original.basis_x)
+                       - (1000 - sample.position[2]) / (1000 - original.position[2])) < .00001
+
+    # Changing the seeds exercises both mirror axes, even with fade off.
+    g.cpu.mem_write(params + 139, b"\x03" + bytes(4))
+    g.cpu.mem_write(node + 272, struct.pack("<2f", .25, .25))
+    left, = draw(gen)
+    g.cpu.mem_write(node + 272, struct.pack("<2f", .75, .75))
+    right, = draw(gen)
+    assert left.basis_x == tuple(-v for v in right.basis_x)
+    assert left.position == right.position
+    assert left.alpha == right.alpha == original.alpha
+    print("GU model submissions: RGB gain, blend isolation, depth and stable mirror passed")
+
+
 if __name__ == "__main__":
     elf = (REPO / "mhgu/main.elf").read_bytes()
     resources(Game(elf))
-    binding_stack(boot(elf, None, order=("registry",)))
+    binding_stack(boot(elf, None))
     emission(boot(elf, b"[Weapons]\n0=1\n"))
+    soft_particles(boot(elf, None))
     draw(boot(elf, b"[Weapons]\n0=1\n"))

@@ -35,9 +35,10 @@ impl Roster {
     }
 
     pub fn peer_index(&self, actor: u32) -> Option<usize> {
-        (actor != 0 && actor != self.local)
-            .then(|| self.players.iter().position(|&p| p == actor))
-            .flatten()
+        if actor == 0 || actor == self.local {
+            return None;
+        }
+        self.players.iter().position(|&p| p == actor)
     }
 }
 
@@ -76,6 +77,24 @@ impl<T> PeerStates<T> {
         (unsafe { hunter::equipped_weapon(actor) } == Some(weapon)).then_some(actor)
     }
 
+    /// Retire departed hunters before visiting peers that still wield this weapon.
+    /// # Safety
+    /// Call once per game frame on the game thread.
+    pub unsafe fn visit_live(&self, weapon: u8, mut visit: impl FnMut(usize, u32, &mut T)) {
+        let roster = unsafe { Roster::current() };
+        for index in 0..PLAYER_COUNT {
+            let actor = roster
+                .as_ref()
+                .and_then(|r| unsafe { self.live(index, r, weapon) })
+                .unwrap_or(0);
+            self.update(index, actor, |saved, _| {
+                if let Some(battle) = saved {
+                    visit(index, actor, battle);
+                }
+            });
+        }
+    }
+
     /// `actor` is validated by the caller against the current roster and equipment.
     /// Zero retires the slot. The callback runs only when the slot is exclusively held.
     pub fn update(&self, index: usize, actor: u32, visit: impl FnOnce(&mut Option<T>, bool)) {
@@ -105,23 +124,60 @@ const NAME: &core::ffi::CStr = c"mhgu::StyleRemoteActionV1";
 const MAGIC: u32 = u32::from_le_bytes(*b"SRA1");
 
 pub type Tick = unsafe extern "C" fn(actor: u32, state: u8);
+/// A per-frame observer for peer actions that return to GU's native dispatcher.
+pub type Observe = unsafe extern "C" fn(local: u32);
+
+/// Optional state carried by a style's GU action packets. Encode 0..=7 to
+/// include a value, or return `u8::MAX` to omit it. Decode receives
+/// `u8::MAX` when the sender omitted the value.
 #[repr(C)]
-pub struct Service(pub unsafe extern "C" fn(u32, Tick));
+pub struct ActionState {
+    pub encode: unsafe extern "C" fn(actor: u32) -> u8,
+    pub decode: unsafe extern "C" fn(actor: u32, bits: u8),
+}
+
+#[doc(hidden)]
+#[repr(C)]
+pub struct Service {
+    pub bind: unsafe extern "C" fn(u32, Tick),
+    pub observe: unsafe extern "C" fn(u32, Observe) -> bool,
+    pub bind_action_state: unsafe extern "C" fn(u32, &'static ActionState) -> bool,
+}
 
 /// # Safety
-/// The registry and its service must remain loaded.
+/// Publish a resident service during Forge initialization.
 pub unsafe fn publish(api: &'static Service) -> bool {
     unsafe { service::publish(NAME, MAGIC, api) }
+}
+
+fn current() -> Option<&'static Service> {
+    if !service::on_game_thread() {
+        return None;
+    }
+    unsafe { service::find(NAME, MAGIC) }
 }
 
 /// # Safety
 /// The registered style and callback must remain loaded.
 pub unsafe fn bind(id: u32, tick: Tick) -> bool {
-    if service::on_game_thread()
-        && let Some(api) = (unsafe { service::find::<Service>(NAME, MAGIC) })
-    {
-        unsafe { (api.0)(id, tick) };
-        return true;
-    }
-    false
+    let Some(api) = current() else { return false };
+    unsafe { (api.bind)(id, tick) };
+    true
+}
+
+/// Register a per-frame observer for a style.
+///
+/// # Safety
+/// The callback must remain valid throughout the lifetime of the style.
+pub unsafe fn observe(id: u32, callback: Observe) -> bool {
+    current().is_some_and(|api| unsafe { (api.observe)(id, callback) })
+}
+
+/// Register state callbacks for a style. Returns false if the registry cannot
+/// carry the value in this weapon's native packet.
+///
+/// # Safety
+/// The descriptor and callbacks must remain valid throughout the lifetime of the style.
+pub unsafe fn bind_action_state(id: u32, state: &'static ActionState) -> bool {
+    current().is_some_and(|api| unsafe { (api.bind_action_state)(id, state) })
 }

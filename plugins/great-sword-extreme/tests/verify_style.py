@@ -19,6 +19,7 @@ PROVIDER = (
     REPO
     / "plugins/style-registry/dist/style-registry/romfs/nativeNX/plugins/style_registry.nro"
 )
+PROVIDER_BASE = 0x9000000
 CONTENT = NX / "plugins/great_sword_extreme.nro"
 CONFIG = "savedata:/style_registry.ini"
 ENCODE, DECODE = 0x27C6A0, 0x27C6D4
@@ -26,6 +27,7 @@ MENU_OPEN, MENU_UPDATE = 0x548B7C, 0x5490FC
 STATUS_STYLE, STATUS_STYLE_SMALL = 0x62FB78, 0x633450
 HIT_ROW = 0x2A8A88
 DISPATCH, BLOCK = 0x282DA8, 0x2F2BA0
+INIT_HUNTER = 0x29B7D4
 WEAPON_DISPATCH = 0x2B8178
 GAME_STYLE = 0x268818
 ART_READY = 0x2A26C8
@@ -35,6 +37,8 @@ FX_RELEASE = 0x32A104
 DRAW_ROUTE = 0x115FCF4
 DB_DRAW_ROUTE = 0x11BA2A0
 LS_DRAW_ROUTE = 0x1198BB4
+SA_DRAW_ROUTE = 0x119FCF4
+QUEST_CAMERA = 0x898AC0
 EQUIPMENT_GRIP = 0x308834
 CHANGE_ACTION, GS_CHANGE_ACTION = 0x2AB670, 0x1160650
 COMMAND_BIND, COMMAND_CONDITION = 0x2E9B7C, 0x2ECEFC
@@ -43,6 +47,7 @@ SHARPNESS = 0x2AD288
 HIT_EXPAND, MODEL_DEPTH = 0x1696FC, 0xA957CC
 HUNTER_COLLISION = 0x16BB38
 GUARD_REACTION, DRAW_MODEL = 0x2F4B20, 0xA956D8
+SUBMIT_MODEL = 0xC90380
 
 
 def effect_routes():
@@ -63,7 +68,7 @@ def service(g):
     return g.get(api), g.get(api + 4)
 
 
-def load_registered_style(g, nro):
+def load_registered_style(g, nro, *, base=0x9200000):
     """Load one content NRO and return the descriptor registered at startup."""
     from unicorn import arm_const
 
@@ -76,7 +81,7 @@ def load_registered_style(g, nro):
         end=register,
     )
     try:
-        exports = g.load(nro, 0x9200000)
+        exports = g.load(nro, base)
         for callback in ("forge_onLoad", "forge_onInit"):
             g.run(exports[callback], MANAGER)
     finally:
@@ -137,13 +142,17 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         DRAW_ROUTE,
         DB_DRAW_ROUTE,
         LS_DRAW_ROUTE,
+        SA_DRAW_ROUTE, QUEST_CAMERA,
         FX_RELEASE,
         SHARPNESS,
         HIT_EXPAND,
         HUNTER_COLLISION,
+        BLOCK,
+        0x1FED90, 0x1FF308,
         MODEL_DEPTH,
         GUARD_REACTION,
         DRAW_MODEL,
+        SUBMIT_MODEL,
         ENCODE,
         DISPATCH,
         WEAPON_DISPATCH,
@@ -173,7 +182,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
     g.put(g.files_vt + 12 * 4, slot)
     for name in order:
         path, base = (
-            (PROVIDER, 0x9000000) if name == "registry" else (CONTENT, 0x9200000)
+            (PROVIDER, PROVIDER_BASE) if name == "registry" else (CONTENT, 0x9200000)
         )
         ex = g.load(
             path, base, {} if mount_ok else {"forge_fs_mountSaveData": lambda *_: 0}
@@ -196,11 +205,13 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             ART_CAPACITY,
             VALOR_HUD,
             DISPATCH,
+            INIT_HUNTER,
             WEAPON_DISPATCH,
             HIT_ROW,
             HIT_EXPAND,
             FX_RELEASE,
             HUNTER_COLLISION,
+            0x1FED90, 0x1FF308,
             0x1748A8, 0x178030,  # Both GU melee hitzone resolvers.
             0x169548,
             CHANGE_ACTION,
@@ -209,7 +220,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             GS_CHANGE_ACTION,
             DRAW_ROUTE,
             DB_DRAW_ROUTE,
-            LS_DRAW_ROUTE,
+            LS_DRAW_ROUTE, SA_DRAW_ROUTE, QUEST_CAMERA,
             BLOCK,
             SHARPNESS,
             GUARD_REACTION,
@@ -219,7 +230,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         else set()
     )
     if order == ("registry", "sword"):
-        expected.update((EQUIPMENT_GRIP, MODEL_DEPTH))
+        expected.update((EQUIPMENT_GRIP, MODEL_DEPTH, SUBMIT_MODEL))
     actual = set(g.hooks)
     assert actual == expected, (
         [hex(addr) for addr in sorted(expected - actual)],
@@ -1047,16 +1058,25 @@ def verify_battle(g, p, remote, resources):
     # GU's clock can pause. A long pause at one frame must not charge up.
     for key, hold, release, expected, interval in [
         (32, 0, True, 60, 20),
+        (32, 38, True, 60, 20),
+        (32, 39, True, 85, 20),
         (32, 90, False, 146, 20),
         (0x120, 100, True, 200, 20),
         (0x120, 111, False, 112, 20),
-        (32, 32, True, 85, 16),
-        (32, 47, True, 60, 24),
+        (32, 30, True, 60, 16),
+        (32, 31, True, 85, 16),
+        (32, 46, True, 60, 24),
+        (32, 47, True, 85, 24),
     ]:
         skills.clear()
         if interval != 20:
             skills.add(152 if interval == 16 else 153)
         neutral()
+        charge_rises.clear()
+        check_first_tier = key == 32 and release
+        if check_first_tier:
+            units.clear()
+            g.put(0x188A0D4, manager)
         tick(0, held=key, pressed=key)
         arm_at, loop_at, end = (34, 56, 106) if key == 32 else (54, 54, 122)
         tick(arm_at, held=key)
@@ -1069,6 +1089,11 @@ def verify_battle(g, p, remote, resources):
                 held=key,
             )
         if release:
+            if check_first_tier:
+                assert charge_rises == ([128] if expected == 85 else []), (hold, interval, charge_rises)
+                flashes = [g.get(unit + 68) for unit in units if g.get(unit + 68) in routes[10]]
+                assert flashes == (list(routes[10]) if expected == 85 else []), (hold, interval, flashes)
+                g.put(0x188A0D4, 0)
             frame = max(58, arm_at + 2 * hold)
             tick(frame if frame < end else loop_at + (frame - end) % (end - loop_at))
         assert clip() in (28, 38) and value() == expected, (key, hold, clip(), value())
@@ -1748,11 +1773,47 @@ def verify_sdk_registration(elf):
         assert sum("Conflict" in msg for _, msg in g.logs) == int(case == "conflict")
 
 
+def verify_peer_callbacks(elf):
+    g = boot(elf, b"[Weapons]\n8=42\n", ("registry",))
+    local, equipment, peer = hunters(g)
+    g.cpu.mem_write(equipment + 1236, b"\x08")
+    g.put(g.get(0x1885B58) + 32, peer)
+    register, _ = service(g)
+    assert g.run(register, style_descriptor(g, 42, 8), 0, 0) == 0
+    assert g.run(register, style_descriptor(g, 43, 4), 0, 0) == 0
+    api = api_for(g, b"mhgu::StyleRemoteActionV1", b"SRA1")
+    observe, bind_state = g.get(api + 4), g.get(api + 8)
+    frame, encode, decode, codec = (g.alloc(8) for _ in range(4))
+    frames, received = [], []
+    g.stub(frame, lambda hunter, *_: frames.append(hunter))
+    g.stub(encode, lambda hunter, *_: 5 if hunter == local else 255)
+    g.stub(decode, lambda hunter, bits, *_: received.append((hunter, bits)))
+    g.put(codec, encode)
+    g.put(codec + 4, decode)
+    assert g.run(observe, 43, frame) == 1
+    assert g.run(bind_state, 43, codec) == 0  # Weapon 4 uses the native flags.
+    assert g.run(bind_state, 42, codec) == 1
+    for addr in (DISPATCH, 0x1FED90, 0x1FF308):
+        g.stub(g.originals[addr], lambda *_: 0)
+    g.run(g.hooks[DISPATCH], local)
+    assert frames == [local]
+    packet = g.alloc(200)
+    g.put(packet + 16, 0x1001)
+    g.run(g.hooks[0x1FED90], packet, local, 0)
+    assert g.get(packet + 16) == 0xD1001
+    g.run(g.hooks[0x1FF308], packet, peer)
+    g.put(packet + 16, 0x1001)
+    g.run(g.hooks[0x1FF308], packet, peer)
+    assert received == [(peer, 5), (peer, 255)]
+    print("V1 peer callbacks: independent frame observer and state-only send/receive passed.")
+
+
 def verify():
     elf = (REPO / "mhgu/main.elf").read_bytes()
     on = b"[Weapons]\r\n0 = 1\r\n"
     verify_action_lifecycle(elf, on)
     verify_sdk_registration(elf)
+    verify_peer_callbacks(elf)
     verify_valor(elf, on)
     g = boot(elf, on)
     verify_great_sword(g)

@@ -243,6 +243,10 @@ pub fn dual_blades(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
     hunter_banks(dat, 6, "frontier_db", "wh000snd.abn", b"wh006.snd\0")
 }
 
+pub fn switch_axe(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
+    hunter_banks(dat, 12, "frontier_sa", "wk000snd.abn", b"wk000.snd\0")
+}
+
 pub fn long_sword(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
     hunter_banks(dat, 7, "frontier_ls", "we000snd.abn", b"we000.snd\0")
 }

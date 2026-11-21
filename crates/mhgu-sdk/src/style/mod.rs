@@ -12,7 +12,11 @@ pub mod particle;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub mod physical;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub mod preload;
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub mod remote;
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub mod rules;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub mod sound;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]

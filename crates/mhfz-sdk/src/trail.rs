@@ -1,6 +1,11 @@
 //! Skin a Frontier blade strip from six world-space weapon poses.
 use crate::sync::Shared;
-use core::ffi::CStr;
+use alloc::boxed::Box;
+use core::{
+    ffi::{CStr, c_char},
+    ptr,
+    sync::atomic::{AtomicPtr, Ordering},
+};
 use mhgu_sdk::service;
 
 unsafe fn entry(offset: u32) -> usize {
@@ -164,13 +169,64 @@ pub struct Sample {
 }
 pub type Snapshot = unsafe extern "C" fn(*mut Sample) -> u32;
 #[repr(C)]
-pub struct Service(pub unsafe extern "C" fn(*const core::ffi::c_char, Snapshot));
+struct Service(unsafe extern "C" fn(*const c_char, Snapshot));
 const NAME: &CStr = c"mhgu::StyleBladeTrailV1";
 const MAGIC: u32 = u32::from_le_bytes(*b"SBT1");
-/// # Safety
-/// The registry publishes this process-lifetime service during Forge initialization.
-pub unsafe fn publish(api: &'static Service) -> bool {
-    unsafe { service::publish(NAME, MAGIC, api) }
+struct Strip {
+    path: &'static CStr,
+    snapshot: Snapshot,
+    renderer: Renderer,
+    next: *mut Strip,
+}
+static STRIPS: AtomicPtr<Strip> = AtomicPtr::new(ptr::null_mut());
+
+unsafe extern "C" fn register(path: *const c_char, snapshot: Snapshot) {
+    if path.is_null() {
+        return;
+    }
+    let path = unsafe { CStr::from_ptr(path) };
+    if path.to_bytes_with_nul().len() > 64 {
+        return;
+    }
+    // Forge serializes writes on the init thread. The render thread only
+    // reads the published nodes, which stay resident for the process.
+    let next = STRIPS.load(Ordering::Acquire);
+    STRIPS.store(
+        Box::into_raw(Box::new(Strip {
+            path,
+            snapshot,
+            renderer: Renderer::new(),
+            next,
+        })),
+        Ordering::Release,
+    );
+}
+
+pub(crate) unsafe fn install() -> bool {
+    static API: Service = Service(register);
+    unsafe { service::publish(NAME, MAGIC, &API) }
+}
+
+pub(crate) unsafe fn draw_bound(
+    generator: u32,
+    path: *const u8,
+    draw: impl FnOnce() -> u32,
+) -> u32 {
+    let mut node = STRIPS.load(Ordering::Acquire);
+    while let Some(strip) = unsafe { node.as_ref() } {
+        let name = strip.path.to_bytes_with_nul();
+        if unsafe { core::slice::from_raw_parts(path, name.len()) } == name {
+            let mut sample = Sample::default();
+            let version = unsafe { (strip.snapshot)(&mut sample) };
+            return if version == 0 {
+                0
+            } else {
+                unsafe { strip.renderer.draw(generator, version, &sample, draw) }
+            };
+        }
+        node = strip.next;
+    }
+    draw()
 }
 /// # Safety
 /// Both arguments must remain valid on the render thread until process exit.

@@ -1,91 +1,65 @@
+//! Native particle drawing and release dispatch.
 use alloc::boxed::Box;
 use core::{
-    ffi::{CStr, c_char},
+    ffi::c_void,
     ptr,
     sync::atomic::{AtomicPtr, Ordering},
 };
-use mhfz_sdk::trail::{self, Renderer, Sample, Snapshot};
-use mhgu_sdk::style::particle::{self, OnRelease};
+use mhgu_sdk::style::particle::{self, DrawModel, ModelRenderer, OnRelease};
 
-// Entries are registered during Forge init and stay valid on the render thread.
-struct Strip {
-    path: &'static CStr,
-    snapshot: Snapshot,
-    renderer: Renderer,
-    next: *mut Strip,
+struct Renderer {
+    api: &'static ModelRenderer,
+    next: *mut Renderer,
 }
-static STRIPS: AtomicPtr<Strip> = AtomicPtr::new(ptr::null_mut());
-static SERVICE: trail::Service = trail::Service(bind);
-const MODEL_PATH_OFFSET: u32 = 80;
+static RENDERERS: AtomicPtr<Renderer> = AtomicPtr::new(ptr::null_mut());
+static mut ORIGINAL_DRAW: *const c_void = ptr::null();
 
-unsafe extern "C" fn bind(path: *const c_char, snapshot: Snapshot) {
-    if path.is_null() {
+unsafe extern "C" fn bind_model(api: *const ModelRenderer) {
+    let Some(api) = (unsafe { api.as_ref() }) else {
         return;
-    }
-    let path = unsafe { CStr::from_ptr(path) };
-    if path.to_bytes_with_nul().len() > 64 {
-        return;
-    }
-    let next = STRIPS.load(Ordering::Acquire);
-    STRIPS.store(
-        Box::into_raw(Box::new(Strip {
-            path,
-            snapshot,
-            renderer: Renderer::new(),
-            next,
-        })),
-        Ordering::Release,
-    );
+    };
+    // Forge serializes registrations. Render callbacks only borrow the
+    // published nodes, which stay resident until the process exits.
+    let next = RENDERERS.load(Ordering::Acquire);
+    let renderer = Box::new(Renderer { api, next });
+    RENDERERS.store(Box::into_raw(renderer), Ordering::Release);
 }
 
-unsafe fn render_strip(generator: u32, params: u32, draw: impl FnOnce() -> u32) -> u32 {
-    let model_path = (params + MODEL_PATH_OFFSET) as *const u8;
-    let mut cur = STRIPS.load(Ordering::Acquire);
-    while let Some(strip) = unsafe { cur.as_ref() } {
-        let path = strip.path.to_bytes_with_nul();
-        if unsafe { core::slice::from_raw_parts(model_path, path.len()) } == path {
-            let mut sample = Sample::default();
-            let version = unsafe { (strip.snapshot)(&mut sample) };
-            return if version == 0 {
-                0
-            } else {
-                unsafe { strip.renderer.draw(generator, version, &sample, draw) }
-            };
+unsafe fn renderer(params: u32) -> Option<&'static ModelRenderer> {
+    let mut node = RENDERERS.load(Ordering::Acquire);
+    while let Some(renderer) = unsafe { node.as_ref() } {
+        if unsafe { (renderer.api.matches)(params) } {
+            return Some(renderer.api);
         }
-        cur = strip.next;
+        node = renderer.next;
     }
-    draw()
+    None
 }
 
 unsafe fn read<T: Copy>(address: u32, offset: u32) -> T {
     unsafe { ((address + offset) as *const T).read_unaligned() }
 }
 
-#[forge::hook(offset = 0xa956d8)]
-unsafe fn draw_model(generator: u32, context: u32, gain: u32) -> u32 {
+unsafe extern "C" fn draw_model(generator: u32, context: u32, gain: u32) -> u32 {
     const STATE_STACK_DEPTH_OFFSET: u32 = 0x308e4;
     const STATE_STACK_CAPACITY: u32 = 5;
     const FULL_STATE: u32 = 1;
 
     unsafe {
+        let native: DrawModel = core::mem::transmute(ORIGINAL_DRAW);
         if read::<u8>(generator, 70) != 5 {
-            return original!(generator, context, gain);
+            return native(generator, context, gain);
         }
         let params: u32 = read(generator, 52);
-        if params == 0
-            || !matches!(
-                &read::<[u8; 19]>(params, MODEL_PATH_OFFSET),
-                b"effect\\frontier_gs\\" | b"effect\\frontier_db\\" | b"effect\\frontier_ls\\"
-            )
-        {
-            return original!(generator, context, gain);
-        }
+        let Some(renderer) = renderer(params) else {
+            return native(generator, context, gain);
+        };
 
         let depth = read::<u32>(context, STATE_STACK_DEPTH_OFFSET);
         if depth > STATE_STACK_CAPACITY {
             return 0;
         }
-        let draw = || render_strip(generator, params, || original!(generator, context, gain));
+        let draw = || (renderer.draw)(native, generator, params, context, gain);
         if depth == STATE_STACK_CAPACITY {
             // GU 87A7AC/87B778 copy the live bindings at +0xAC. Mirror
             // their full-state copy off-stack, leaving every outer slot
@@ -149,11 +123,17 @@ unsafe fn release_unit(unit: u32) -> u32 {
 }
 
 pub(super) fn install(base: u32) {
-    unsafe {
-        trail::publish(&SERVICE);
+    static MODELS: particle::ModelService = particle::ModelService(bind_model);
+    if unsafe { particle::publish_model(&MODELS) } {
+        unsafe {
+            forge::sys::hook::forge_hook_create(
+                (base + 0xa956d8) as *const _,
+                draw_model as *const _,
+                &raw mut ORIGINAL_DRAW,
+            );
+        }
     }
     if unsafe { particle::publish_release(&RELEASE_SERVICE) } {
         forge::install_hook!(base, release_unit);
     }
-    forge::install_hook!(base, draw_model);
 }

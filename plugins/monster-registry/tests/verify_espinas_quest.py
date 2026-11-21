@@ -15,7 +15,7 @@ sys.path.insert(0, str(REPO / "plugins/monster-espinas/tests"))
 from game_files import assets
 
 REGS = [arm.UC_ARM_REG_R0, arm.UC_ARM_REG_R1, arm.UC_ARM_REG_R2, arm.UC_ARM_REG_R3]
-STOP, STACK, HEAP = 0x7300000, 0x73FF000, 0x7200000
+STOP, STACK, HEAP = 0x7380000, 0x73FF000, 0x7200000
 QUEST, PLAYER, MANAGER = 0x7010000, 0x7020000, 0x7030000
 
 

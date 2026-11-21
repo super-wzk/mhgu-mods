@@ -120,6 +120,9 @@ fn instruction(c: &Cursor) -> Option<Step> {
 fn charge_state(state: u8) -> bool {
     matches!(state, 19..=28 | 47..=53 | 70 | 71)
 }
+fn charge_cap(state: u8) -> u8 {
+    if matches!(state, 47..=53 | 70) { 4 } else { 3 }
+}
 unsafe fn read<T: Copy>(p: u32, n: u32) -> T {
     unsafe { ((p + n) as *const T).read_unaligned() }
 }
@@ -161,7 +164,11 @@ pub(super) unsafe fn local(p: u32) -> bool {
             && mhgu_sdk::style::selected(0) == 1
     }
 }
+mod peer;
+pub(super) use peer::{install as install_peers, peer_action};
+
 struct Battle {
+    peer_slot: usize,
     audio: Clock,
     motion_fx: MotionClock,
     owner: u32,
@@ -190,8 +197,19 @@ struct Battle {
     sustain_poise: bool,
 }
 impl Battle {
+    fn charge_level(&mut self, was_charging: bool, motion_delta: f32, cap: u8) -> u8 {
+        // A newly armed charge already counted the trigger tick in event 30.
+        if was_charging {
+            self.charge += motion_delta * 0.5;
+        }
+        ((self.charge / self.charge_interval) as u8)
+            .saturating_sub(1)
+            .min(cap)
+    }
+
     fn fresh(p: u32, equip: u32) -> Self {
         Self {
+            peer_slot: 0,
             audio: Default::default(),
             motion_fx: Default::default(),
             owner: p,
@@ -240,7 +258,9 @@ impl Battle {
     unsafe fn finish(&mut self, p: u32) {
         unsafe {
             self.cancel_attack(p);
-            native!(0x2b6e5c, p);
+            if self.peer_slot == 0 {
+                native!(0x2b6e5c, p);
+            }
         }
     }
     unsafe fn evade(&mut self, p: u32) -> bool {
@@ -267,7 +287,11 @@ impl Battle {
                     self.finish(p);
                     true
                 }
-                2 => self.begin(p, s.clip as u8),
+                2 if self.peer_slot == 0 => self.begin(p, s.clip as u8),
+                2 => {
+                    self.cancel();
+                    true
+                }
                 3..=5 => {
                     let start = frame.unwrap_or(s.start);
                     let blend = if frame.is_some() { 0 } else { s.blend };
@@ -353,7 +377,7 @@ impl Battle {
             if matches!(state, 13 | 20 | 38 | 47) {
                 native!(0x2a264c, p, 1); // GU draw-attack bookkeeping/skills
             }
-            if state == DASH {
+            if state == DASH && self.peer_slot == 0 {
                 // GU's ground collision (2A9098) uses the roll bit for ledge drops.
                 native!(0x283238, p, 0, 0x1180, 0);
                 native!(0x2e9b7c, p, 2000, 0);
@@ -381,8 +405,8 @@ impl Battle {
                         let remaining = (f32::from(param) * 2. - late).max(0.);
                         write(p, 11072, remaining.max(read::<f32>(p, 11072)));
                     }
-                    12 => movement::stamina(p, -150., false),
-                    4 => {
+                    12 if self.peer_slot == 0 => movement::stamina(p, -150., false),
+                    4 if self.peer_slot == 0 => {
                         let dir = read::<u32>(p, 4076).wrapping_add(u32::from(param)) & 0xffff;
                         write(p, 4076, dir);
                         write(p, 5280, dir);
@@ -409,7 +433,8 @@ impl Battle {
                     29 => fx::emit(p, param, None),
                     30 => {
                         self.charging = true;
-                        self.charge = late * 0.5;
+                        // 811D84FE increments +2852 on the tick that event 30 arms it.
+                        self.charge = 1. + late * 0.5;
                     }
                     31 => {
                         crate::sound::play(p, false, if self.guard < 2 { 2 } else { 3 });
@@ -467,6 +492,7 @@ impl Battle {
                 n if n < 74 => n as u8,
                 _ => return false,
             };
+            peer::publish(p, self.level);
             if !action::transition_to(p, action::GROUP, action::slot(next)) {
                 return false;
             }
@@ -484,7 +510,8 @@ impl Battle {
                 self.begin(p, DEFLECTION);
                 return true;
             }
-            let uppercut_charge = matches!(state, 47..=53 | 70);
+            let cap = charge_cap(state);
+            let uppercut_charge = cap == 4;
             let Some(s) = instruction(&self.cursor) else {
                 return false;
             };
@@ -552,15 +579,8 @@ impl Battle {
                 write(p, 10296, duration);
             }
             if self.charging && delta > 0. {
-                // FZ increments +2852 once per simulation tick (two MOT frames).
-                if was_charging {
-                    self.charge += delta * 0.5;
-                }
-                let cap = if uppercut_charge { 4 } else { 3 };
                 let old = self.level;
-                self.level = ((self.charge / self.charge_interval) as u8)
-                    .saturating_sub(1)
-                    .min(cap);
+                self.level = self.charge_level(was_charging, delta, cap);
                 if self.level > old && self.level == 4 {
                     fx::emit(p, 0, Some(8));
                     crate::sound::play(p, true, 210);
@@ -721,7 +741,7 @@ impl Battle {
                 // with X already released; it must not flash a new charge effect.
                 if held_charge {
                     self.charge_effect
-                        .get_or_insert_with(|| ChargeEffect::start(p))
+                        .get_or_insert_with(|| ChargeEffect::start(p, self.peer_slot))
                         .update(p, self.charge, self.level);
                 } else {
                     self.charge_effect = None;
@@ -940,6 +960,9 @@ unsafe impl Sync for Controller {}
 static CONTROL: Controller = Controller(AtomicBool::new(false), UnsafeCell::new(None));
 
 pub(super) fn radiance_origin(owner: u32, shapes: u32) -> Option<[f32; 3]> {
+    if let Some(origin) = unsafe { peer::radiance_origin(owner, shapes) } {
+        return Some(origin);
+    }
     if CONTROL.0.swap(true, Ordering::Acquire) {
         return None;
     }
@@ -991,9 +1014,12 @@ pub(super) unsafe extern "C" fn dispatch(p: u32, input: *const Input) -> u32 {
             if slot.as_ref().is_some_and(|b| b.owner != p || b.equip != eq) {
                 *slot = None;
             }
-            slot.get_or_insert_with(|| Battle::fresh(p, eq))
-                .tick(p, input)
+            let battle = slot.get_or_insert_with(|| Battle::fresh(p, eq));
+            let result = battle.tick(p, input);
+            peer::publish(p, battle.level);
+            result
         } else {
+            peer::publish(0, 0);
             if let Some(mut battle) = slot.take()
                 && p != 0
                 && battle.owner == p
@@ -1024,7 +1050,7 @@ pub(super) unsafe extern "C" fn guard_policy(
         // FZ state 65 event 10 closes at frame 28, 30 with Guard +1
         // or 32 with Guard +2.
         let frame = read::<f32>(p, 1280);
-        if frame >= 32. || (frame >= 28. && !extended_guard(p, frame)) {
+        if frame >= 28. && frame >= 28. + f32::from(mhfz_sdk::combat::guard_bonus_frames(p)) {
             return guard::Decision::Reject;
         }
         // FZ 81744DA0 grants four simulation ticks before the follow-up
@@ -1035,13 +1061,5 @@ pub(super) unsafe extern "C" fn guard_policy(
             sharpness_power: 40,
         });
         guard::Decision::Precise
-    }
-}
-unsafe fn extended_guard(p: u32, frame: f32) -> bool {
-    unsafe {
-        [168, 279, 297]
-            .iter()
-            .any(|&id| native!(0x2864c4, p, id) != 0)
-            || (frame < 30. && native!(0x2864c4, p, 169) != 0)
     }
 }

@@ -63,7 +63,23 @@ fn local_actor() -> Option<u32> {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 mod entry {
     use super::{STYLE_ID, WEAPON, battle, motion};
-    use mhgu_sdk::style::{Style, StyleRegistry};
+    use mhgu_sdk::style::{
+        Style, StyleRegistry,
+        rules::{self, Rules},
+    };
+
+    static RULES: Rules = Rules {
+        deflection: Some(mhfz_sdk::combat::deflection),
+        ground_motion: Some(finish_ground_motion),
+        ..Rules::EMPTY
+    };
+
+    extern "C" fn finish_ground_motion(slot: u16, phase: u8, motion: u32) -> bool {
+        matches!(
+            (slot, phase, motion),
+            (1, 1, 5002) | (2, 1, 5003) | (6, 2, 5012 | 5013)
+        )
+    }
 
     static EXTREME: Style = Style {
         id: STYLE_ID,
@@ -90,6 +106,11 @@ mod entry {
             forge::log::prelude::warn!("Extreme DB registration failed: {err:?}");
             return;
         }
+        if !rules::bind(STYLE_ID, &RULES) {
+            forge::log::prelude::warn!("Style {}: GU rule service unavailable", STYLE_ID);
+        }
+        mhfz_sdk::effects::model::install();
+        unsafe { mhgu_sdk::style::preload::bind(STYLE_ID, motion::preload_draw) };
         battle::install();
         super::fx::install(EXTREME.id);
         super::hud::install();

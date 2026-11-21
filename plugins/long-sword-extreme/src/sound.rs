@@ -8,6 +8,14 @@ static BANKS: [Bank; 3] = [
 ];
 const TRACKS: &[u8] = include_bytes!("../target/assets/frontier_ls_sound.flse");
 
+pub(super) unsafe fn preload_draw() {
+    unsafe {
+        BANKS[2].preload();
+        // Sheathed deflect (1450) also uses the common bank at frame 4.
+        BANKS[1].preload();
+    }
+}
+
 pub(super) unsafe fn update(
     clock: &mut Clock,
     actor: u32,

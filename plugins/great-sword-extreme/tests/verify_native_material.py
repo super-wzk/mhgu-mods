@@ -179,6 +179,14 @@ def rendering(g):
             assert all(abs(a - b / 255) < 1e-6 for a, b in zip(tint, (*rgba[:3], 255)))
             opacity = struct.unpack("<f", g.cpu.mem_read(g.get(ctx + 3524) + 16, 4))[0]
             assert abs(opacity - rgba[3] / 255) < 1e-6, (layer, age, opacity, rgba)
+            if layer == ready + 1:
+                # Each soft-particle sample comes through C90B50 as a
+                # translucent packet with the native depth-write bits clear.
+                g.put(ctx + 8 * 443 + 516, 443)
+                g.cpu.mem_write(color + 3, b"\x80")
+                g.run(0xC90B50, effect, ctx, 0, matrix, color, 256, flags, 0, uv)
+                assert g.get(ctx + 284) == 443
+                assert g.get(ctx + 280) == blend_states[selector]
     print("GU native draw: material tint, opacity and blend state passed")
     radiance_texels(directory, release + 2, 33, 3, 12, 0, (0, 0),
                     [(4, (255,150,72,255)), (6, (255,72,0,124)), (12, (255,0,0,0))])

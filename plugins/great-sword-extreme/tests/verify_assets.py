@@ -239,6 +239,25 @@ def source(states):
                 )
         assert m.call(0x811D7546, player) == 4 * interval + 10
         assert m.call(0x811D5EF6, player, 4) == 5 * interval + 10
+
+    # Execute the charge event and the timer update in the same dispatch.
+    extension = MEM + 0x24000
+    m.trap(0x81818BF8, lambda *_: extension)
+    m.trap(0x8114690C, lambda *_: 0)
+    for address in (0x81815D60, 0x81FC8398, 0x81815F30, 0x811D5A2A):
+        m.trap(address, lambda *_: 0)
+    for state, step, arm_frame in ((19, 0, 34), (20, 1, 56), (48, 0, 54)):
+        m.c.mem_write(player, bytes(4176))
+        m.c.mem_write(extension, bytes(672))
+        m.c.mem_write(player + 20, bytes((state, 1)))
+        m.c.mem_write(player + 820, b"\x01")
+        m.c.mem_write(player + 3990, struct.pack("<3H", step + 1, 0, 4))
+        m.c.mem_write(player + 476, struct.pack("<f", arm_frame))
+        for tick in range(1, 41):
+            m.call(0x811D84FE, player)
+            assert struct.unpack("<H", m.c.mem_read(player + 2852, 2))[0] == tick
+            assert m.c.mem_read(player + 2856, 1)[0] == int(tick == 40)
+    print("FZ charge event counts as the first tick in standing, draw and uppercut charges")
     return result
 
 

@@ -71,3 +71,25 @@ pub unsafe fn equipped_tip(actor: u32, hand: usize, joint: u8) -> Option<f32> {
         (tip_z.is_finite() && tip_z > 0.).then_some(tip_z)
     }
 }
+
+pub type ContactCallback = unsafe extern "C" fn(actor:u32);
+#[doc(hidden)]
+#[repr(C)]
+pub struct ContactService(pub unsafe extern "C" fn(u32,ContactCallback));
+const CONTACT:&core::ffi::CStr=c"mhgu::StyleBladeContactV1";
+const CONTACT_MAGIC:u32=u32::from_le_bytes(*b"BCT1");
+
+/// # Safety
+/// The registry publishes this resident service once on the game thread.
+pub unsafe fn publish_contact(api:&'static ContactService)->bool{
+    unsafe{service::publish(CONTACT,CONTACT_MAGIC,api)}
+}
+/// # Safety
+/// The callback must remain valid for the lifetime of the registered style.
+pub unsafe fn bind_contact(id:u32,callback:ContactCallback)->bool{
+    if service::on_game_thread() && let Some(api)=unsafe{service::find::<ContactService>(CONTACT,CONTACT_MAGIC)}{
+        unsafe{(api.0)(id,callback)};
+        return true;
+    }
+    false
+}

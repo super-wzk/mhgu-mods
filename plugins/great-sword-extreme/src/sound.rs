@@ -9,6 +9,10 @@ static BANKS: [Bank; 3] = [
 ];
 const TRACKS: &[u8] = include_bytes!("../target/assets/frontier_gs_sound.fgse");
 
+pub(super) unsafe fn preload_draw() {
+    unsafe { BANKS[2].preload() };
+}
+
 pub(super) unsafe fn play(actor: u32, common: bool, id: u8) {
     unsafe { BANKS[usize::from(common)].play(actor, id) };
 }

@@ -1,4 +1,5 @@
 //! Local hunter state. GU owns transitions, hits, movement and Hunter Arts.
+mod peer;
 mod sharpen;
 
 use crate::{
@@ -108,6 +109,14 @@ fn phase(actor: u32) -> u8 {
     }
 }
 
+fn demon_phase(actor: u32, slot: usize) -> u8 {
+    if slot == 0 {
+        phase(actor)
+    } else {
+        peer::bits(slot) & 3
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Commands {
     bits: u32,
@@ -123,6 +132,7 @@ impl Commands {
 
 #[derive(Default)]
 struct Battle {
+    peer_slot: usize,
     owner: u32,
     equipment: u32,
     cursor: Option<Cursor>,
@@ -148,6 +158,10 @@ struct Battle {
 impl Battle {
     unsafe fn set_phase(&mut self, actor: u32, phase: u8) {
         unsafe {
+            if self.peer_slot != 0 {
+                peer::set_phase(self.peer_slot, actor, phase);
+                return;
+            }
             self.health_clock = 0.;
             if phase < 2 {
                 self.flame_subframe = 0.;
@@ -242,7 +256,9 @@ impl Battle {
         self.cursor = None;
         self.effects.clear_action();
         self.resume_sprint.set(false);
-        MONSTER_HIT.store(false, Relaxed);
+        if self.peer_slot == 0 {
+            MONSTER_HIT.store(false, Relaxed);
+        }
         self.deflected = false;
         self.keep_evade = false;
         self.keep_poise = false;
@@ -255,7 +271,9 @@ impl Battle {
     unsafe fn finish(&mut self, actor: u32) {
         unsafe {
             self.clear_action(actor);
-            native!(0x2b6e5c, actor);
+            if self.peer_slot == 0 {
+                native!(0x2b6e5c, actor);
+            }
         }
     }
 
@@ -294,7 +312,7 @@ impl Battle {
             } else {
                 native!(0x2a2560, actor, 1);
             }
-            if sprint {
+            if sprint && self.peer_slot == 0 {
                 native!(0x283238, actor, 0, 0x180, 0);
                 native!(0x2e9b7c, actor, 2000, 0);
             }
@@ -302,7 +320,7 @@ impl Battle {
                 // GU's ground collision uses the roll flag to select 4:14 or 4:23 at a ledge.
                 native!(0x283238, actor, 0, 0x1000, 0);
             }
-            if let Some(aerial) = aerial {
+            if let Some(aerial) = aerial.filter(|_| self.peer_slot == 0) {
                 let yaw = f32::from(read::<u16>(actor, 4076)) * (core::f32::consts::TAU / 65536.);
                 let (x, z) = libm::sincosf(yaw);
                 let speed = aerial.forward_speed;
@@ -338,7 +356,9 @@ impl Battle {
                         return true;
                     }
                 }
-                Some(step) if step.op == 2 => return self.begin(actor, step.clip as u8),
+                Some(step) if step.op == 2 && self.peer_slot == 0 => {
+                    return self.begin(actor, step.clip as u8);
+                }
                 _ => {}
             }
             self.finish(actor);
@@ -366,7 +386,7 @@ impl Battle {
                     2 => {
                         native!(0x2a2560, actor, u32::from(parameter != 0));
                     }
-                    3 => turn(actor, parameter),
+                    3 if self.peer_slot == 0 => turn(actor, parameter),
                     4 => {
                         self.keep_poise = false;
                         write(actor, 10288, frames);
@@ -387,13 +407,13 @@ impl Battle {
                         write(actor, 11072, read::<f32>(actor, 11072).max(remaining));
                     }
                     8 => self.keep_evade = true,
-                    9 => stamina(actor, -150., false),
+                    9 if self.peer_slot == 0 => stamina(actor, -150., false),
                     11 | 12 => submit_strike(actor, state, parameter, late, kind == 12),
                     13 => {
                         self.set_phase(actor, parameter as u8);
-                        self.effects.demon(actor, phase(actor), 0.);
+                        self.effects.demon(actor, parameter as u8, 0.);
                     }
-                    14 => {
+                    14 if self.peer_slot == 0 => {
                         native!(0x2ad288, actor, u32::from(parameter), 1);
                     }
                     15 => self.polish.add_stack(),
@@ -403,7 +423,7 @@ impl Battle {
                         self.polish.activate(2. * f32::from(parameter));
                     }
                     18 => self.effects.sharpen_slash(actor, parameter),
-                    19 if phase(actor) == 3 => fx::evade(actor),
+                    19 if demon_phase(actor, self.peer_slot) == 3 => fx::evade(actor),
                     _ => {}
                 }
             }
@@ -473,33 +493,10 @@ impl Battle {
             1428 | 1446 => 0xc000,
             _ => return false,
         };
-        unsafe {
-            let facing = read::<u32>(actor, 4076);
-            let yaw = (facing as u16).wrapping_add(offset);
-            let airborne = read::<u8>(actor, 9477) == 2;
-            if !airborne {
-                // GU's ledge probe caches a result for the current facing.
-                if offset != 0 {
-                    write(actor, 4076, u32::from(yaw));
-                    write(actor, 11956, 0u32);
-                }
-                let ledge = native!(0x2a8458, actor) == 1;
-                if offset != 0 {
-                    write(actor, 4076, facing);
-                    write(actor, 11956, 0u32);
-                }
-                if !ledge {
-                    return false;
-                }
-            }
-            let target_yaw = read::<u32>(actor, 5280);
-            set_facing(actor, yaw);
-            if movement::roll_off_ledge(actor) {
-                self.clear_action(actor);
-                return true;
-            }
-            write(actor, 4076, facing);
-            write(actor, 5280, target_yaw);
+        if unsafe { movement::step_off_ledge(actor, offset) } {
+            unsafe { self.clear_action(actor) };
+            true
+        } else {
             false
         }
     }
@@ -1041,7 +1038,9 @@ unsafe fn record_contact(hit: u32, target: u32, kind: u32) -> u32 {
 unsafe fn adjust_strike(actor: u32, hit: u32, row: u32, flags: u32) -> u32 {
     unsafe {
         // 2B76CC calls this with the HDP row pointer and flags.
-        if OWNER.load(Relaxed) != actor
+        let local = OWNER.load(Relaxed) == actor;
+        let peer = if local { None } else { peer::slot_of(actor) };
+        if (!local && peer.is_none())
             || !BLADE_CONTACT_OFFSETS.contains(&hit.wrapping_sub(actor))
             || flags & 1 == 0
         {
@@ -1053,15 +1052,28 @@ unsafe fn adjust_strike(actor: u32, hit: u32, row: u32, flags: u32) -> u32 {
         let Some(state) = action::custom_id(group, slot) else {
             return result;
         };
+        // 11BACE8 normally latches Wolf's Maw on a stock action change.
+        // Frontier enters its own actions directly. Arm the native follow-up
+        // for this hand when its hit is constructed (11BA9C8 -> 11BA074).
+        let hand = u32::from(hit != actor + BLADE_CONTACT_OFFSETS[0]);
+        write(
+            actor,
+            13156 + 4 * hand,
+            u32::from(read::<f32>(actor, 13144) > 0.),
+        );
         if program::aerial_motion(state).is_some() {
             // 2B76CC adds secondary buildup to the aerial templates.
             write(hit, 86, 0u8);
             write(hit, 89, 0u8);
         }
-        let mode = phase(actor);
+        let bits = peer.map_or_else(
+            || phase(actor) | (u8::from(FLAME.load(Relaxed) == program::FLAME_MAX) << 2),
+            peer::bits,
+        );
+        let mode = bits & 3;
         if mode != 0 {
             // 81DBDE7A / 81DBE87E snapshot the motion value at hit creation.
-            let factor = if mode >= 2 && FLAME.load(Relaxed) == program::FLAME_MAX {
+            let factor = if mode >= 2 && bits & 4 != 0 {
                 1.45
             } else {
                 1.35
@@ -1095,6 +1107,7 @@ unsafe fn native_demon_status(actor: u32) -> u32 {
 }
 
 pub(super) fn install() {
+    peer::install();
     let base = forge::mem::text_addr();
     forge::install_hook!(base, native_demon_gauge);
     forge::install_hook!(base, record_contact);

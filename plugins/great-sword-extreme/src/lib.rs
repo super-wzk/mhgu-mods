@@ -21,7 +21,23 @@ mod sound;
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 mod entry {
     use super::motion;
-    use mhgu_sdk::style::{Style, StyleRegistry};
+    use mhgu_sdk::style::{
+        Style, StyleRegistry,
+        rules::{self, Rules},
+    };
+
+    static RULES: Rules = Rules {
+        deflection: Some(mhfz_sdk::combat::deflection),
+        ground_motion: Some(finish_ground_motion),
+        ..Rules::EMPTY
+    };
+
+    extern "C" fn finish_ground_motion(slot: u16, phase: u8, motion: u32) -> bool {
+        matches!(
+            (slot, phase, motion),
+            (1, 1, 5002) | (2, 1, 5003) | (6, 2, 5012 | 5013)
+        )
+    }
 
     static EXTREME: Style = Style {
         id: 1,
@@ -51,7 +67,13 @@ mod entry {
             );
             return;
         }
+        if !rules::bind(EXTREME.id, &RULES) {
+            forge::log::prelude::warn!("Style {}: GU rule service unavailable", EXTREME.id);
+        }
+        mhfz_sdk::effects::model::install();
+        unsafe { mhgu_sdk::style::preload::bind(EXTREME.id, motion::preload_draw) };
         motion::install();
+        super::battle::install_peers();
         if !unsafe { mhgu_sdk::style::world_contact::bind(EXTREME.id, super::combat::expand) } {
             forge::log::prelude::warn!("Extreme GS: world contact service unavailable");
         }

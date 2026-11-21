@@ -106,9 +106,13 @@ pub(super) unsafe extern "C" fn submit(actor: u32, attack: *const Attack) -> u32
                 adjust(actor, hit, 1, index, flags);
             }
         });
-        let serial = (attack.flags & Attack::DEFLECTABLE != 0)
-            .then(|| super::deflection::contact_serial(hit));
-        super::deflection::submitted(actor, slot, hand, serial);
+        // Recoil decisions belong to the sender. A remote swing must not
+        // displace a pending hit in the local hunter's deflection window.
+        if super::local_hunter() == actor {
+            let serial = (attack.flags & Attack::DEFLECTABLE != 0)
+                .then(|| super::deflection::contact_serial(hit));
+            super::deflection::submitted(actor, slot, hand, serial);
+        }
         1
     }
 }

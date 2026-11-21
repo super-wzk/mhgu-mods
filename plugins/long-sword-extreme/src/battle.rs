@@ -98,7 +98,10 @@ unsafe fn gain_cut(actor: u32, amount: u32) {
         action::ChargeSkill::Slow => 0.8,
         action::ChargeSkill::Normal => 1.,
     };
-    let gain = (amount as f32 * program::CUT_FACTOR * scale) as u32;
+    add_cut((amount as f32 * program::CUT_FACTOR * scale) as u32);
+}
+
+fn add_cut(gain: u32) {
     if let Ok(old) = CUT.try_update(Relaxed, Relaxed, |points| {
         Some((points + gain).min(program::CUT_MAX))
     }) && old < program::CUT_MAX
@@ -532,12 +535,8 @@ impl Battle {
                     10 => {
                         let active = match param {
                             3 => true,
-                            2 => [168, 169, 279, 297]
-                                .iter()
-                                .any(|&id| native!(0x2864c4, actor, id) != 0),
-                            1 => [168, 279, 297]
-                                .iter()
-                                .any(|&id| native!(0x2864c4, actor, id) != 0),
+                            2 => mhfz_sdk::combat::guard_bonus_frames(actor) >= 2,
+                            1 => mhfz_sdk::combat::guard_bonus_frames(actor) >= 4,
                             _ => false,
                         };
                         if active {
@@ -565,7 +564,7 @@ impl Battle {
                     // 817C426E's extra dodge and the +996 attack modifier
                     // require Frontier equipment effects (816D6482/816D699A).
                     18 => {}
-                    19 => crate::camera::start(actor, param),
+                    19 => mhfz_sdk::camera::start(actor, param),
                     20 | 21 => self.trail.start(self.slot, actor, frames, kind == 21),
                     22 | 23 => fx::spirit_flash(actor, kind == 23),
                     24 => {
@@ -674,7 +673,7 @@ impl Battle {
                 self.discharge_frame = last.max(frame);
                 if last < 122. && frame >= 122. {
                     if self.slot == LOCAL {
-                        crate::camera::start(actor, ((state - 54) / 3).saturating_sub(1).into());
+                        mhfz_sdk::camera::start(actor, ((state - 54) / 3).saturating_sub(1).into());
                     }
                     strike(
                         self.slot,
@@ -1296,7 +1295,7 @@ static DISPATCHING: AtomicBool = AtomicBool::new(false);
 fn reset_session() {
     motion::ROLL.clear();
     release::reset(LOCAL);
-    crate::camera::reset();
+    mhfz_sdk::camera::reset();
     instant::reset(LOCAL);
     discharge::reset(LOCAL);
     fx::clear_impact();
@@ -1394,6 +1393,10 @@ pub(super) unsafe extern "C" fn guard_policy(
 unsafe fn change_color(actor: u32, delta: u32) -> u32 {
     if crate::local_actor() == Some(actor) {
         unsafe {
+            // 119F574 asks for +1 only on Sakura's first qualifying contact.
+            if delta == 1 && matches!(action::current(actor), (action::GROUP, 54 | 62)) {
+                add_cut(program::CUT_MAX / 2);
+            }
             clear_blade_color(actor);
         }
         return 0;
@@ -1500,7 +1503,6 @@ pub(super) fn install() {
     collision::install();
     fx::install();
     crate::trail::install();
-    crate::camera::install();
     let base = forge::mem::text_addr();
     use mhgu_sdk::style::physical::{self as power, Rule, Scope};
     static POWER: Rule = Rule {

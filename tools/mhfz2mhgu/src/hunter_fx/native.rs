@@ -118,9 +118,10 @@ fn primary_uv(
     sheet: Option<&Sheet>,
     speed: [f32; 2],
     origin: [f32; 2],
+    offsets: &[(u32, V3)],
     delay: u32,
 ) -> Result<()> {
-    if sheet.is_none() && speed == [0.; 2] && origin == [0.; 2] {
+    if sheet.is_none() && offsets.is_empty() && speed == [0.; 2] && origin == [0.; 2] {
         return Ok(());
     }
     let mut uv = [0; 64];
@@ -135,6 +136,17 @@ fn primary_uv(
             for (age, offset) in offsets.enumerate() {
                 model.extend((delay + age as u32).to_le_bytes());
                 model.extend(offset[axis].to_le_bytes());
+                model.extend(0f32.to_le_bytes());
+            }
+        }
+    } else if !offsets.is_empty() {
+        ensure!(offsets.len() < 256, "too many primary UV keys");
+        for axis in 0..2 {
+            put(&mut uv, 48 + axis * 4, model.len().try_into()?);
+            model.extend((offsets.len() as u32).to_le_bytes());
+            for &(age, value) in offsets {
+                model.extend((delay + age).to_le_bytes());
+                model.extend(value[axis].to_le_bytes());
                 model.extend(0f32.to_le_bytes());
             }
         }
@@ -214,9 +226,13 @@ struct Layer {
     color: Vec<(u32, [u8; 4])>,
     uv_speed: [f32; 2],
     uv_origin: [f32; 2],
+    uv_keys: Keys,
     pulse: bool,
     facing: Facing,
+    inherit_joint_rotation: bool,
     camera_depth: Keys,
+    mirror_axes: u8,
+    soft_particle: f32,
 }
 
 impl Layer {
@@ -240,9 +256,13 @@ impl Layer {
             color: vec![(0, [255; 4])],
             uv_speed: [0.; 2],
             uv_origin: [0.; 2],
+            uv_keys: Vec::new(),
             pulse: false,
             facing: Facing::World,
+            inherit_joint_rotation: false,
             camera_depth: Vec::new(),
+            mirror_axes: 0,
+            soft_particle: 0.,
         }
     }
 }
@@ -351,6 +371,13 @@ impl Compiler {
             None => format!(r"effect\{}\m{}", self.namespace, layer.mesh),
         };
         model[80..80 + mesh.len()].copy_from_slice(mesh.as_bytes());
+        if layer.mirror_axes != 0 || layer.soft_particle > 0. {
+            // Private fields after the NUL-terminated model path and FZD1 data.
+            ensure!(mesh.len() < 48, "model name overlaps Frontier draw fields");
+            model[136..139].copy_from_slice(b"FZF");
+            model[139] = layer.mirror_axes;
+            float(&mut model, 140, layer.soft_particle);
+        }
         // A949F8 reads Euler order 4 and travel axis 6 (disabled).
         // A956D8 reads the camera mode separately at bits 8..11.
         put(&mut model, 256, 0x64 | (layer.facing as u32) << 8);
@@ -417,6 +444,7 @@ impl Compiler {
             sheet.as_ref(),
             layer.uv_speed,
             layer.uv_origin,
+            &layer.uv_keys,
             delay,
         )?;
         self.sheets.extend(sheet);
@@ -505,6 +533,11 @@ impl Compiler {
         self.rows.extend(path.bytes());
         self.rows.push(0);
         let mut proof = self.proof;
+        // 31C3A8 property 7 supplies the orientation mode to 31D92C.
+        // Mode 0 uses the current joint rotation on every live update.
+        if layer.inherit_joint_rotation {
+            proof[56] = 0;
+        }
         short(&mut proof, 48, id);
         self.rows.extend(proof);
         Ok(())
@@ -590,7 +623,8 @@ impl Compiler {
                 }
                 let before = self.count;
                 let definition = half(row, 76)?;
-                let wide = half(row, 84)? & 1 != 0;
+                let emitter_flags = word(row, 84);
+                let wide = emitter_flags & 1 != 0;
                 let (defs, stride) = if wide {
                     (wide_defs, 140)
                 } else {
@@ -645,22 +679,22 @@ impl Compiler {
                     // 113D1B30 / 113D0690 advance UV once per two bank frames.
                     let uv_mode = def[if wide { 108 } else { 22 }];
                     let mut uv_origin = [0.; 2];
+                    let mut uv_keys = Vec::new();
                     let scroll_axes = match uv_mode {
                         0 => [false, false],
                         1 => [true, true],
                         2 => [true, false],
                         3 => [false, true],
                         7 if !wide => {
-                            // 113D0A17 samples a vector offset. The water emitters
-                            // use a constant tile within the splash atlas.
+                            // 113D0A17 samples a vector UV offset at particle age.
                             let id = word(def, 24).try_into()?;
                             let keys = vector_curve(id, [0.; 3], time_scale);
                             let [u, v, _] = keys[0].1;
-                            ensure!(
-                                keys.iter().all(|(_, p)| p[..2] == [u, v]),
-                                "animated UV offset curve {id}"
-                            );
-                            uv_origin = [u, v];
+                            if keys.iter().all(|(_, p)| p[..2] == [u, v]) {
+                                uv_origin = [u, v];
+                            } else {
+                                uv_keys = keys;
+                            }
                             [false, false]
                         }
                         mode if wide => anyhow::bail!("unsupported wide Frontier UV mode {mode}"),
@@ -757,9 +791,16 @@ impl Compiler {
                         color,
                         uv_speed,
                         uv_origin,
+                        uv_keys,
                         pulse: false,
                         facing,
+                        // 81216E36 attaches the persistent sword glow to FZ node 21.
+                        inherit_joint_rotation: matches!(bank, 4016..=4019) && selector == 8,
                         camera_depth,
+                        // FZ 81F482A4 samples independent X/Y mirror signs.
+                        mirror_axes: (emitter_flags as u8 >> 2) & 3,
+                        // FZ HD 113CEC2B / 113D3354 select the soft-particle draw.
+                        soft_particle: f32::from_bits(word(def, if wide { 128 } else { 40 })),
                     };
                     let mesh_key = half(def, 10)?;
                     let mut keys = vec![(0, mesh)];
@@ -818,28 +859,16 @@ impl Compiler {
                 let y = if mirrored { core::f32::consts::PI } else { 0. };
                 self.layer(
                     Layer {
-                        mesh: [CHARGE_AURA_MESH, 72][kind],
-                        uv_speed: [0.; 2],
-                        uv_origin: [0.; 2],
-                        frames_per_second: 30.,
                         // Limit the combined brightness of the overlapping auras
                         // before GU's HDR and bloom passes.
                         blend: Blend::Alpha,
-                        delay: 0,
-                        life: 600,
-                        count: 1,
-                        position: [0.; 3],
-                        spread: [0.; 3],
                         rotation: vec![(0, [0., y, 0.]), (600, [0., y, 600. * rate])],
                         rotation_range: [0., 0., core::f32::consts::PI],
-                        proportional_rotation: false,
                         scale: if kind == 0 {
                             vec![(0, [2., 2., 1.]), (2, [3., 3., 1.]), (4, [2., 2., 1.])]
                         } else {
                             vec![(0, [2., 2., 1.]), (90, [5., 5., 1.])]
                         },
-                        scale_range: [0.; 3],
-                        movement: vec![(0, [0.; 3])],
                         color: if kind == 0 {
                             vec![
                                 (0, [0; 4]),
@@ -851,7 +880,7 @@ impl Compiler {
                         },
                         pulse: kind == 0,
                         facing: Facing::Camera,
-                        camera_depth: Vec::new(),
+                        ..Layer::legacy([CHARGE_AURA_MESH, 72][kind], 600)
                     },
                     None,
                 )?;
@@ -869,18 +898,7 @@ impl Compiler {
                 };
                 self.layer(
                     Layer {
-                        mesh: [CHARGE_AURA_MESH, 88][kind],
-                        uv_speed: [0.; 2],
-                        uv_origin: [0.; 2],
-                        frames_per_second: 30.,
                         blend: Blend::Alpha,
-                        delay: 0,
-                        life: [12, 8][kind],
-                        count: 1,
-                        position: [0.; 3],
-                        spread: [0.; 3],
-                        rotation: vec![(0, [0.; 3])],
-                        proportional_rotation: false,
                         rotation_range: if kind == 0 {
                             [0., 0., core::f32::consts::PI]
                         } else {
@@ -890,16 +908,13 @@ impl Compiler {
                             .iter()
                             .map(|&(t, s)| (t, [s * factor, s * factor, factor]))
                             .collect(),
-                        scale_range: [0.; 3],
-                        movement: vec![(0, [0.; 3])],
                         color: vec![
                             (0, [255, 176, 176, 255]),
                             (if kind == 0 { 3 } else { 2 }, [255, 176, 176, 255]),
                             (if kind == 0 { 12 } else { 8 }, [64, 0, 0, 16]),
                         ],
-                        pulse: false,
                         facing: Facing::Camera,
-                        camera_depth: Vec::new(),
+                        ..Layer::legacy([CHARGE_AURA_MESH, 88][kind], [12, 8][kind])
                     },
                     None,
                 )?;
@@ -1166,6 +1181,19 @@ impl Compiler {
         self.surface_spray(2.5)?;
         self.route(first);
         self.blade_strip(501)
+    }
+
+    // 8102AC68/8102AD08 draws object 151 (21140 / 140) on the left hand.
+    // The clip lifetime is controlled by the weapon, including hit stop.
+    pub fn switch_axe_cartridge(&mut self) -> Result<()> {
+        let first = self.count;
+        let mut model = Layer::legacy(151, 32767);
+        model.blend = Blend::Alpha;
+        model.scale = vec![(0, [1.3; 3])];
+        model.rotation = vec![(0, [0., -core::f32::consts::FRAC_PI_6, 0.])];
+        self.layer(model, None)?;
+        self.route(first);
+        Ok(())
     }
 
     pub fn blade_strip(&mut self, mesh: u16) -> Result<()> {
