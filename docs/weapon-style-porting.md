@@ -1,6 +1,6 @@
 # 武器风格移植流程
 
-本文以 Frontier 武器作为 MHGU 1.4 新风格接入。构建和安装见[开发指引](development.md)，实际招式和键位见[极之型大剑](../plugins/great-sword-extreme/README.md)及[极之型双剑](../plugins/dual-blades-extreme/README.md)。
+本文以 Frontier 武器作为 MHGU 1.4 新风格接入。构建和安装见[开发指引](development.md)，实际招式、键位和移植差异见下表的武器说明。
 
 ## 1. 确认源武器和招式表
 
@@ -8,8 +8,10 @@
 
 | 移植实例 | FZ 武器与动作资源 | GU 装备武器编号 | 插件风格编号 |
 | --- | --- | --- | --- |
-| 极之型大剑 | 0，`motion/w00.mot` | 0 | 1 |
-| 极之型双剑 | 6，`motion/w06.mot` | 11 | 2 |
+| [极之型大剑](../plugins/great-sword-extreme/README.md) | 0，`motion/w00.mot` | 0 | 1 |
+| [极之型双剑](../plugins/dual-blades-extreme/README.md) | 6，`motion/w06.mot` | 11 | 2 |
+| [极之型太刀](../plugins/long-sword-extreme/README.md) | 7，`motion/w07.mot` | 7 | 3 |
+| [极之型斩斧 F](../plugins/switch-axe-extreme/README.md) | 12，`motion/w12.mot` | 8 | 4 |
 
 每招先记录输入及优先级、前置状态、源状态、片段组和槽、起始帧、混合及循环、出判定与音效帧、派生窗口、结束动作。命中、格挡、落地或该层播放到末帧才允许的转移，应注明触发条件。由原生函数补充的分支也要登记，动作表的记录数只说明有多少状态槽。
 
@@ -17,10 +19,10 @@
 
 ## 2. 转换资源并校正时序
 
-1. 在 `tools` 的转换器中复用 `mhf-resource` 解包和 `mhgu-resource` 写入。两套武器移植把上下身的 0/1、2/3、4/5 三组轨道分别合成全身 LMT，保留原组内槽位、空槽和循环点。男女模型分别生成。
+1. 在 `tools` 的转换器中复用 `mhf-resource` 解包和 `mhgu-resource` 写入。现有四把武器把上下身的 0/1、2/3、4/5 三组轨道分别合成全身 LMT，保留原组内槽位、空槽和循环点。男女模型分别生成。
 2. 核对根轨、坐标和武器挂点事件。先看站立、拔刀、收刀和防御回正，再看活动幅度大的攻击。换手或离背要对齐源动作帧，混合期间也要观察。双剑左右手分别有挂点和接触槽。
 3. 用私有路径加载资源，例如 `player/mot/frontier_db`。通过 mhfz-sdk 的 [MotionBanks](../crates/mhfz-sdk/src/motion.rs) 或武器自己的编码器，将源片段映射到 GU 空闲的运行时 bank 和槽。GU 的资源载入和绑定由 mhgu-sdk 提供。播放通过 `action::play_motion` 进入 GU 的层播放函数。
-4. 分别标记动作播放帧、逻辑 tick 和实际经过时间。FZ 的 30 Hz 逻辑计时在 GU 以 60 Hz 单位计时时乘二。受击停顿和变速时用引擎本次实际经过量。表驱动的动作特效按 FZ `817BD900` 扫描从当前姿势到下一播放位置的左闭右开区间。循环在新的姿势采样后开始扫描，重复采样不重播已扫描区间。
+4. 分别标记动作播放帧、逻辑刻和实际经过时间。一刻 FZ 30 Hz 逻辑时间对应两个 GU 60 Hz 时钟单位。半速动作要分别验证片段事件帧和独立计时，例如大剑纵斩的蓄力升段。表驱动的特效使用 `MotionClock`，按 FZ `817BD900` 在混合结束后扫描 `[当前姿势帧, 下一播放帧)`。跳入新片段时按起播帧重置游标，循环在取到回绕后的姿势时重新扫描，重复采样跳过已处理的区间。见[动作特效游标](../crates/mhfz-sdk/src/effects.rs)。
 
 资源生成脚本负责组装 `dist`。源参数最好留在提取的数据或动作程序中，运行时以可辨识的名称取用。新增 GU 派生参数也应注明用途和单位，比如[双剑空中下劈的水平速度](../plugins/dual-blades-extreme/src/program.rs)。
 
@@ -28,10 +30,13 @@
 
 - 在内容插件 `lib.rs` 定义常驻 `Style`，声明全局唯一的风格编号、GU 武器类型、所需回调和已实现的动作 ID。在 Forge 入口调用 `StyleRegistry::register` 一次。见[大剑入口](../plugins/great-sword-extreme/src/lib.rs)和[双剑入口](../plugins/dual-blades-extreme/src/lib.rs)。
 - 沿用 V1 注册接口和装备箱选择。配置由注册器按武器保存，未注册、不匹配或无配置时解析为 0。`independent` 让 GU 固定表使用内部索引 0，实际风格由独立描述符决定。切出风格或场景更换时，控制器会收到空输入。旧 actor 为 0 时只清理插件自己的状态。
-- 风格动作 ID 为 0–255，编码为 GU 武器组 `16` 的 `0x8000..0x80ff` 槽。与 GU 切招交接用 `action::enter`、`action::transition_to` 等现有接口。等 GU 接受目标状态后再建立游标、播放动作、安装命中和派生窗口。
-- 输入从 GU 已解析的 `Input::command`、`Input::weapon_command` 与原生 `ActionRequest` 取用。按下、持续、松开和组合键优先级分别核对。`request` 返回已注册的动作 ID 可接手请求。对普通武器切招，`NATIVE_ACTION` 明确放行原生槽，`PASS` 表示拒绝。拔刀路由里的 `PASS` 则保留 GU 已选中的路由。见[请求解析](../plugins/style-registry/src/runtime.rs)和[武器路由](../plugins/style-registry/src/runtime/weapon.rs)。
-- 固定的输入窗口优先由 [`Style::commands`](../crates/mhgu-sdk/src/style/action/command.rs) 绑定到 GU 命令表，区分预输入、允许执行和停止接收的帧。由 FZ 命中、蓄力等条件决定的动态派生，在风格中选中目标后提交给 GU。避免在输入处理和动作更新两个入口各消费一次同一输入。
-- 公共移动、收刀、落地、受击、骑乘和狩技继续走 GU。`art_slots` 配置装备页槽位数，允许出招的窗口提交 `Transition::HUNTER_ART`。武器专属狩技要从本武器原版派发表确认起手、后续动作和收尾。防御规则通过 `guard::Policy` 接入 GU 的碰撞、斩味和反应，成功后的招式通过 `guard::take` 取得结果。
+- 风格动作 ID 为 0–255，编码为 GU 武器组 `16` 的 `0x8000..0x80ff` 槽。与 GU 切招交接用 `action::enter`、`action::transition_to` 等现有接口。启动新招式时可用 `accept_custom_start` 接受 GU 已排定且尚未启动的目标动作。等 GU 接受目标后再更新朝向、建立游标、播放动作并安装命中和派生窗口。
+- 从 `Input::command`、`Input::weapon_command` 与原生 `ActionRequest` 取用 GU 已解析的输入。逐项核对按下、持续、松开和组合键优先级。附加肩键读取 `Input::auxiliary_pressed`，由 GU 原生键位查询处理默认 ZR 和交换布局。收刀冲刺的原生过滤可能只保留冲刺键，注册器从 GU 的过滤前按键中恢复附加肩键。`request` 返回已注册的动作 ID 可接手请求。普通武器切招中 `NATIVE_ACTION` 放行原生槽，`PASS` 拒绝本次请求。拔刀路由中的 `PASS` 保留 GU 选中的路由。见[请求解析](../plugins/style-registry/src/runtime.rs)和[武器路由](../plugins/style-registry/src/runtime/weapon.rs)。
+- 固定的输入窗口优先用 `Style::commands` 绑定到 GU 命令表，分别声明接收起点、可执行帧和停止接收帧。GU 正等待 `X+A` 时，`WeaponAfterCombo` 可暂缓单键，`AttackChord` 可接收 GU 的肩键加 `X+A` 组合。发现原版命令抢占时，查清表号及冲突的目标槽，只调整冲突行并保留需透传的地形或狩技行。动态派生由风格选定后交给 GU，一个输入由对应的命令表或风格分支消费一次。见[命令表接口](../crates/mhgu-sdk/src/style/action/command.rs)。
+- 转向通过 GU 的方向判定和 `movement::set_facing`、`movement::turn` 更新当前与目标朝向。需要长按摇杆时按实时相机方向取角度，可以像斩斧一样使用 `live_relative_stick_yaw`，沿用 GU 的死区和按住锁，只修正相机方位。若派生有输入缓冲，按该招的源规则保存方向或到执行帧再取方向。见[移动接口](../crates/mhgu-sdk/src/style/movement.rs)。
+- 公共移动、收刀、落地、受击、骑乘和狩技继续走 GU。`art_slots` 配置装备页槽位数，允许出招的窗口提交 `Transition::HUNTER_ART`。武器专属狩技要从本武器原版派发表确认起手、后续动作、槽更新和收尾。通过 `guard::Policy` 交付防御结果，使用 `guard::take` 取得已发生的格挡。风格通过 `StyleRulesV1` 声明格挡半角及其他可选规则。注册器处理 GU 来袭角、防御强化与伤害结算，具体防御窗口、接招和资源收益由风格决定。见[防御接入](../plugins/style-registry/src/runtime/guard.rs)。
+
+共享派发在读取任务专用字段前先确认角色类型。联机回放按当前 GU 名册、任务猎人类型和装备武器定位远端角色。动作由原生 `netPlAction` 同步，额外的状态值由风格通过 `bind_action_state` 声明，注册器检查武器是否有可用位。离场、换武器或复用名册槽时回收该槽的旧状态。见[远端接口](../crates/mhgu-sdk/src/style/remote.rs)。
 
 ## 4. 接入命中、特效、声音和 HUD
 
@@ -40,9 +45,11 @@
 | 武器判定 | 用 [`Attack::submit`](../crates/mhgu-sdk/src/style/action/attack.rs) 传命中模板、动作值、延迟、持续时间和形状。动作值需在原生构造阶段可读，以便应用武器、装备和狩技修正。GU 负责碰撞及结算。双手同帧判定可用 `Attack::SECONDARY` 分开接触槽。 |
 | 模板属性 | HDP 行提供命中属性和形状索引，HTS 提供几何。按招式选择模板与属性。需要沿用空中斩击形状且关闭骑乘时，提交 `Attack::NO_MOUNT` 让注册器在构造前处理本次 HDP 行。 |
 | 独立弹波或光波 | 按原版生成帧对齐特效和独立判定。两者采用同一位置及朝向，分清扫过挂点的判定、取样后固定在世界坐标的判定，以及每波的命中编号和斩味处理。 |
-| 粒子 | 转换到 GU 原生 EFL/PEL 及配套 MOD/MRL/TEX。FZ 粒子库的局部旋转按 X、Y、Z 依次应用。以世界坐标发射时，取样的刀身矩阵按 GU 发射器的轴顺序分解。随刀旋转的挂点效果在 PEL 中启用关节旋转。动作层发送播放、阶段切换和停止信号，绘制钩子由注册器共享。 |
+| 粒子 | 转换到 GU 原生 EFL/PEL 及配套 MOD/MRL/TEX。FZ 粒子模型的局部旋转按 X、Y、Z 依次应用。以世界坐标发射时，使用 `world_pose_angles` 将取样姿势分解为 GU 发射器的旋转角。随刀移动和旋转的挂点效果在 PEL 中启用关节旋转，左右手使用各自的关节和局部角。风格在动作退出、收刀、换区或远端槽回收时停止仍由该动作负责的持续效果。注册器统一转接 GU 绘制及释放回调。 |
 | 音效 | 挥刀随当前动作时间线触发，蓄力、格挡等事件按动作程序触发。命中和弹刀用 GU 的碰撞结果播公共音效。检查音库路径、事件帧、循环重复触发和动作打断后的清理。 |
 | HUD | 原版狩技继续使用 GU 的槽位和结算。新资源放在独立路径，从当前猎人的风格状态取得进度并更新显示。可参考[双剑 HUD](../plugins/dual-blades-extreme/src/hud.rs)的火焰槽与刃打层数。 |
+
+在注册后通过 `style::preload::bind` 登记预加载回调。GU `29B7D4` 完成任务猎人初始化后，注册器为本地当前风格调用回调。四把武器共用 `MotionBanks::preload_for_hunt` 预加载当前模型的移动、地形和攻击动作库，首次播放时再绑定 GU 的运行时槽。各插件按需在同一回调准备音库、粒子、私有 HTS 和 HUD。私有 HTS 可使用 `CachedHitShape` 持有缓存引用，攻击时取得独立引用，未预加载时仍可按路径加载。见[预加载接口](../crates/mhgu-sdk/src/style/preload.rs)和[形状缓存](../crates/mhgu-sdk/src/combat/collision/shapes.rs)。
 
 ## 5. 按功能验收
 

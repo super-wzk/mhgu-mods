@@ -4,13 +4,14 @@
 
 | 位置 | 职责 |
 | --- | --- |
-| [crates/mhgu-sdk](../crates/mhgu-sdk/README.md) | GU 1.4 引擎绑定、动作与碰撞接口、风格和怪物注册接口。 |
-| [crates/mhfz-sdk](../crates/mhfz-sdk/README.md) | 极型武器共用的 Frontier 动作程序、输入、音效和粒子适配，依赖 mhgu-sdk。 |
-| [plugins/style-registry](../plugins/style-registry/README.md) | 扩展装备箱的原版风格页，按武器保存选择，转接公共动作、狩技、命中、防御和粒子绘制。 |
-| [plugins/great-sword-extreme](../plugins/great-sword-extreme/README.md) / [plugins/dual-blades-extreme](../plugins/dual-blades-extreme/README.md) / [plugins/long-sword-extreme](../plugins/long-sword-extreme/README.md) | 动作程序、风格输入与派生、专属音效和特效。双剑还提供刃打和火焰槽 HUD。 |
-| [plugins/switch-axe-extreme](../plugins/switch-axe-extreme/README.md) | 极之型斩斧 F 的操作、双槽与吸收机制、当前移植缺口和离线回放。 |
+| [crates/mhgu-sdk](../crates/mhgu-sdk/README.md) | GU 1.4 引擎绑定，包括原生输入和转向、动作、碰撞、资源与注册接口。 |
+| [crates/mhfz-sdk](../crates/mhfz-sdk/README.md) | 极型武器共用的 Frontier 动作程序、动作库预加载、技能帧数补正、弹刀、镜头震动和表现时序。 |
+| [plugins/style-registry](../plugins/style-registry/README.md) | 扩展装备箱的原版风格页，按武器保存选择，转接 GU 动作、狩技、碰撞、粒子绘制与附加肩键相关的聊天入口。 |
+| [极之型大剑](../plugins/great-sword-extreme/README.md)、[极之型双剑](../plugins/dual-blades-extreme/README.md)、[极之型太刀](../plugins/long-sword-extreme/README.md)、[极之型斩斧 F](../plugins/switch-axe-extreme/README.md) | 各武器的动作编号、派生优先级、精准防御规则、槽、专属狩技及表现资源。 |
 | [plugins/monster-registry](../plugins/monster-registry/README.md) / [plugins/monster-espinas](../plugins/monster-espinas/README.md) | 独立物种、任务和怪物行为的接入实例。 |
 | [tools](../tools/) | 宿主资源转换 CLI。`mhf-resource` 读 FZ 格式，`mhgu-resource` 读写 GU 格式，`src/hunter.rs` 等负责具体移植映射。 |
+
+各武器当前的派生、槽、技能、特效和联机实现可在[四种极之型的实现与回归](weapon-style-implementation.md)按功能查阅。
 
 ## 本地输入和构建
 
@@ -35,19 +36,31 @@ python3 plugins/long-sword-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 python3 plugins/switch-axe-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 ```
 
-打包脚本先把源数据转换到 `target/assets/`，再构建 NRO 并组装 `dist/<插件名>/romfs/nativeNX`。动作程序由 `include_bytes!` 编入 NRO。资源已经生成且本次只改 Rust 时，可以用 `(cd plugins/dual-blades-extreme && cargo forge build --release)` 增量构建，产物在插件目录的 `dual_blades_extreme.nro`。安装时取这次生成的 NRO，或先把它同步到 `dist` 中的同名文件。
+武器打包脚本先把源数据转换到插件的 `target/assets/`，再构建 NRO 并组装 `dist/<插件名>/romfs/nativeNX`。动作程序和部分事件表由 `include_bytes!` 编入 NRO，LMT、命中、粒子、音效和贴图等原生资源随模组目录安装。
+
+已有匹配的资源且本次仅改 Rust 时，可以增量构建。离线脚本通常读取 `dist` 中的 NRO，需同步本次产物再运行。以下以双剑为例。
+
+```sh
+(cd plugins/dual-blades-extreme && cargo forge build --release) &&
+  cp plugins/dual-blades-extreme/dual_blades_extreme.nro \
+     plugins/dual-blades-extreme/dist/dual-blades-extreme/romfs/nativeNX/plugins/
+```
+
+共用 SDK 改动后重建受影响的注册器和武器。转换器、源数据或资源格式发生变化时，重新运行相关打包脚本，让 NRO 内的事件表与外部资源一起更新。整理代码后也可对比重建前后的非 NRO 文件清单和哈希，确认生成资源一致。
 
 ## 调查原生入口
 
 已有导出时可用 `rg -n 'func-address: 0x2b72d4' mhgu/out/decompiled.c` 定位攻击构造器，再跟到调用者、虚表或数据资源。记录游戏版本、函数相对地址、输入与返回语义。反编译推断不确定时才核对该入口的指令。带浮点数的原生调用还要确认参数走通用寄存器还是 VFP 寄存器，优先复用 SDK 现有的桥接函数。
 
-运行时在所属游戏线程使用活对象及借用指针。注册描述符和提供给引擎长期读取的表使用常驻存储。切换动作、场景或角色时，按实际生命周期清理插件状态，确认旧对象仍有效后再访问它。
+运行时在所属游戏线程使用活对象及借用指针。注册描述符和提供给引擎长期读取的表使用常驻存储。共享派发入口可能收到集会所猎人，读取任务专用字段前通过 `hunter::is_quest` 确认类型。切换动作、场景或角色时，按实际生命周期清理插件状态，确认旧对象仍有效后再访问它。
 
 项目尚未发布，SDK 服务默认使用 V1。修改接口签名后，一起重建并安装注册器与使用该接口的插件。
 
 ## 安装和确认
 
 把 `dist` 下所需的模组目录分别安装到自己的 MHGURecomp 模组目录，顺序为 Forge、相应注册器、内容插件。每个模组保留完整的 `romfs/nativeNX` 层级。共用钩子或资源布局发生变化时，把关联插件及转换资源一起更新。仅修改代码时更新对应的 NRO 即可。
+
+四把极型武器合包包含配套的注册器和四个武器模组目录。归档前核对每个目录的 NRO 和配套资源。已有合包的命名格式为 `mhgu边境风格-YYYYMMDDHHMM.7z`。
 
 重启游戏后，在原版装备箱按当前武器选风格。配置保存在 Forge 的 `savedata:/style_registry.ini`，`[Weapons]` 下用 GU 武器编号作键。查错误时依次确认 **安装包的 NRO 和资源、Forge 初始化和钩子日志、装备箱选择、任务内执行路径**。看到模组被列出或 NRO 被加载，只能确认到了加载阶段。
 
@@ -56,8 +69,18 @@ python3 plugins/switch-axe-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 | 修改内容 | 优先检查 |
 | --- | --- |
 | 单个速度、距离或计时参数 | 构建受影响的插件。需要安装时对照安装文件与本次产物。手感由任务内观察确认。 |
-| 配置、菜单、派生或共用命中逻辑 | 按改动挑选 [verify_menu.py](../plugins/great-sword-extreme/tests/verify_menu.py) 或 [verify_style.py](../plugins/great-sword-extreme/tests/verify_style.py) 中对应的场景。双剑特有的动作还需用双剑的数据和入口确认。 |
-| LMT、音效、特效资源 | 对照输出槽位、事件帧或材质字段。现有大剑参考有 [verify_assets.py](../plugins/great-sword-extreme/tests/verify_assets.py)、[verify_native_fx.py](../plugins/great-sword-extreme/tests/verify_native_fx.py) 与 [verify_native_material.py](../plugins/great-sword-extreme/tests/verify_native_material.py)。 |
-| 挂点、方向、地形衔接或场景渲染 | 用一个能重现问题的任务、动作和地图区域确认。记录角色状态、输入顺序、预期和实际表现。 |
+| 装备箱选择、肩键与 GU 命令优先级 | [装备箱与保存](../plugins/great-sword-extreme/tests/verify_menu.py)、[聊天快捷键与肩键交换](../plugins/style-registry/tests/verify_chat_shortcut.py)、[大剑输入及动作生命周期](../plugins/great-sword-extreme/tests/verify_style.py)。 |
+| 攻击、防御、狩技和武器专属派生 | [大剑与双剑弹刀、刃打和双手刀光](../plugins/style-registry/tests/verify_deflection.py)、[专属狩技](../plugins/style-registry/tests/verify_weapon_arts.py)、[太刀](../plugins/long-sword-extreme/tests/verify_port.py)与[斩斧](../plugins/switch-axe-extreme/tests/verify_port.py)的动作回放。 |
+| 动作、音效、特效与材质 | 对照输出槽位、事件帧、挂点或材质字段。参考[资源检查](../plugins/great-sword-extreme/tests/verify_assets.py)、[原生粒子](../plugins/great-sword-extreme/tests/verify_native_fx.py)和[材质绘制](../plugins/great-sword-extreme/tests/verify_native_material.py)。 |
+| 预加载、换区和角色交接 | [斩斧入口回放](../plugins/switch-axe-extreme/tests/verify_port.py)包含四武器任务初始化预加载、斩斧收刀与队员换区用例。[集会所回放](../plugins/switch-axe-extreme/tests/verify_lobby.py)核对任务角色和集会所角色交接。 |
+| 联机动作与伤害归属 | [大剑与双剑](../plugins/style-registry/tests/verify_gs_db_multiplayer.py)、[太刀](../plugins/long-sword-extreme/tests/verify_multiplayer.py)和[斩斧](../plugins/switch-axe-extreme/tests/verify_port.py)覆盖 GU 原生动作包和队员命中。实机另查双方的动作、特效和结算。 |
 
-现有 Python 离线脚本使用 Unicorn、对应版本的本地 ELF 和所需资源。先构建脚本读取的产物，再运行相关用例。离线结果可以说明表、命令和回调是否按预期执行。光效外观、实际距离、操作手感及联机行为需要各自的观察证据。
+从仓库根目录使用可导入 `unicorn` 的 Python 运行离线脚本。准备相应的本地 ELF，并保留打包生成的 `target/assets` 和 `dist`。涉及 GU 原版武器 ARC 的脚本还需要导出 `MHGU_ROMFS`。斩斧入口回放会加载四把武器检查预加载，因此运行前需生成注册器及四把武器的 `dist`。
+
+```sh
+python3 plugins/style-registry/tests/verify_chat_shortcut.py
+python3 plugins/switch-axe-extreme/tests/verify_lobby.py
+python3 plugins/switch-axe-extreme/tests/verify_port.py
+```
+
+分别记录构建、安装、离线回放和实机结果。离线回放可以核对事件、命令、资源路径与原生回调。光效外观、实际距离、操作手感及真实联机以任务内观察为准，复现记录应包含角色状态、输入顺序、区域、预期与实际表现。

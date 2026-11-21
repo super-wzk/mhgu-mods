@@ -62,6 +62,10 @@ fn spawn(resource: &DirectedShellResource<'_>, launch: ShellLaunch) -> bool {
 
 GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提供 GU 已解析的公共和武器指令，`request` 处理 GU 已接受的拔刀和武器切招请求。公共动作可返回 `PASS` 交给 GU。空输入通知插件结束，actor 为 0 时代表旧猎人已失效。
 
+[input](src/style/input.rs) 读取 GU 的组合键状态和当前附加肩键。通过 [movement](src/style/movement.rs) 查询摇杆方向、应用朝向和使用原生耐力入口。读取任务专用字段前，用 [hunter::is_quest](src/style/hunter.rs) 核对角色类型。
+
+[preload](src/style/preload.rs) 登记本地风格在 GU 完成任务猎人初始化后执行的资源准备回调。动作库预加载后仍在首次播放时绑定运行时槽，私有 HTS 可通过 [CachedHitShape](src/combat/collision/shapes.rs) 复用已加载资源。
+
 [remote](src/style/remote.rs) 提供 GU 玩家槽查询和远端动作状态的存储。读取远端装备前按当前名册核对猎人，角色离场、换武器或槽位更换时释放旧状态。风格插件负责根据 GU 接收的动作回放各自的招式。插件可以分别登记动作回放（`bind`）、逐帧观察（`observe`）和可选的动作状态收发（`bind_action_state`）。注册器校验当前武器的动作包是否有可用位，插件定义状态值的含义。
 
 [physical](src/style/physical.rs) 提供统一的物理攻击力回调登记。回调可限定在 GU 的左右刀身碰撞槽，也可覆盖同一猎人的独立武器碰撞。风格插件负责数值与生效条件。

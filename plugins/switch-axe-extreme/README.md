@@ -86,10 +86,11 @@ python3 plugins/switch-axe-extreme/package.py "${MHFZ_DAT:?}" "${MHGU_ROMFS:?}"
 
 将 `plugins/style-registry/dist/style-registry/` 和 `plugins/switch-axe-extreme/dist/switch-axe-extreme/` 作为两个模组安装到 MHGURecomp 的 `mods/` 下，保留各自的 `romfs/nativeNX/` 层级。本版两份模组需一起更新，注册器负责队员状态与特效回收。加载顺序为 Forge、style-registry、极之型斩斧。首次安装需要整个斩斧目录，动作、音效、特效、命中形状和槽条贴图都在 NRO 之外。
 
-离线回放需要可导入 `unicorn` 的 Python 环境、本地 `mhfz/eboot.bin.elf`、`mhgu/main.elf`、已设置的 `MHGU_ROMFS`，以及上述两份打包产物。在仓库根目录运行：
+离线回放需要可导入 `unicorn` 的 Python 环境、本地 `mhfz/eboot.bin.elf` 和 `mhgu/main.elf`，以及导出的 `MHGU_ROMFS`。`verify_port.py` 会加载四把武器检查预加载，先按[开发指引](../../docs/development.md)生成四把武器和注册器的构建产物。从仓库根目录运行以下用例。
 
 ```sh
 python3 plugins/switch-axe-extreme/tests/verify_port.py
+python3 plugins/switch-axe-extreme/tests/verify_lobby.py
 python3 plugins/style-registry/tests/verify_weapon_arts.py
 ```
 
@@ -100,6 +101,8 @@ python3 plugins/style-registry/tests/verify_weapon_arts.py
 [地面输入回放](tests/verify_stance.py)按游戏顺序执行公共按键解析、斩斧按键映射、原版待机表的对应指令行和风格控制器。覆盖双形态的 X、推杆 X、A、X+A、肩键蓄力与吸收、B 翻滚和长按 X 派生。特殊攻击键覆盖光剑未满时保持待机、满槽解锁、连段预输入变形斩和吸收后的两种派生。
 
 [预读回放](tests/verify_draw_preload.py)覆盖四种极之型的统一预读入口。斩斧在任务初始化时预读当前模型的三组动作库、音库、粒子表、刀身和放出命中形状及槽条贴图。首次播放再绑定动作库。
+
+[集会所回放](tests/verify_lobby.py)检查任务 → 集会所 → 任务切换时，集会所角色保留 GU 原生派发和动作编码，所选斩斧风格仍保存在配置中。
 
 [连挥与方向回放](tests/verify_chains.py)执行 FZ 的方向选择函数和 GU 的按键映射，覆盖两种形态袈裟斩的角度边界、全部六个蓄力后续、摇杆死区和 B 回避。按安装包的 LMT 回卷帧检查斧连挥和两种形态的蓄力乱斩是否能连续产生至少七次刀身判定、停按后是否收招，以及原地、移动蓄力和上挑派生。回放还执行原生耐力恢复代码，验证两条连段暂停自然回耐、收招后能恢复，以及资源耗尽时持续按键也会收招。
 
