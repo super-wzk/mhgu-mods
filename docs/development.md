@@ -7,7 +7,7 @@
 | [crates/mhgu-sdk](../crates/mhgu-sdk/README.md) | GU 1.4 引擎绑定，包括原生输入和转向、动作、碰撞、资源与注册接口。 |
 | [crates/mhfz-sdk](../crates/mhfz-sdk/README.md) | 极型武器共用的 Frontier 动作程序、动作库预加载、技能帧数补正、弹刀、镜头震动和表现时序。 |
 | [plugins/style-registry](../plugins/style-registry/README.md) | 扩展装备箱的原版风格页，按武器保存选择，转接 GU 动作、狩技、碰撞、粒子绘制与附加肩键相关的聊天入口。 |
-| [极之型大剑](../plugins/great-sword-extreme/README.md)、[极之型双剑](../plugins/dual-blades-extreme/README.md)、[极之型太刀](../plugins/long-sword-extreme/README.md)、[极之型斩斧 F](../plugins/switch-axe-extreme/README.md)、[极之型单手剑](../plugins/sword-shield-extreme/README.md) | 各武器的动作编号、派生优先级、精准防御规则、槽、专属狩技及表现资源。 |
+| [极之型大剑](../plugins/great-sword-extreme/README.md)、[极之型双剑](../plugins/dual-blades-extreme/README.md)、[极之型太刀](../plugins/long-sword-extreme/README.md)、[极之型斩斧 F](../plugins/switch-axe-extreme/README.md)、[极之型单手剑](../plugins/sword-shield-extreme/README.md)、[极之型铳枪](../plugins/gunlance-extreme/README.md) | 各武器的动作编号、派生优先级、精准防御规则、槽、专属狩技及表现资源。 |
 | [plugins/monster-registry](../plugins/monster-registry/README.md) / [plugins/monster-espinas](../plugins/monster-espinas/README.md) | 独立物种、任务和怪物行为的接入实例。 |
 | [tools](../tools/) | 宿主资源转换 CLI。`mhf-resource` 读 FZ 格式，`mhgu-resource` 读写 GU 格式，`src/hunter.rs` 等负责具体移植映射。 |
 
@@ -35,6 +35,7 @@ python3 plugins/dual-blades-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 python3 plugins/long-sword-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 python3 plugins/switch-axe-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 python3 plugins/sword-shield-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
+python3 plugins/gunlance-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 ```
 
 武器打包脚本先把源数据转换到插件的 `target/assets/`，再构建 NRO 并组装 `dist/<插件名>/romfs/nativeNX`。动作程序和部分事件表由 `include_bytes!` 编入 NRO，LMT、命中、粒子、音效和贴图等原生资源随模组目录安装。

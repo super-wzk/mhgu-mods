@@ -16,6 +16,8 @@ pub mod physical;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub mod preload;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
+mod resource;
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub mod remote;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub mod rules;
@@ -98,6 +100,8 @@ pub enum RegisterError {
 
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub mod registry;
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub mod manual;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 #[doc(hidden)]
 pub use registry::{ServiceV1, publish};

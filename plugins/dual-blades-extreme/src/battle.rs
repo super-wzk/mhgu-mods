@@ -17,7 +17,7 @@ use core::{
 };
 use mhfz_sdk::{
     action::Cursor,
-    combat::{HitWindow, evade_bonus_frames},
+    combat::{DrawnEvade, HitWindow, bladescale_evade, evade_bonus_frames},
     sound::Clock,
     sprint::{self, Flick, Resume, STICK_DEADZONE},
 };
@@ -28,10 +28,11 @@ use mhgu_sdk::style::{
         command::{BufferedCommand, CommandInput, CommandSet},
         melee::{self, BLADE_CONTACT_OFFSETS},
     },
-    input::attack_chord_with_shoulder,
+    input::{attack_chord_with_shoulder, attack_combo_pending},
     movement::{self, CLIMBS, stamina},
 };
 
+const DRAW_SLASH: u8 = 16;
 const DASH_SLASH: u8 = 82;
 const NATIVE_AERIAL_SLOTS: &[u16] = &[31, 32, 33, 66, 67];
 const DEFLECTION: u8 = 11;
@@ -192,7 +193,7 @@ impl Battle {
         }
     }
 
-    unsafe fn commands(&mut self, actor: u32, input: &Input, chaining: bool) -> Commands {
+    unsafe fn commands(&mut self, actor: u32, input: &Input) -> Commands {
         unsafe {
             // GU's 27F678 also sets the target facing. Only sample the stick
             // here, including while an attack or a native action is running.
@@ -210,31 +211,24 @@ impl Battle {
             if self.flick.update(input, self.elapsed) && read::<f32>(actor, 5088) > 0. {
                 bits |= 1 << CMD_SPRINT;
             }
-            let shoulder_chord = attack_chord_with_shoulder(actor);
+            let chord = input.weapon_command(X_AND_A) || attack_chord_with_shoulder(actor);
             let shoulder_held = input.command(27);
-            self.shoulder_used_by_chord =
-                shoulder_held && (shoulder_chord || self.shoulder_used_by_chord);
-            if shoulder_chord && let Some(cursor) = &mut self.cursor {
+            self.shoulder_used_by_chord = shoulder_held && (chord || self.shoulder_used_by_chord);
+            if chord && shoulder_held && let Some(cursor) = &mut self.cursor {
                 // R may have queued a higher-priority follow-up one tick before
                 // GU resolves it as part of X+A.
                 cursor.discard_pending_command(CMD_SHOULDER_HELD);
             }
             if input.command(8) {
                 bits |= 1 << 13;
-            } else if input.weapon_command(X_AND_A) || shoulder_chord {
+            } else if chord {
                 bits |= 1 << CMD_COMBO;
                 if direction >= 2 {
                     bits |= 1 << (direction + 4);
                 }
             } else {
-                // Use GU's press event in the attack chain. The later weapon
-                // command would replay the same press after combo resolution.
-                let slash = if chaining {
-                    input.command(X_PRESSED)
-                } else {
-                    input.weapon_command(X)
-                };
-                if slash {
+                // Wait for 27CA28 to resolve X or X+A before changing attacks.
+                if input.weapon_command(X) {
                     bits |= 1 << CMD_SLASH_DOWN;
                     if direction >= 2 {
                         bits |= 1 << (direction + 1);
@@ -259,7 +253,7 @@ impl Battle {
             }
             // Frontier 811EE87C tests the level for both held and released.
             // An early tap must still count as released when its window opens.
-            if input.command(70) && !shoulder_chord {
+            if input.command(70) && !chord {
                 bits |= 1 << 19;
             }
             if !shoulder_held {
@@ -335,7 +329,7 @@ impl Battle {
                 u32::from(!sprint),
                 0
             );
-            if was_sheathed && matches!(state, 16 | 62 | 67 | DASH_SLASH | AERIAL_MOUNT_FINISH) {
+            if was_sheathed && matches!(state, DRAW_SLASH | 62 | 67 | DASH_SLASH | AERIAL_MOUNT_FINISH) {
                 native!(0x2a264c, actor, 1);
             } else {
                 native!(0x2a2560, actor, 1);
@@ -431,7 +425,13 @@ impl Battle {
                         write(actor, 11072, read::<f32>(actor, 11072).max(remaining));
                     }
                     8 => self.keep_evade = true,
-                    9 if self.peer_slot == 0 => stamina(actor, -150., false),
+                    9 if self.peer_slot == 0 => {
+                        stamina(actor, -150., false);
+                        if matches!(state, 36..=40 | 73..=75 | 83..=88) {
+                            // GU w11 11C17DC uses category 6 on entry to its demon step.
+                            bladescale_evade(actor, DrawnEvade::DemonStep);
+                        }
+                    }
                     11 | 12 => submit_strike(actor, state, parameter, late, kind == 12),
                     13 => {
                         let phase = parameter as u8;
@@ -777,8 +777,7 @@ impl Battle {
                 let clip = motion::source_clip(actor, read(actor, 1204));
                 self.upkeep(actor, mode, sprint, clip);
             }
-            let chaining = custom.is_some_and(|id| !matches!(id, SPRINT | BRAKE));
-            let commands = self.commands(actor, input, chaining);
+            let commands = self.commands(actor, input);
             if let Some(id) = custom {
                 if read::<u8>(actor, 5) == 0 {
                     return self.begin(actor, id);
@@ -926,6 +925,10 @@ unsafe fn submit_strike(actor: u32, state: u8, strike_id: u16, late: f32, swap_h
         return;
     };
     let mut flags = 7;
+    if matches!(state, DRAW_SLASH | DASH_SLASH) {
+        // The paired GU draw and dash hits use -8 KO in w11 HDP 11/12 and 116/117.
+        flags |= Attack::punishing_draw(8);
+    }
     // 811EF80C enables the hard-contact transition in 811EF762 for these states.
     if matches!(state, 0..=6 | 8 | 12..=17 | 20 | 43 | 54 | 55) {
         flags |= Attack::DEFLECTABLE;
@@ -1014,7 +1017,9 @@ pub(super) unsafe extern "C" fn request(actor: u32, raw: *const ActionRequest) -
                 if mode == 3 {
                     return u32::from(AERIAL_DANCE);
                 }
-            } else if buttons & (1 << X) != 0 || read::<u32>(actor, 5140) & (1 << X_PRESSED) != 0 {
+            } else if attack_combo_pending(actor) {
+                return PASS;
+            } else if buttons & (1 << X) != 0 {
                 return u32::from(AERIAL_MOUNT_FINISH);
             }
             return NATIVE_ACTION;
@@ -1023,7 +1028,7 @@ pub(super) unsafe extern "C" fn request(actor: u32, raw: *const ActionRequest) -
             return PASS;
         }
         match request.slot {
-            7..=9 => 16,
+            7..=9 => u32::from(DRAW_SLASH),
             10 | 13 | 14 => 67,
             73 => u32::from(DASH_SLASH),
             _ => PASS,

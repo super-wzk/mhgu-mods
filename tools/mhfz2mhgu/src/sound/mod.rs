@@ -239,6 +239,10 @@ pub fn great_sword(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
     Ok((assets, timeline))
 }
 
+pub fn gunlance(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
+    hunter_banks(dat, 9, "frontier_gl", "wi000snd.abn", b"wi010.snd\0")
+}
+
 pub fn sword_shield(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
     hunter_banks(dat, 4, "frontier_sns", "wd000snd.abn", b"wd000.snd\0")
 }
@@ -263,6 +267,39 @@ fn hunter_banks(
     model: &[u8],
 ) -> Result<(Vec<Asset>, Vec<u8>)> {
     let (timeline, [blade, common, weapon]) = gs::timeline(dat, id)?;
+    let mut model_bank = gs::model_bank(
+        dat,
+        archive,
+        model,
+        weapon.into_iter().filter(|&id| id < 32),
+    )?;
+    if id == 9 {
+        // wi010 lacks zones for 20/28 and points 3/12/13 to a silent placeholder.
+        for (model, cues) in [
+            (b"wi037.snd\0", &[20, 28][..]),
+            (b"wi011.snd\0", &[3, 12, 13][..]),
+        ] {
+            let mut alternate = gs::model_bank(dat, archive, model, cues.iter().copied())?;
+            ensure!(
+                alternate.rate == model_bank.rate,
+                "gunlance weapon banks differ in sample rate"
+            );
+            for &cue in cues {
+                let mut voice = alternate
+                    .voices
+                    .remove(&cue)
+                    .with_context(|| format!("missing gunlance weapon cue {cue}"))?;
+                let wave = &alternate.waves[voice.wave];
+                ensure!(
+                    voice.gain != 0 && wave.iter().any(|s| s.unsigned_abs() > 256),
+                    "silent gunlance weapon cue {cue}"
+                );
+                voice.wave = model_bank.waves.len();
+                model_bank.waves.push(wave.clone());
+                model_bank.voices.insert(cue, voice);
+            }
+        }
+    }
     let mut assets = Vec::new();
     for (name, bank) in [
         (
@@ -273,15 +310,7 @@ fn hunter_banks(
             "common",
             Bank::player(&dat.join("sound/common01.snd"), common)?,
         ),
-        (
-            "weapon",
-            gs::model_bank(
-                dat,
-                archive,
-                model,
-                weapon.into_iter().filter(|&id| id < 32),
-            )?,
-        ),
+        ("weapon", model_bank),
     ] {
         if bank.voices.is_empty() {
             continue;

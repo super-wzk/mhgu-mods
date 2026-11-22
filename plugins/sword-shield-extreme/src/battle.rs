@@ -1,7 +1,7 @@
 //! Local input selects FZ states. Both local and received actions replay the same steps.
 use crate::{
     collision, fx, motion, native,
-    program::{self, BRAKE, JUMP_SLASH, SPIN, SPRINT, SPRINT_SLASH, VACUUM},
+    program::{self, BACKSTEP, BRAKE, JUMP_SLASH, SPIN, SPRINT, SPRINT_SLASH, VACUUM},
     read, sound,
     trail::History,
     write,
@@ -12,7 +12,7 @@ use core::{
 };
 use mhfz_sdk::{
     action::Cursor,
-    combat::evade_bonus_frames,
+    combat::{DrawnEvade, bladescale_evade, evade_bonus_frames},
     effects::MotionClock,
     sound::Clock,
     sprint::{self, Flick, Resume},
@@ -21,7 +21,7 @@ use mhgu_sdk::style::{
     self, ActionRequest, Input, NATIVE_ACTION, PASS,
     action::{self, MotionFrame, command::CommandSet, melee},
     hunter, movement,
-    remote::{PeerStates, Roster},
+    remote::{self, PeerStates, Roster},
 };
 
 #[derive(Default)]
@@ -42,6 +42,7 @@ struct Battle {
     recoil: bool,
     evade_yaw: Option<u16>,
     roll_branch: Option<(u8, i16)>,
+    peer_round_force: bool,
 }
 static PEERS: PeerStates<Battle> = PeerStates::new();
 struct Local(UnsafeCell<Option<Battle>>);
@@ -58,16 +59,27 @@ pub unsafe extern "C" fn commands(actor: u32, table: u32) -> *const CommandSet {
     }
 }
 
-unsafe fn oil(actor: u32) -> bool {
-    // 116D608 commits both fields only after the native application cue.
-    unsafe { matches!(read::<u32>(actor, 13100), 5..=7) && read::<f32>(actor, 13108) > 0. }
+unsafe fn chaos_oil(actor: u32, index: usize) -> bool {
+    unsafe {
+        if index == 0 {
+            // 116D608 commits both fields only after the native application cue.
+            matches!(read::<u32>(actor, 13100), 5..=7) && read::<f32>(actor, 13108) > 0.
+        } else {
+            // 1168EEC mirrors all three tiers in the replicated status word.
+            read::<u32>(actor, 10340) & 14 != 0
+        }
+    }
 }
 
 impl Battle {
     fn begin(&mut self, id: u8, turn: i16) -> bool {
         let a = self.actor;
         unsafe {
-            let id = if id == SPIN && oil(a) { VACUUM } else { id };
+            let id = if id == SPIN && chaos_oil(a, self.index) {
+                VACUUM
+            } else {
+                id
+            };
             if !program::ACTIONS.contains(id) || !action::accept_custom_start(a, id) {
                 return false;
             }
@@ -109,6 +121,13 @@ impl Battle {
             }
         }
         self.play_step();
+        if id == BACKSTEP && self.index == 0 && self.cursor.is_some() {
+            unsafe {
+                movement::stamina(a, -150., false);
+                bladescale_evade(a, DrawnEvade::Roll);
+                write(a, 11072, 14. + evade_bonus_frames(a));
+            }
+        }
     }
     fn finish(&mut self) {
         self.trail.clear();
@@ -193,7 +212,12 @@ impl Battle {
                     6 if local => self.poise = true,
                     7 | 9 if local => write(a, 11072, frames),
                     8 if local => write(a, 11072, frames + evade_bonus_frames(a)),
-                    11 if local => movement::stamina(a, -150., false),
+                    11 if local => {
+                        movement::stamina(a, -150., false);
+                        if matches!(c.state, 37..=39) {
+                            bladescale_evade(a, DrawnEvade::Roll);
+                        }
+                    }
                     12 => {
                         let can_bounce = match c.state {
                             1 | 7 | 9 | 10 => self.deflectable,
@@ -203,17 +227,8 @@ impl Battle {
                         };
                         collision::strike(a, c.state, param, c.time.frame, late, can_bounce);
                     }
-                    13 if c.state == VACUUM => {
-                        // 1168EEC mirrors Chaos Oil I/II/III in bits 1..3. GU
-                        // transmits this word at netPlAction +140 (1FED90/1FF308).
-                        let active = if local {
-                            oil(a)
-                        } else {
-                            read::<u32>(a, 10340) & 14 != 0
-                        };
-                        if active {
-                            collision::launch(a, self.index);
-                        }
+                    13 if c.state == VACUUM && chaos_oil(a, self.index) => {
+                        collision::launch(a, self.index);
                     }
                     14 => mhfz_sdk::camera::start(a, param),
                     15 => self.trail.start(self.index, a, frames),
@@ -223,6 +238,31 @@ impl Battle {
             }
         }
     }
+
+    fn evade_followup(&mut self, sample: MotionFrame, bits: u32, yaw: Option<u16>) -> bool {
+        // FZ 817E814C passes these windows to w04's common evade follow-ups.
+        if (10. ..48.).contains(&sample.frame) && sample.blend <= 0. && self.roll_branch.is_none() {
+            self.roll_branch = if bits & 2 != 0 {
+                Some((SPRINT, 0))
+            } else if bits & 4 != 0 {
+                Some((
+                    11,
+                    match yaw.map(program::input_sector) {
+                        Some(1) => -8192,
+                        Some(3) => 8192,
+                        _ => 0,
+                    },
+                ))
+            } else {
+                None
+            };
+        }
+        sample.frame >= 24.
+            && self
+                .roll_branch
+                .is_some_and(|(id, turn)| self.begin(id, turn))
+    }
+
     fn inputs(&mut self, input: &Input, dt: f32, yaw: Option<u16>) -> u32 {
         let a = self.actor;
         if self.flick.update(input, dt) {
@@ -235,14 +275,14 @@ impl Battle {
         }
         let enough = unsafe { read::<f32>(a, 5088) >= 150. };
         let mut bits = 0;
+        let sector = yaw.map(program::input_sector);
         let shoulder = input.command(27);
+        // GU w01 resolves X followed by R as command 4 without a new X edge.
+        let shoulder_slash = input.weapon_command(4);
         if input.command(3) && enough {
             bits |= 1;
-            if shoulder && let Some(yaw) = yaw {
-                let sector = yaw.wrapping_add(0x2000) >> 14;
-                if sector != 0 {
-                    bits |= 1 << [0, 17, 15, 16][usize::from(sector)];
-                }
+            if shoulder && let Some(sector @ 1..=3) = sector {
+                bits |= 1 << [0, 17, 15, 16][sector];
             }
         }
         if self.sprint_input > 0. && unsafe { read::<f32>(a, 5088) } > 0. {
@@ -250,12 +290,12 @@ impl Battle {
         }
         if input.weapon_command(7) || unsafe { style::input::attack_chord_with_shoulder(a) } {
             bits |= 1 << 7;
-        } else if input.weapon_command(0) || input.weapon_command(15) {
+        } else if input.weapon_command(0) || input.weapon_command(15) || shoulder_slash {
             bits |= 1 << 2;
-            if shoulder {
+            if shoulder || shoulder_slash {
                 bits |= 1 << 14;
             }
-            if yaw.is_some_and(|v| v.wrapping_add(0x2000) >> 14 == 2) {
+            if sector == Some(2) {
                 bits |= 1 << 13;
             }
         } else if input.weapon_command(22) || input.weapon_command(9) || input.weapon_command(26) {
@@ -311,6 +351,11 @@ impl Battle {
             unsafe {
                 native!(0x539f4c, a);
                 if !action::land(a) {
+                    if input.is_some() {
+                        // w04 state 36 accepts X before execution. Keep that
+                        // input while falling, but start the ground slash only after landing.
+                        self.cursor.as_mut().unwrap().branch(bits & (1 << 2), |n| n <= 1);
+                    }
                     return;
                 }
                 native!(0x27c6f4, a);
@@ -318,6 +363,9 @@ impl Battle {
             }
         }
         if let Some(input) = input {
+            if state == BACKSTEP && self.evade_followup(sample, bits, yaw) {
+                return;
+            }
             if self.poise {
                 unsafe {
                     write(a, 10288, read::<f32>(a, 10288).max(8.));
@@ -346,9 +394,16 @@ impl Battle {
                 self.evade_yaw = None;
             }
             if let Some(id) = branch {
-                if id == 53 && unsafe { motion::evade(a, self.evade_yaw) } {
-                    self.cursor = None;
-                    return;
+                if id == 53 {
+                    // FZ 811EAD82 selects common 0:145 with neutral or rear input.
+                    if self.evade_yaw.is_none_or(|v| (0x6000..0xa000).contains(&v)) {
+                        if self.begin(BACKSTEP, 0) {
+                            return;
+                        }
+                    } else if unsafe { motion::evade(a, self.evade_yaw) } {
+                        self.cursor = None;
+                        return;
+                    }
                 }
                 if let Some((next, turn)) = program::destination(id, yaw)
                     && self.begin(next, turn)
@@ -442,29 +497,7 @@ impl Battle {
                     self.roll_branch = None;
                     return false;
                 }
-                if (10. ..48.).contains(&sample.frame)
-                    && sample.blend <= 0.
-                    && self.roll_branch.is_none()
-                {
-                    self.roll_branch = if bits & 2 != 0 {
-                        Some((SPRINT, 0))
-                    } else if bits & 4 != 0 {
-                        Some((
-                            11,
-                            match yaw.unwrap_or(0) as i16 {
-                                v if v > 8192 => -8192,
-                                v if v < -8192 => 8192,
-                                _ => 0,
-                            },
-                        ))
-                    } else {
-                        None
-                    };
-                }
-                return sample.frame >= 24.
-                    && self
-                        .roll_branch
-                        .is_some_and(|(id, turn)| self.begin(id, turn));
+                return self.evade_followup(sample, bits, yaw);
             }
             self.roll_branch = None;
             motion::clear_roll(a);
@@ -562,13 +595,14 @@ pub unsafe extern "C" fn request(actor: u32, raw: *const ActionRequest) -> u32 {
     }
     // All three ground draw routes are 16:7.
     if req.slot == 7 && (req.draw_route || unsafe { native!(0x2a2444, actor) } == 0) {
-        return 9;
+        return u32::from(program::DRAW);
     }
     if req.draw_route {
         return PASS;
     }
-    // GU owns terrain attacks, item use, oils and its art continuations.
-    if matches!(req.slot, 14..=68) {
+    // Guild tables 2000/2023 can submit the stock attack (14) or backsteps
+    // (15 and 25) before the controller sees R+A or the special key.
+    if matches!(req.slot, 16..=24 | 26..=68) {
         return NATIVE_ACTION;
     }
     PASS
@@ -595,6 +629,7 @@ pub unsafe extern "C" fn peer(actor: u32, id: u8) {
                 index: slot + 1,
                 ..Battle::default()
             });
+            b.peer_round_force = false;
             if read::<u8>(actor, 5) == 0 {
                 b.start(id);
             } else if b.cursor.as_ref().is_some_and(|c| c.state == id)
@@ -604,6 +639,74 @@ pub unsafe extern "C" fn peer(actor: u32, id: u8) {
             }
         });
     }
+}
+
+// Round Force keeps its retail action ID. Mark it in the existing style packet
+// field so a native-style SnS peer with Chaos Oil never emits an Extreme wave.
+unsafe extern "C" fn encode_art(actor: u32) -> u8 {
+    if matches!(unsafe { action::current(actor) }, (action::GROUP, 43..=45)) {
+        1
+    } else {
+        u8::MAX
+    }
+}
+
+unsafe extern "C" fn decode_art(actor: u32, bits: u8) {
+    unsafe {
+        let Some(slot) = Roster::current().and_then(|r| r.peer_index(actor)) else {
+            return;
+        };
+        let marked = bits == 1 && encode_art(actor) == 1;
+        PEERS.update(slot, actor, |saved, changed| {
+            if changed {
+                collision::reset(slot + 1);
+            }
+            if marked || saved.is_some() {
+                let b = saved.get_or_insert_with(|| Battle {
+                    actor,
+                    index: slot + 1,
+                    ..Battle::default()
+                });
+                b.peer_round_force = marked;
+            }
+        });
+    }
+}
+
+#[forge::hook(offset = 0x116d464)]
+unsafe fn round_force(actor: u32, tier: u32) -> u32 {
+    unsafe {
+        // GU advances the PMA cursor once for each accepted attack event.
+        // Tables 15/16/17 open at frames 20/28/30 respectively.
+        let first = read::<u8>(actor, 5) == 1 && read::<u32>(actor, 12716) == 0;
+        let result = original!(actor, tier);
+        if first && read::<u32>(actor, 12716) != 0 {
+            if hunter::local() == Some(actor) {
+                if live(0, actor) && chaos_oil(actor, 0) {
+                    collision::launch_art(actor, 0, tier);
+                }
+            } else if let Some(slot) = Roster::current().and_then(|r| r.peer_index(actor))
+                && live(slot + 1, actor)
+                && chaos_oil(actor, slot + 1)
+            {
+                PEERS.update(slot, actor, |saved, _| {
+                    if saved.as_ref().is_some_and(|b| b.peer_round_force) {
+                        collision::launch_art(actor, slot + 1, tier);
+                    }
+                });
+            }
+        }
+        result
+    }
+}
+
+pub fn install_round_force() {
+    static STATE: remote::ActionState = remote::ActionState {
+        encode: encode_art,
+        decode: decode_art,
+    };
+    unsafe { remote::bind_action_state(crate::STYLE_ID, &STATE) };
+    forge::install_hook!(forge::mem::text_addr(), round_force);
 }
 
 pub unsafe extern "C" fn observe(local: u32) {

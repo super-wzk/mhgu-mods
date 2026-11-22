@@ -40,7 +40,10 @@ pub(super) unsafe fn emit(player: u32, source: u16, late: f32, deflectable: bool
             _ => 1,
         };
         let radiance = source == crate::program::RADIANCE;
-        let mut flags = 0x7;
+        let mut flags = Attack::WEAPON_MODIFIERS;
+        if matches!(source, 164..=168) {
+            flags |= Attack::PUNISHING_DRAW;
+        }
         if radiance {
             flags |= Attack::NO_ATTACKER_HITSTOP;
         } else if deflectable {

@@ -255,11 +255,26 @@ impl Actions {
 /// `actor` must be the selected local hunter during its controller callback.
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub unsafe fn enter(actor: u32, action: u8) -> bool {
+    unsafe { enter_with_flags(actor, action, 0) }
+}
+
+/// Enter a style action with GU's draw-attack flag. The native common
+/// transition also carries this flag in netPlAction.
+///
+/// # Safety
+/// The actor and action must satisfy the requirements of `enter`.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn enter_draw_attack(actor: u32, action: u8) -> bool {
+    unsafe { enter_with_flags(actor, action, 0x80) }
+}
+
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+unsafe fn enter_with_flags(actor: u32, action: u8, flags: u32) -> bool {
     unsafe {
         let slot = slot(action);
         let change: unsafe extern "C" fn(u32, u32, u32, u32) -> u32 =
             core::mem::transmute(crate::memory::entry(0x2ab670));
-        change(actor, GROUP.into(), slot.into(), 0);
+        change(actor, GROUP.into(), slot.into(), flags);
         current(actor) == (GROUP, slot)
     }
 }

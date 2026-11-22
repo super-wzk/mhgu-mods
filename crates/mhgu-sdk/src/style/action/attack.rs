@@ -17,8 +17,37 @@ pub struct Attack {
 }
 
 impl Attack {
+    /// Retail blade flags (162891C[0]) for weapon damage, element/status and affinity.
+    pub const WEAPON_MODIFIERS: u32 = 7;
+
+    /// Apply weapon affinity and affinity skills in GU's attack constructor.
+    pub const AFFINITY: u32 = 1 << 2;
+
     /// Arm the style registry's deflection check for this blade and contact serial.
     pub const DEFLECTABLE: u32 = 1 << 27;
+
+    /// Supply GU's standard Punishing Draw KO for rows without conditional KO.
+    pub const PUNISHING_DRAW: u32 = 1 << 28;
+
+    const DRAW_KO_SHIFT: u32 = 16;
+    const DRAW_KO_FIELD: u32 = 0x7f << Self::DRAW_KO_SHIFT;
+
+    #[doc(hidden)]
+    pub const DRAW_KO_MASK: u32 = Self::PUNISHING_DRAW | Self::DRAW_KO_FIELD;
+
+    /// Supply the weapon's conditional Punishing Draw KO when it differs from 30.
+    pub const fn punishing_draw(ko: u8) -> u32 {
+        assert!(ko > 0 && ko <= 127);
+        Self::PUNISHING_DRAW | ((ko as u32) << Self::DRAW_KO_SHIFT)
+    }
+
+    #[doc(hidden)]
+    pub const fn draw_ko(flags: u32) -> i8 {
+        match ((flags & Self::DRAW_KO_FIELD) >> Self::DRAW_KO_SHIFT) as i8 {
+            0 => -30,
+            ko => -ko,
+        }
+    }
 
     /// Use the native second contact slot for a simultaneous paired strike.
     pub const SECONDARY: u32 = 1 << 31;

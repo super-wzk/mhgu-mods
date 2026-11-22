@@ -179,6 +179,7 @@ def replay(g, root, actor, eq, receive, routes, stub, sync_light):
     assert len(jets) == routes[4016, 4][1] and all(
         r[4] == (-20.0, 0.0, 40.0) for r in jets
     )
+    jet_proofs = {layer: bytes(g.cpu.mem_read(unit + 128, 200)) for layer, unit, *_ in jets}
     # Stop exactly the still-live units when the clip changes.
     release(jets[:1])
     stopped.clear()
@@ -368,7 +369,7 @@ def replay(g, root, actor, eq, receive, routes, stub, sync_light):
     g.put(actor + 1172, 0)
     g.put(actor + 1176, 0)
     from verify_phial_follow import moving_blade
-    moving_blade(root, glow_proofs)
+    moving_blade(root, glow_proofs, jet_proofs)
     print(
         "FZ/GU phials: six equipment values, five-tick cadence, weapon-model anchor, discharge cutoff, late-join state, three release tiers, cartridge, sprint/sheathe retirement, damage interruption and cross-area effects passed."
     )

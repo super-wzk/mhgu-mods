@@ -17,8 +17,9 @@ pub unsafe fn publish(api: &'static Service) -> bool {
     unsafe { service::publish(NAME, MAGIC, api) }
 }
 
-/// Register a callback to cache resources after native hunt setup. GU may
-/// initialize the local hunter again during the same process.
+/// Register a callback to prepare resources after native hunt setup. Queue
+/// presentation resources so this callback only waits for gameplay data.
+/// GU may initialize the local hunter again during the same process.
 /// # Safety
 /// Call during style registration. The callback must remain loaded.
 pub unsafe fn bind(id: u32, prepare: Prepare) -> bool {

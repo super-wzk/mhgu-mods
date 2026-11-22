@@ -78,6 +78,11 @@ def package(dat, romfs):
     hit.mkdir(parents=True, exist_ok=True)
     for selector in (6, 7, 23, 28, 29):
         shutil.copy2(assets / f"blade_{selector}.hts", hit)
+    # One contact serial for the eight connected world-space ring segments.
+    blade = (hit / "blade_6.hts").read_bytes()
+    count, offset = struct.unpack_from("<2I", blade, 16)
+    assert count == 1 and len(blade[offset:]) == 48
+    (hit / "round_force.hts").write_bytes(blade[:16] + struct.pack("<2I", 8, 24) + blade[offset:] * 8)
     (nx / "plugins").mkdir(parents=True, exist_ok=True)
     shutil.copy2(ROOT / "sword_shield_extreme.nro", nx / "plugins")
     return overlay

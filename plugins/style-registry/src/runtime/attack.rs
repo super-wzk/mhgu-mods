@@ -63,9 +63,16 @@ unsafe fn submit_row(actor:u32, attack:*const Attack, stun:Option<u8>)->u32 {
         // Feed power to the constructor before GU applies weapon modifiers.
         data.row[0] = 1 << 16;
         data.row[1] = (data.row[1] & 0xffff0000) | u32::from(attack.power);
+        let draw = ((actor + 10057) as *const u8).read() & 8 != 0;
         if let Some(stun) = stun {
             // 168960 copies the signed HDP byte 34 into the base KO field.
             data.row[8] = (data.row[8] & !(255 << 16)) | (u32::from(stun.min(127)) << 16);
+        } else if draw
+            && attack.flags & Attack::PUNISHING_DRAW != 0
+            && (data.row[8] >> 16) as u8 == 0
+        {
+            // GU 2B76CC reads the signed HDP KO field when applying Punishing Draw.
+            data.row[8] |= u32::from(Attack::draw_ko(attack.flags) as u8) << 16;
         }
         if attack.flags & Attack::NO_ATTACKER_HITSTOP != 0 {
             // GU 168960 copies HDP byte 37 to contact +108. 16DB68
@@ -87,12 +94,18 @@ unsafe fn submit_row(actor:u32, attack:*const Attack, stun:Option<u8>)->u32 {
         let previous = HIT_DATA.swap(ptr::from_mut(&mut data), Ordering::AcqRel);
         let hand = usize::from(attack.flags & Attack::SECONDARY != 0);
         let hit = actor + BLADE_CONTACT_OFFSETS[hand];
+        let draw_ko_flags = if attack.flags & Attack::PUNISHING_DRAW != 0 {
+            Attack::DRAW_KO_MASK
+        } else {
+            0
+        };
         let mut flags = attack.flags
             & !(Attack::DEFLECTABLE
+                | draw_ko_flags
                 | Attack::SECONDARY
                 | Attack::NO_MOUNT
                 | Attack::NO_ATTACKER_HITSTOP);
-        if ((actor + 10057) as *const u8).read() & 8 != 0 {
+        if draw {
             flags |= 0x10;
         }
         super::weapon::strike(actor, style, flags, |flags| {

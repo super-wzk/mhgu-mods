@@ -104,8 +104,9 @@ impl Bank {
             let p = 16 + 32 * usize::from(cue);
             let r = seq.get(p..p + 32).context("missing FZ sound request")?;
             if fixed.is_none() && r[0] == 2 {
+                // 82031AF8 dispatches a voice release command.
                 continue;
-            } // disabled weapon cue
+            }
             ensure!(
                 r[0] == 1 && (fixed.is_none() || r[6] == 0),
                 "unsupported FZ request {cue}"

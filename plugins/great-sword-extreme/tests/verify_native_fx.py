@@ -214,6 +214,7 @@ def emission(g):
     impact_layers = {routes[i][0] for i in range(14, 19)}
     counter_layers = set().union(routes[19], routes[20], routes[21])
     blade_layers = routes[23]
+    sprint_and_guard = set().union(*routes[32:36])
     debris = routes[17][0]
     # 4006:1 alternates an upright streak with two rising mist layers, five times.
     offsets = [(-50, -100), (-150, 0), (-100, 140), (-50, 210), (0, 280)]
@@ -222,6 +223,7 @@ def emission(g):
     uppercut_mesh.update({third[0]: 77, third[1]: 35})
     sampled = {0, charge[0], charge[2], routes[12][0]}
     sampled.update(ready, depth_layers, impact_layers, counter_layers, blade_layers, uppercut_mesh)
+    sampled.update(sprint_and_guard)
     for path in sorted((NX / "effect/frontier_gs").glob("e*.efl")):
         data = path.read_bytes()
         lists, joints = struct.unpack_from("<HH", data, 16)
@@ -243,6 +245,12 @@ def emission(g):
         assert g.run(0x9BDA64, unit) == 1
         assert g.half(unit + 480) == g.half(unit + 484) == 1
         gen = g.get(unit + 496)
+        if layer in sprint_and_guard:
+            params = g.get(gen + 52)
+            assert g.cpu.mem_read(params + 136, 3) == b"FZF"
+            fade, = struct.unpack("<f", g.cpu.mem_read(params + 140, 4))
+            allowed = (0., .01, .03) if layer in routes[35] else (.03,)
+            assert min(abs(fade - expected) for expected in allowed) < 1e-7
         native_joint = g.get(gen + 24)
         assert g.get(native_joint + 260) == g.get(resource + 104) + joint
         assert struct.unpack("<3f", g.cpu.mem_read(native_joint + 240, 12)) == (1, 1, 1)
@@ -256,7 +264,7 @@ def emission(g):
         visible = False
         debris_positions = []
         # The delayed third pair of counter blade flashes lives through age 76.
-        frames = 91 if layer in charge else 77 if layer in blade_layers else 30
+        frames = 91 if layer in charge or layer in sprint_and_guard else 77 if layer in blade_layers else 30
         for frame in range(frames):
             g.run(0x9B9668, unit)
             if following:
@@ -314,9 +322,10 @@ def emission(g):
                 size = struct.unpack("<3f", g.cpu.mem_read(node + 224, 12))
                 assert all(math.isfinite(v) for v in size)
                 # The counter includes authored negative scales for mirrored meshes.
-                scaled = all(v != 0 for v in size) if counter else all(v > 0 for v in size)
+                checked_draw = counter or layer in sprint_and_guard
+                scaled = all(v != 0 for v in size) if checked_draw else all(v > 0 for v in size)
                 if alpha > 0 and scaled and not visible:
-                    if counter:
+                    if checked_draw:
                         assert draw(gen), path
                         mesh = NX / g.string(g.get(gen + 52) + 80).replace("\\", "/")
                         material = mesh.with_suffix(".mrl").read_bytes()
@@ -331,7 +340,7 @@ def emission(g):
         if layer == debris:
             a, b = debris_positions
             assert abs(b[0] - a[0] - 7.2) < 0.02 and abs(b[2] - a[2] - 6.6) < 0.02 and b[1] > a[1], (a, b)
-    print("GU native EFL loading, emission and uppercut camera-facing transforms passed")
+    print("GU native EFL: sprint slash and GP draw, depth fade, and uppercut transforms passed")
 
 
 def draw(g):

@@ -17,9 +17,9 @@ static BANKS: MotionBanks = MotionBanks::new([
 pub(super) unsafe extern "C" fn preload(actor: u32) {
     unsafe {
         BANKS.preload_for_hunt(actor, 1415);
+        crate::collision::preload();
         crate::sound::preload();
         crate::fx::preload();
-        crate::collision::preload();
         crate::hud::preload();
     }
 }

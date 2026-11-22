@@ -57,6 +57,10 @@ mod entry {
 
     #[forge::entry]
     fn main() {
+        mhgu_sdk::style::registry::when_ready(install_style);
+    }
+
+    extern "C" fn install_style() {
         let Some(registry) = StyleRegistry::current() else {
             forge::log::prelude::warn!("Extreme GS disabled: style registry unavailable at init");
             return;
@@ -69,6 +73,7 @@ mod entry {
             );
             return;
         }
+        mhgu_sdk::style::manual::bind(EXTREME.id, include_str!("manual.txt"));
         if !rules::bind(EXTREME.id, &RULES) {
             forge::log::prelude::warn!("Style {}: GU rule service unavailable", EXTREME.id);
         }

@@ -69,6 +69,10 @@ pub(super) fn timeline(dat: &Path, weapon: usize) -> Result<(Vec<u8>, [BTreeSet<
         cues[0].extend([0, 1, 2, 3, 8, 9, 10, 11, 12]);
         cues[2].insert(12);
         cues[1].insert(235);
+    } else if weapon == 9 {
+        cues[1].insert(101);
+        // 812031BA plays the first chamber sound outside the motion table.
+        cues[2].extend([12, 13]);
     } else if weapon == 0 {
         cues[1].insert(210);
     } else if weapon == 6 {
@@ -81,6 +85,7 @@ pub(super) fn timeline(dat: &Path, weapon: usize) -> Result<(Vec<u8>, [BTreeSet<
         6 => include_str!("db_native.txt"),
         7 => include_str!("ls_native.txt"),
         4 => include_str!("sns_native.txt"),
+        9 => include_str!("gl_native.txt"),
         12 => "",
         _ => anyhow::bail!("unsupported weapon sound timeline {weapon}"),
     };

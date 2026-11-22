@@ -143,9 +143,9 @@ pub unsafe fn play(actor: u32, clip: u16, start: u16, blend: u16) -> Option<u16>
 pub(super) unsafe extern "C" fn preload(actor: u32) {
     unsafe {
         BANKS.preload_for_hunt(actor, 1412);
+        crate::battle::preload_hit_shapes();
         sound::preload();
         fx::preload();
-        crate::battle::preload_hit_shapes();
         crate::hud::preload();
     }
 }

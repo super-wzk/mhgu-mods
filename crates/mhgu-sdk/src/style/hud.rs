@@ -1,4 +1,5 @@
 //! Native GU weapon-gauge backing sprites.
+use super::resource::CachedResource;
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -13,17 +14,10 @@ unsafe fn write<T>(p: u32, off: u32, value: T) {
         ((p + off) as *mut T).write_unaligned(value);
     }
 }
-unsafe fn release(p: u32) {
-    unsafe {
-        let f: unsafe extern "C" fn(u32) = core::mem::transmute(entry(0x887660));
-        f(p);
-    }
-}
-
 /// A private 128 x 1024 HUD texture, drawn through the existing GU weapon widget.
 pub struct GaugePlate {
     id: u32,
-    path: &'static CStr,
+    texture: CachedResource,
     stock: [f32; 4],
     columns: u32,
     cell: [u32; 2],
@@ -34,7 +28,7 @@ impl GaugePlate {
     pub const fn new(id: u32, path: &'static CStr, stock: [f32; 4]) -> Self {
         Self {
             id,
-            path,
+            texture: CachedResource::new(0x21255d0, path),
             stock,
             columns: 1,
             cell: [128, 24],
@@ -53,11 +47,11 @@ impl GaugePlate {
         self
     }
 
-    /// Prepare the texture and descriptor before the first HUD update.
+    /// Queue the texture before the first HUD update.
     /// # Safety
     /// Call on the game thread while the resource manager is active.
     pub unsafe fn preload(&self) {
-        unsafe { self.atlas() };
+        unsafe { self.texture.preload() };
     }
 
     unsafe fn atlas(&self) -> Option<u32> {
@@ -66,21 +60,8 @@ impl GaugePlate {
             return Some(cached);
         }
         unsafe {
-            let base = entry(0) as u32;
-            let manager = read::<u32>(base, 0x2126a64);
-            if manager == 0 {
-                return None;
-            }
-            let load: unsafe extern "C" fn(u32, u32, *const core::ffi::c_char, u32) -> u32 =
-                core::mem::transmute(read::<u32>(read(manager, 0), 48));
-            let texture = load(manager, base + 0x21255d0, self.path.as_ptr(), 1);
-            if texture == 0 {
-                return None;
-            }
-            if read::<u32>(texture, 80) & 1 == 0
-                || read::<[u32; 2]>(texture, 220) != [self.cell[0] * self.columns, 1024]
-            {
-                release(texture);
+            let texture = self.texture.get_async()?;
+            if read::<[u32; 2]>(texture, 220) != [self.cell[0] * self.columns, 1024] {
                 return None;
             }
             // B80FD0 GUI descriptor. Retain one native reference while the HUD can draw it.
@@ -97,7 +78,6 @@ impl GaugePlate {
                 Ok(_) => Some(ptr as u32),
                 Err(existing) => {
                     drop(Box::from_raw(ptr));
-                    release(texture);
                     Some(existing)
                 }
             }

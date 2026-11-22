@@ -21,6 +21,8 @@ class Scene:
         g = self.g = boot((REPO / "mhgu/main.elf").read_bytes(),
                           f"[Weapons]\n{weapon}={style}\n".encode(), ("registry",))
         g.inline_hooks = g.inline_hooks | {0x2B4E7C, 0x11A4D8C}
+        if weapon == 1:
+            g.inline_hooks |= {0x116D464}
         if weapon == 11:
             g.inline_hooks |= {0x11BA074, 0x169D44}
         root = REPO / "plugins" / (name + "-extreme")

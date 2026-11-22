@@ -109,10 +109,10 @@ def replay(weapon, name, vtable):
         g.put(manager + 28 + index*4, actor)
     monster, status, _, _, collision, credit = damage_target(g, vtable)
 
-    def receive(actor, move, bits=None):
+    def receive(actor, move, bits=None, flags=0):
         half(sender + 9478, 16)
         half(sender + 9482, 0x8000 + move)
-        g.run(0x1FED90, packet, sender, 0)
+        g.run(0x1FED90, packet, sender, flags)
         assert g.half(packet + 56) == 0x8000 + move
         if bits is not None:
             g.put(packet + 16, g.get(packet + 16) | ((8 | bits) << 16))
@@ -153,6 +153,9 @@ def replay(weapon, name, vtable):
         assert g.get(status + 880) == before - damage
         g.run(0x9D67C, monster)
     if weapon == 0:
+        for flags in (0x80, 0):
+            receive(guest, 58, 4, flags)
+            assert g.run(0x2A263C, guest) == int(flags != 0)
         for actor, level in ((guest, 3), (second, 0)):
             receive(actor, 29, level)
             row = (3, 91, 92, 93)[level]

@@ -45,6 +45,24 @@ pub unsafe fn evade_bonus_frames(actor: u32) -> f32 {
     }
 }
 
+#[repr(u32)]
+pub enum DrawnEvade {
+    Roll = 0,
+    DemonStep = 6,
+}
+
+/// Apply GU's Bladescale Hone and weapon-specific evade progress once on entry.
+///
+/// # Safety
+/// Call for an accepted local drawn evade that bypasses GU's evade action.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn bladescale_evade(actor: u32, kind: DrawnEvade) {
+    let address = unsafe { forge_sys::mem::forge_mem_getMainTextAddr() } + 0x2df9d0;
+    let apply: unsafe extern "C" fn(u32, u32) -> u32 =
+        unsafe { core::mem::transmute(address as usize) };
+    unsafe { apply(actor, kind as u32) };
+}
+
 pub struct HitWindow {
     pub delay: f32,
     pub duration: f32,

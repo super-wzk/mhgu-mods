@@ -7,10 +7,12 @@ const STATES: u8 = 53;
 pub const SPRINT: u8 = 53;
 pub const BRAKE: u8 = 54;
 pub const SPIN: u8 = 2;
+pub const DRAW: u8 = 9;
 pub const SPRINT_SLASH: u8 = 36;
 pub const VACUUM: u8 = 55; // also identifies the enhanced move in GU peer action packets
 
 pub const JUMP_SLASH: u8 = 56;
+pub const BACKSTEP: u8 = 57;
 
 const fn half(at: usize) -> u16 {
     u16::from_le_bytes([DATA[at], DATA[at + 1]])
@@ -25,7 +27,8 @@ pub const ACTIONS: Actions = {
         .with(SPRINT)
         .with(BRAKE)
         .with(VACUUM)
-        .with(JUMP_SLASH);
+        .with(JUMP_SLASH)
+        .with(BACKSTEP);
     let mut i = 0;
     while i < STATES {
         if word(16 + 24 * i as usize) > 0 {
@@ -60,15 +63,24 @@ pub fn cursor(state: u8) -> Cursor {
     Cursor::new(state, records(state, 1, 40), records(state, 2, 12), &RULES)
 }
 pub fn step(state: u8, index: u8) -> Option<Step> {
-    if matches!(state, SPRINT | BRAKE) && index == 0 {
-        return Some(Step {
-            op: if state == SPRINT { 5 } else { 3 },
-            clip: if state == SPRINT { 1448 } else { 1449 },
-            start: 0,
-            blend: 2,
-            until: 0,
-            loops: 1,
-        });
+    if index == 0 {
+        let extra = match state {
+            SPRINT => Some((5, 1448, 2)),
+            BRAKE => Some((3, 1449, 2)),
+            // FZ common action 0:145 starts 1422 at 817E6A72.
+            BACKSTEP => Some((3, 1422, 4)),
+            _ => None,
+        };
+        if let Some((op, clip, blend)) = extra {
+            return Some(Step {
+                op,
+                clip,
+                blend,
+                start: 0,
+                until: 0,
+                loops: 1,
+            });
+        }
     }
     Step::read(records(state, 0, 12), index)
 }
@@ -107,36 +119,46 @@ pub const WAVE_DURATION: u16 = word(PARAM + 20) as u16;
 pub const WAVE_SPEED: f32 = f32::from_bits(word(PARAM + 32));
 pub const WAVE_POWER: u16 = word(PARAM + 48) as u16;
 
+// 8172C3D4 supplies the sectors used by w04's input selector, 811EA5D4.
+pub fn input_sector(yaw: u16) -> usize {
+    match yaw.wrapping_add(0x2000) {
+        0..=0x4000 => 0,
+        0x4001..=0x8000 => 1,
+        0x8001..=0xbfff => 2,
+        _ => 3,
+    }
+}
+
 // 811EAD82 resolves table destinations 53..66 for style 3.
 pub fn destination(id: u16, yaw: Option<u16>) -> Option<(u8, i16)> {
-    let yaw = yaw.map(|v| v as i16);
-    let side = match yaw {
-        Some(1..=i16::MAX) => -1,
-        Some(-32767..=-1) => 1,
-        _ => 0,
-    };
     let (state, turn) = match id {
         0..=52 => (id as u8, 0),
         55 => (SPRINT, 0),
         56 => (13, 0),
         57 => (8, 0),
-        58..=61 => ([1, SPIN, 11, 13][usize::from(id - 58)], side * 8192),
+        58..=61 => {
+            let turn = match yaw {
+                Some(1..=0x7fff) => -8192,
+                Some(0x8001..=0xffff) => 8192,
+                _ => 0,
+            };
+            ([1, SPIN, 11, 13][usize::from(id - 58)], turn)
+        }
         62..=66 => {
-            let forward = yaw.is_some_and(|v| v.unsigned_abs() < 12288);
+            // 811EACAE uses eight directions for shield combo steering.
+            let sector = yaw.map(|angle| angle.wrapping_add(0x1000) >> 13);
             let index = usize::from(id - 62);
-            let state = if forward {
+            let state = if matches!(sector, Some(0 | 1 | 7)) {
                 [47, 48, 49, 50, 52][index]
             } else {
                 [43, 44, 45, 46, 51][index]
             };
-            (
-                state,
-                if yaw.is_some_and(|v| (4096..28672).contains(&v.unsigned_abs())) {
-                    side * 1024
-                } else {
-                    0
-                },
-            )
+            let turn = match sector {
+                Some(1..=3) => -1024,
+                Some(5..=7) => 1024,
+                _ => 0,
+            };
+            (state, turn)
         }
         _ => return None,
     };

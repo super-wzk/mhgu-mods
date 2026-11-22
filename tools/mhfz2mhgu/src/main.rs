@@ -76,6 +76,14 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Build the Extreme Gunlance action program and private GU resources.
+    Gunlance {
+        dat: PathBuf,
+        #[arg(long)]
+        gu_weapon: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Build the Extreme Sword and Shield action program and private GU resources.
     SwordShield {
         dat: PathBuf,
@@ -332,6 +340,18 @@ fn main() -> Result<()> {
             &output,
             hunter::motions(&dat, female, hunter::Weapon::GreatSword)?,
         ),
+        Command::Gunlance { dat, gu_weapon, output } => {
+            fs::create_dir_all(&output)?;
+            let kind = hunter::Weapon::Gunlance;
+            for (sex, female) in [("m", false), ("f", true)] {
+                save(&output.join(format!("{sex}.arc")), hunter::motions(&dat, female, kind)?)?;
+            }
+            save(&output.join("gunlance.fgla"), hunter::actions(&dat, kind)?)?;
+            let (assets, timeline) = sound::gunlance(&dat)?;
+            save(&output.join("frontier_gl_sound.flse"), timeline)?;
+            save(&output.join("sound.arc"), mhgu_resource::arc::encode(&assets)?)?;
+            hunter_fx::gunlance(&dat, &output.join("effects"), &gu_weapon)
+        }
         Command::SwordShield { dat, gu_weapon, output } => {
             fs::create_dir_all(&output)?;
             let kind = hunter::Weapon::SwordShield;

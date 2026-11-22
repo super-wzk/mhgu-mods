@@ -14,12 +14,24 @@ const EVENTS: &[[u8; 18]] = include_bytes!("../target/assets/effects/motion_fx.b
     .0;
 pub unsafe fn preload() {
     unsafe {
-        BANK.resource();
+        BANK.preload();
     }
 }
 pub unsafe fn vacuum(pos: [f32; 3], yaw: u16) {
     unsafe {
         BANK.emit(0, Anchor::World(pos, yaw));
+    }
+}
+pub unsafe fn round_force(pos: [f32; 3], reach: f32) {
+    unsafe {
+        BANK.emit(
+            23,
+            Anchor::ScaledWorld {
+                position: pos,
+                angles: [0; 3],
+                scale: reach / 100.,
+            },
+        );
     }
 }
 

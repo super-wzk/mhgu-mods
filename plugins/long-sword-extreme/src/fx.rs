@@ -16,7 +16,7 @@ use mhgu_sdk::{
 static PARTICLES: Bank = Bank::new(c"effect\\frontier_ls\\particles", ROUTES);
 
 pub(super) unsafe fn preload() {
-    unsafe { PARTICLES.resource() };
+    unsafe { PARTICLES.preload() };
 }
 const ROUTES: &[u8; 332] = include_bytes!("../target/assets/effects/routes.bin");
 
@@ -522,19 +522,6 @@ pub(super) unsafe fn remember_impact(actor: u32) {
     }
 }
 
-// AECE50 / B91E68 use GU's particle RNG. Select private visual variants
-// independently of quest attack and monster rolls.
-unsafe fn effect_random() -> u32 {
-    unsafe {
-        let manager = read::<u32>(forge::mem::text_addr(), 0x2126554);
-        if manager == 0 {
-            0
-        } else {
-            native!(0xb91e68, manager, 1)
-        }
-    }
-}
-
 pub(super) unsafe fn parry(actor: u32) {
     unsafe {
         let pos = IMPACT
@@ -550,7 +537,7 @@ pub(super) unsafe fn parry(actor: u32) {
             .unwrap_or_else(|| read(actor, 64));
         world(actor, pos, 52);
         for start in [53, 56] {
-            world(actor, pos, start + (effect_random() % 3) as usize);
+            world(actor, pos, start + (particle::random_u32() % 3) as usize);
         }
     }
 }
@@ -558,21 +545,7 @@ pub(super) unsafe fn parry(actor: u32) {
 pub(super) unsafe fn spirit_flash(actor: u32, blue: bool) {
     unsafe {
         let first = if blue { 44 } else { 36 };
-        joint(actor, 2, first);
-        if let Some(m) = bone(actor, 2) {
-            let point = [m[12], m[13], m[14]];
-            for i in 0..3 {
-                let rotation = core::array::from_fn(|_| effect_random() as u16);
-                let sign = ((effect_random() >> 12) & 1) as usize;
-                PARTICLES.emit(
-                    first + 2 + 2 * i + sign,
-                    Anchor::RotatedWorld(point, rotation),
-                );
-            }
-            let floor = particle::ground_heights(actor, point)
-                .map_or_else(|| read::<f32>(actor, 68), |(h, _)| h);
-            world(actor, [point[0], floor, point[2]], first + 1);
-        }
+        mhfz_sdk::effects::sword_flash(&PARTICLES, actor, first);
         crate::sound::weapon(actor, 12);
     }
 }

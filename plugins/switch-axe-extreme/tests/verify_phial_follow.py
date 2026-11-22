@@ -6,7 +6,7 @@ from verify_native_fx import model_renderer
 from verify_style import Game
 
 
-def moving_blade(root, glow_proofs):
+def moving_blade(root, glow_proofs, jet_proofs):
     nx = root / "dist/switch-axe-extreme/romfs/nativeNX"
     effects = nx / "effect/frontier_sa"
     g = Game((root.parents[1] / "mhgu/main.elf").read_bytes())
@@ -45,13 +45,14 @@ def moving_blade(root, glow_proofs):
     pos = 16
     seen = set()
     blade_layers = 0
+    proofs = glow_proofs | jet_proofs
     for _ in range(struct.unpack_from("<I", pel, 12)[0]):
         pos += 1 + pel[pos]
         pos += 1 + pel[pos]
         row = pel[pos:pos + 160]
         pos += 160
         layer = struct.unpack_from("<H", row, 48)[0]
-        if layer not in glow_proofs:
+        if layer not in proofs:
             continue
         seen.add(layer)
         owner, proof, record, bank, entries, desc = (g.alloc(n) for n in (416, 256, 160, 144, 4, 32))
@@ -59,28 +60,47 @@ def moving_blade(root, glow_proofs):
         g.put(bank + 104, 1)
         g.put(bank + 116, entries)
         g.put(entries, desc)
-        g.cpu.mem_write(proof + 48, glow_proofs[layer])
+        g.cpu.mem_write(proof + 48, proofs[layer])
         g.put(proof + 48 + 192, handle)
         g.cpu.mem_write(record, row)
         g.run(0x32A548, owner, proof, record)
+        # Discharge PEL rows default to world orientation. Read GU's merged
+        # result to catch callers that follow the joint's position alone.
+        assert g.cpu.mem_read(proof + 48 + 72, 1) == b"\0", layer
         unit = g.alloc(896)
         g.run(0x3273F0, unit, owner, proof)
         g.put(unit + 244, load((effects / f"e{layer}.efl").read_bytes()))
         assert g.run(0x9BDA64, unit) == 1
         g.put(unit + 272, 1)
+        if layer in jet_proofs:
+            for c, s in ((1, 0), (0, 1)):
+                matrix(bones + 176, c, s, (100, 60, -20))
+                g.run(0x327948, unit)
+                assert math.dist(floats(unit + 64, 3), (100 - 20*c + 40*s, 60, -20 + 20*s + 40*c)) < .001
+                qx, qy, qz, qw = floats(unit + 80, 4)
+                forward = (2*(qx*qz + qw*qy), 2*(qy*qz - qw*qx), 1 - 2*(qx*qx + qy*qy))
+                assert math.dist(forward, (s, 0, c)) < .001, (layer, forward)
+            continue
         gen = g.get(unit + 496)
         blade = g.string(g.get(gen + 52) + 80).endswith(r"\m121")
         blade_layers += int(blade)
 
         visible_frames = 0
+        required_frames = 4 if blade else 3
         for frame in range(35):
-            c, s = (0, 1) if visible_frames >= 2 else (1, 0)
             x = 100 if visible_frames == 0 else 600
-            matrix(bones + 176, c, s, (x, 60, -20))
+            if visible_frames == 3:
+                # Tilt upwards independently of hunter yaw.
+                put(bones + 176, 1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0, x, 60, -20, 1)
+                expected_origin, forward = (x - 10, 80, -20), (0, 1, 0)
+            else:
+                c, s = (0, 1) if visible_frames == 2 else (1, 0)
+                matrix(bones + 176, c, s, (x, 60, -20))
+                expected_origin, forward = (x - 10*c + 20*s, 60, -20 + 10*s + 20*c), (s, 0, c)
             matrix(camera, 1, 0, (x, 80, 1000))
             g.run(0x327948, unit)
             origin = floats(unit + 64, 3)
-            assert math.dist(origin, (x - 10*c + 20*s, 60, -20 + 10*s + 20*c)) < .001
+            assert math.dist(origin, expected_origin) < .001
             # Supply unit scale and the resolved position to the render step.
             put(unit + 96, 1, 1, 1)
             put(unit + 256, 1)
@@ -102,10 +122,10 @@ def moving_blade(root, glow_proofs):
                 axis = draws[0].normal
                 length = math.dist(axis, (0, 0, 0))
                 assert length > 0
-                assert math.dist(tuple(v / length for v in axis), (s, 0, c)) < .001, (layer, frame, axis)
+                assert math.dist(tuple(v / length for v in axis), forward) < .001, (layer, frame, axis)
             visible_frames += 1
-            if visible_frames == 3:
+            if visible_frames == required_frames:
                 break
-        assert visible_frames >= 3, (layer, visible_frames)
-    assert seen == glow_proofs.keys() and blade_layers == 4
-    print(f"GU live glow: {len(seen)} layers followed a moving joint; all four blade axes turned with a 90-degree swing.")
+        assert visible_frames == required_frames, (layer, visible_frames)
+    assert seen == proofs.keys() and blade_layers == 4
+    print(f"GU sword FX: {len(jet_proofs)} discharge layers inherit joint rotation; all four blade axes followed a 90-degree tilt.")

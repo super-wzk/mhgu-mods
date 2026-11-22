@@ -1,5 +1,6 @@
 //! Frontier blade and shield capsules, and family 87/1's separately moving sphere.
-use crate::{battle, fx, native, program, read, sound};
+use crate::{battle, fx, native, program, read, sound, write};
+use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use mhfz_sdk::combat::HitWindow;
 use mhgu_sdk::{
@@ -9,6 +10,7 @@ use mhgu_sdk::{
 };
 
 const SPRINT_SLASH_FINISH_HIT: u16 = 221;
+static RING_SHAPE: CachedHitShape = CachedHitShape::new(cr"player\hit\frontier_sns\round_force");
 
 static SHAPES: [CachedHitShape; 5] = [
     CachedHitShape::new(cr"player\hit\frontier_sns\blade_6"),
@@ -18,7 +20,7 @@ static SHAPES: [CachedHitShape; 5] = [
     CachedHitShape::new(cr"player\hit\frontier_sns\blade_29"),
 ];
 pub unsafe fn preload() {
-    for shape in &SHAPES {
+    for shape in SHAPES.iter().chain([&RING_SHAPE]) {
         unsafe {
             shape.preload();
         }
@@ -52,7 +54,16 @@ pub unsafe fn strike(actor: u32, state: u8, id: u16, frame: f32, late: f32, defl
             } else {
                 0
             };
-            (if shield { 3 } else { 1 }, flags)
+            if shield {
+                (3, flags)
+            } else {
+                let draw_ko = if state == program::DRAW {
+                    Attack::PUNISHING_DRAW
+                } else {
+                    0
+                };
+                (1, flags | Attack::WEAPON_MODIFIERS | draw_ko)
+            }
         };
         let attack = Attack {
             template,
@@ -79,13 +90,16 @@ struct Wave {
     direction: [f32; 2],
     center: [f32; 3],
     age: f32,
+    ring_reach: Option<f32>,
+    ring_radius: f32,
 }
-struct Slot(UnsafeCell<Option<Wave>>);
+struct Slot(UnsafeCell<Vec<Wave>>);
 unsafe impl Sync for Slot {}
-static WAVES: [Slot; 1 + PLAYER_COUNT] = [const { Slot(UnsafeCell::new(None)) }; 1 + PLAYER_COUNT];
+static WAVES: [Slot; 1 + PLAYER_COUNT] =
+    [const { Slot(UnsafeCell::new(Vec::new())) }; 1 + PLAYER_COUNT];
 pub fn reset(index: usize) {
     unsafe {
-        if let Some(w) = (&mut *WAVES[index].0.get()).as_mut() {
+        for w in &mut *WAVES[index].0.get() {
             w.owner = 0;
             for c in w.pool.iter() {
                 c.disable();
@@ -95,95 +109,145 @@ pub fn reset(index: usize) {
 }
 
 pub unsafe fn launch(actor: u32, index: usize) {
+    unsafe { spawn(actor, index, None) }
+}
+
+pub unsafe fn launch_art(actor: u32, index: usize, tier: u32) {
+    // Retail w01 HTS groups 10..12 have their furthest endpoints on the
+    // diagonals (±d, ±d), each with capsule radius 125.
+    if let Some(diagonal) = [175., 200., 300.].get(tier as usize) {
+        let reach = (diagonal * core::f32::consts::SQRT_2 + 125.) * 1.15;
+        unsafe { spawn(actor, index, Some(reach)) };
+    }
+}
+
+unsafe fn spawn(actor: u32, index: usize, ring_reach: Option<f32>) {
     unsafe {
         let (origin, yaw) = particle::world_offset(actor, [0., program::WAVE_HEIGHT, 0.]);
-        fx::vacuum(origin, yaw);
+        let shape = if let Some(reach) = ring_reach {
+            fx::round_force(origin, reach);
+            &RING_SHAPE
+        } else {
+            fx::vacuum(origin, yaw);
+            &SHAPES[0]
+        };
         sound::blade(actor, 22);
         let template = native!(0x2a8a88, actor, 1);
-        let Some(shape) = SHAPES[0].load() else {
+        let Some(shape) = shape.load() else {
             return;
         };
         if template == 0 {
             return;
         }
         let (sin, cos) = Angle::from_units(yaw).sin_cos();
-        let w = (&mut *WAVES[index].0.get()).get_or_insert_with(|| Wave {
-            pool: ContactPool::new(1),
-            owner: 0,
-            area: 0,
-            origin,
-            direction: [0.; 2],
-            center: origin,
-            age: 0.,
-        });
+        // Round Force can start during the previous spin wave's flight.
+        let waves = &mut *WAVES[index].0.get();
+        let w = if let Some(w) = waves.iter().position(|w| w.owner == 0) {
+            &mut waves[w]
+        } else {
+            waves.push(Wave {
+                pool: ContactPool::new(1),
+                owner: 0,
+                area: 0,
+                origin,
+                direction: [0.; 2],
+                center: origin,
+                age: 0.,
+                ring_reach,
+                ring_radius: 0.,
+            });
+            waves.last_mut().unwrap()
+        };
         w.owner = actor;
         w.area = read(actor, 4180);
         w.origin = origin;
         w.direction = [sin, cos];
         w.age = 0.;
         w.center = origin;
+        w.ring_reach = ring_reach;
         let mut hdp: [u32; 14] = read(template, 0);
         hdp[0] = u32::from(program::WAVE_DURATION) * 2 << 16;
         hdp[1] = hdp[1] & 0xffff0000 | u32::from(program::WAVE_POWER);
         hdp[8] &= !255;
         hdp[9] &= !(255 << 8);
-        w.pool
-            .iter()
-            .next()
-            .unwrap()
-            .prepare_world_attack(actor, &hdp, shape.as_raw());
+        let contact = w.pool.iter().next().unwrap();
+        contact.prepare_world_attack(actor, &hdp, shape.as_raw());
+        let hit = contact.as_raw();
+        // 2B76CC has applied the oils and rolled this wave's weapon status.
+        write(hit, 86, read::<u8>(hit, 86) / 2); // KO
+        write(hit, 89, read::<u8>(hit, 89) / 2); // exhaust
+        // 2ACFB8 uses +80 for either element damage or status buildup.
+        const WEAPON_STATUS: u32 = 2 | 4 | 1 | 0x20000;
+        if read::<u32>(hit, 72) & WEAPON_STATUS != 0 {
+            write(hit, 80, read::<u16>(hit, 80) / 2);
+        }
     }
 }
 
 pub unsafe extern "C" fn submit_waves(manager: u32) {
     unsafe {
         for (index, slot) in WAVES.iter().enumerate() {
-            let Some(w) = (&mut *slot.0.get()).as_mut() else {
-                continue;
-            };
-            let a = w.owner;
-            if a == 0 {
-                continue;
-            }
-            if !battle::live(index, a)
-                || read::<u8>(a, 4180) != w.area
-                || read::<i16>(a, 5078) <= 0
-                || w.age >= 2. * f32::from(program::WAVE_DURATION)
-            {
-                w.owner = 0;
-                for c in w.pool.iter() {
-                    c.disable();
+            for w in &mut *slot.0.get() {
+                let a = w.owner;
+                if a == 0 {
+                    continue;
                 }
-                continue;
+                if !battle::live(index, a)
+                    || read::<u8>(a, 4180) != w.area
+                    || read::<i16>(a, 5078) <= 0
+                    || w.age >= 2. * f32::from(program::WAVE_DURATION)
+                {
+                    w.owner = 0;
+                    for c in w.pool.iter() {
+                        c.disable();
+                    }
+                    continue;
+                }
+                let clock = read::<u32>(forge::mem::text_addr(), 0x2126764);
+                if clock == 0 {
+                    continue;
+                }
+                let dt = read::<f32>(clock, 104);
+                if dt <= 0. {
+                    continue;
+                }
+                if let Some(reach) = w.ring_reach {
+                    // Match mesh 175's scale keys in the round-force EFL.
+                    w.ring_radius = reach * (0.10 + 0.78 * (w.age / 30.).min(1.));
+                } else {
+                    let travel = (w.age * 0.5) as u32 as f32 * program::WAVE_SPEED;
+                    w.center = [
+                        w.origin[0] + travel * w.direction[0],
+                        w.origin[1],
+                        w.origin[2] + travel * w.direction[1],
+                    ];
+                }
+                w.pool.iter().next().unwrap().enqueue(manager);
+                w.age += dt;
             }
-            let clock = read::<u32>(forge::mem::text_addr(), 0x2126764);
-            if clock == 0 {
-                continue;
-            }
-            let dt = read::<f32>(clock, 104);
-            if dt <= 0. {
-                continue;
-            }
-            let travel = (w.age * 0.5) as u32 as f32 * program::WAVE_SPEED;
-            w.center = [
-                w.origin[0] + travel * w.direction[0],
-                w.origin[1],
-                w.origin[2] + travel * w.direction[1],
-            ];
-            w.pool.iter().next().unwrap().enqueue(manager);
-            w.age += dt;
         }
     }
 }
 pub unsafe extern "C" fn expand(owner: u32, hit: u32) -> u32 {
     unsafe {
         for slot in &WAVES {
-            if let Some(w) = (&*slot.0.get()).as_ref()
-                && w.owner == owner
-                && let Some(c) = w.pool.iter().find(|c| c.as_raw() == hit)
-            {
-                // FZ 82C7CFF0[1] selects the radius-200 sphere at 8279B330.
-                return u32::from(c.submit_world_sphere(w.center, 200.));
+            for w in &*slot.0.get() {
+                if w.owner == owner
+                    && let Some(c) = w.pool.iter().find(|c| c.as_raw() == hit)
+                {
+                    if let Some(reach) = w.ring_reach {
+                        let [x, y, z] = w.origin;
+                        let vertices: [_; 8] = core::array::from_fn(|i| {
+                            let (sin, cos) = Angle::from_units((i as u16) << 13).sin_cos();
+                            [x + sin * w.ring_radius, y, z + cos * w.ring_radius]
+                        });
+                        let edges: [_; 8] =
+                            core::array::from_fn(|i| [vertices[i], vertices[(i + 1) % 8]]);
+                        return c.submit_world_capsules(&edges, 0.12 * reach);
+                    }
+                    // FZ 82C7CFF0[1] selects the radius-200 sphere at 8279B330.
+                    return u32::from(c.submit_world_sphere(w.center, 200.));
+                }
             }
         }
     }

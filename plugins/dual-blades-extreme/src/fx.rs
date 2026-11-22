@@ -10,7 +10,7 @@ mod trail;
 static PARTICLES: Bank = Bank::new(c"effect\\frontier_db\\particles", ROUTES);
 
 pub(super) unsafe fn preload() {
-    unsafe { PARTICLES.resource() };
+    unsafe { PARTICLES.preload() };
 }
 
 static PEER_BANKS: [Bank; 4] = [
@@ -190,10 +190,13 @@ impl Effects {
         if phase == 0 || self.until_demon > 0. {
             return;
         }
-        // 81F872FC and 81F8B4F8 share the full-flame palette. Below full,
-        // only the trail uses the true-demon palette in both upgraded phases.
-        let glow = if full { 2 } else { usize::from(phase == 2) };
-        let trail = if full { 2 } else { usize::from(phase >= 2) };
+        // FZ 81F87696 checks the True Demon flag for the blade glow.
+        // 81F8B4F8 also accepts Extreme Demon for the orange trail.
+        let (glow, trail) = if full {
+            (2, 2)
+        } else {
+            (usize::from(phase == 2), usize::from(phase >= 2))
+        };
         unsafe {
             let Some(parent) = particle::parent(actor) else {
                 return;

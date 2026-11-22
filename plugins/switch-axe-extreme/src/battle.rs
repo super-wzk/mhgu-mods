@@ -117,13 +117,12 @@ unsafe fn strike(actor: u32, burst: bool, id: u16, frame: f32, late: f32) {
             });
         }
         let sword_pose = read::<u32>(actor, motion::SWORD_POSE) != 0;
-        let flags = if burst {
-            Attack::SECONDARY | Attack::NO_ATTACKER_HITSTOP
+        let mut flags = Attack::PUNISHING_DRAW;
+        if burst {
+            flags = Attack::SECONDARY | Attack::NO_ATTACKER_HITSTOP;
         } else if row.shape == 0 || sword_pose {
-            Attack::DEFLECTABLE
-        } else {
-            0
-        };
+            flags |= Attack::DEFLECTABLE;
+        }
         // GU 2B76CC applies the equipped sword phial and Demon Riot through bit 3.
         let phial = if sword_pose { 8 } else { 0 };
         let attack = Attack {
@@ -276,7 +275,19 @@ impl Battle {
             } else {
                 facing
             };
-            if !action::accept_custom_start(actor, id) {
+            let (group, slot) = action::current(actor);
+            let previous = action::custom_id(group, slot);
+            // Only the draw charge and its release are one draw attack.
+            let accepted = if matches!(previous, Some(111..=113))
+                && previous != Some(id)
+                && matches!(id, 112 | 113 | 116 | 121 | 122 | 125)
+                && native!(0x2a263c, actor) != 0
+            {
+                action::enter_draw_attack(actor, id)
+            } else {
+                action::accept_custom_start(actor, id)
+            };
+            if !accepted {
                 return false;
             }
             if let Some(yaw) = facing {

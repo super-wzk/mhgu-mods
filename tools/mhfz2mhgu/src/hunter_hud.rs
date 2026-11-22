@@ -52,12 +52,19 @@ const BLADE_LIT: Palette = [
 ];
 const BLADE_DIM: Palette = [[21, 25, 31], [57, 63, 70], [66, 73, 80], [92, 98, 101]];
 
-fn pixel(frame: &mut [u8], x: usize, y: usize, [r, g, b]: [u8; 3]) {
-    let i = (y * WIDTH + x) * 4;
+fn pixel(frame: &mut [u8], width: usize, x: usize, y: usize, [r, g, b]: [u8; 3]) {
+    let i = (y * width + x) * 4;
     frame[i..i + 4].copy_from_slice(&[r, g, b, 255]);
 }
 
-fn sprite(frame: &mut [u8], left: usize, top: usize, rows: &[&[u8]], palette: &Palette) {
+fn sprite(
+    frame: &mut [u8],
+    width: usize,
+    left: usize,
+    top: usize,
+    rows: &[&[u8]],
+    palette: &Palette,
+) {
     for (y, row) in rows.iter().enumerate() {
         for (x, shade) in row.iter().enumerate() {
             let color = match shade {
@@ -67,7 +74,7 @@ fn sprite(frame: &mut [u8], left: usize, top: usize, rows: &[&[u8]], palette: &P
                 b'*' => palette[3],
                 _ => continue,
             };
-            pixel(frame, left + x, top + y, color);
+            pixel(frame, width, left + x, top + y, color);
         }
     }
 }
@@ -89,13 +96,13 @@ pub fn dual_blades() -> Result<Vec<u8>> {
                     _ => [25, 25, 31],
                 };
                 for x in 16 + inset..118 - inset {
-                    pixel(frame, x, y, color);
+                    pixel(frame, WIDTH, x, y, color);
                 }
             }
-            sprite(frame, 1, 4, FLAME, flame);
+            sprite(frame, WIDTH, 1, 4, FLAME, flame);
             for i in 0..4 {
                 let palette = if i < level { &BLADE_LIT } else { &BLADE_DIM };
-                sprite(frame, 20 + 15 * i, 4, BLADE, palette);
+                sprite(frame, WIDTH, 20 + 15 * i, 4, BLADE, palette);
             }
         }
     }
@@ -103,4 +110,4 @@ pub fn dual_blades() -> Result<Vec<u8>> {
 }
 
 mod long_sword;
-pub use long_sword::{convert as long_sword,switch_axe};
+pub use long_sword::{convert as long_sword, switch_axe};

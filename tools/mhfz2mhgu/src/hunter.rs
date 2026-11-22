@@ -89,6 +89,7 @@ pub enum Weapon {
     SwordShield = 4,
     DualBlades = 6,
     LongSword = 7,
+    Gunlance = 9,
     SwitchAxe = 12,
 }
 
@@ -99,6 +100,7 @@ pub fn motions(dat: &Path, female: bool, weapon: Weapon) -> Result<Vec<u8>> {
         Weapon::SwordShield => ("w04", "frontier_sns", [100, 15, 65]),
         Weapon::DualBlades => ("w06", "frontier_db", [100, 15, 60]),
         Weapon::LongSword => ("w07", "frontier_ls", [100, 15, 60]),
+        Weapon::Gunlance => ("w09", "frontier_gl", [100, 15, 85]),
         Weapon::SwitchAxe => ("w12", "frontier_sa", [70, 25, 100]),
     };
     let model = pac::decode(read(&dat.join(format!("parts/{sex}00/{sex}_editpl.bin")))?)?;
@@ -229,6 +231,7 @@ pub fn motions(dat: &Path, female: bool, weapon: Weapon) -> Result<Vec<u8>> {
                 match weapon {
                     Weapon::DualBlades => dual_blades_equipment(&mut w, slot, motion, frames)?,
                     Weapon::SwordShield => sword_shield_equipment(&mut w, slot, motion)?,
+                    Weapon::Gunlance => gunlance_equipment(&mut w, slot, motion)?,
                     Weapon::GreatSword => equipment(&mut w, slot, motion)?,
                     Weapon::SwitchAxe => switch_axe_equipment(&mut w, slot, motion)?,
                     Weapon::LongSword => long_sword_equipment(&mut w, slot, motion)?,
@@ -292,6 +295,16 @@ fn dual_blades_equipment(w: &mut Writer, slot: usize, motion: usize, frames: u32
     } else {
         w.equipment_timeline(slot, &[11, 12], &[(3, 0)])
     }
+}
+
+fn gunlance_equipment(w: &mut Writer, slot: usize, motion: usize) -> Result<()> {
+    // GU w09.lmt slots 2 and 3 switch between attachment 2 (back) and
+    // attachment 3 (drawn). Attachment 1 belongs to other weapon types.
+    let keys: &[(u32, u32)] = match motion {
+        1003 => &[(1, 32), (2, 0)],
+        _ => &[(1, 0)],
+    };
+    w.equipment_timeline(slot, &[3, 2], keys)
 }
 
 fn sword_shield_equipment(w: &mut Writer, slot: usize, motion: usize) -> Result<()> {
@@ -412,6 +425,7 @@ pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
         Weapon::GreatSword => (74, b"FGSA"),
         Weapon::DualBlades => (89, b"FDBA"),
         Weapon::LongSword => (85, b"FLSA"),
+        Weapon::Gunlance => (82, b"FGLA"),
         Weapon::SwitchAxe => (178, b"FSAA"),
     };
     let n = word(data, weapon)?;
@@ -515,6 +529,18 @@ pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
             data.get(params..params + 150)
                 .context("short w12 parameters")?,
         );
+        return Ok(out);
+    }
+    if kind == Weapon::Gunlance {
+        // 812031BA and 81206EFE read the w09 artillery and ignition timers
+        // from the parameter block, while 81205E60 uses the reload table.
+        let base = word(data, 1632)? + 268;
+        let cooldowns = word(data, 1680)?;
+        let barrage = word(data, 1692)?;
+        out.extend(b"GLP1");
+        for (offset, bytes) in [(base, 24), (cooldowns, 96), (barrage, 96)] {
+            out.extend(data.get(offset..offset + bytes).context("short w09 parameters")?);
+        }
         return Ok(out);
     }
     if kind == Weapon::SwordShield {

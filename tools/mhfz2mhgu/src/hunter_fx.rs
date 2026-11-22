@@ -25,6 +25,7 @@ const CHARGE_AURA_MESH: u16 = 66;
 #[derive(Clone, Copy)]
 enum WeaponEffect {
     SwordShield,
+    Gunlance,
     SwitchAxe,
     GreatSword,
     DualBlades,
@@ -98,6 +99,10 @@ pub fn long_sword(dat: &Path, out: &Path, gu_weapon: &Path) -> Result<()> {
     convert(dat, out, gu_weapon, WeaponEffect::LongSword)
 }
 
+pub fn gunlance(dat: &Path, out: &Path, gu_weapon: &Path) -> Result<()> {
+    convert(dat, out, gu_weapon, WeaponEffect::Gunlance)
+}
+
 pub fn sword_shield(dat: &Path, out: &Path, gu_weapon: &Path) -> Result<()> {
     convert(dat, out, gu_weapon, WeaponEffect::SwordShield)
 }
@@ -118,6 +123,14 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
             (3013, &[10]), (4020, &[0, 4, 5, 9, 11, 12, 13, 17, 18]),
             (4035, &[2, 3, 7]), (4036, &[2, 7]),
         ]),
+        WeaponEffect::Gunlance => (
+            "frontier_gl",
+            &[
+                (4027, &[0, 1, 2, 3, 4, 5, 6, 7, 11, 13, 14, 15, 16, 17, 18, 22, 23, 24, 25]),
+                (4035, &[2, 4, 11, 16]),
+                (4036, &[2, 4, 11, 16]),
+            ],
+        ),
         WeaponEffect::GreatSword => ("frontier_gs", BANKS),
         WeaponEffect::SwitchAxe => ("frontier_sa", &[
             (4013, &[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27]),
@@ -193,11 +206,19 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
     }
     let dual_blades = matches!(weapon_effect, WeaponEffect::DualBlades);
     let weapon_id = match weapon_effect {
+        WeaponEffect::Gunlance => {
+            playback.footfalls(0.03)?;
+            playback.sword_flash(0)?;
+            playback.gunlance_blade()?;
+            playback.gunlance_shell_feedback()?;
+            9
+        }
         WeaponEffect::SwordShield => {
-            playback.footfalls()?;
+            playback.footfalls(0.)?;
             for &id in SNS_STRIPS {
                 playback.blade_strip(id)?;
             }
+            playback.round_force_ring()?;
             4
         }
         WeaponEffect::SwitchAxe => {
@@ -209,14 +230,21 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
                 }
             }
             save(&out.join("selectors.bin"), keys)?;
-            playback.footfalls()?;
+            playback.footfalls(0.)?;
             playback.switch_axe_cartridge()?;
             12
         }
         WeaponEffect::GreatSword => {
-            playback.bank(&load_bank(4022)?, 4022, &[4, 9, 11, 12, 13])?;
-            playback.bank(&load_bank(4035)?, 4035, &[3, 4, 14])?;
-            playback.bank(&load_bank(4036)?, 4036, &[4, 14])?;
+            let weapon = load_bank(4022)?;
+            let dry = load_bank(4035)?;
+            let wet = load_bank(4036)?;
+            playback.bank(&weapon, 4022, &[4, 9, 11, 12, 13])?;
+            playback.bank(&dry, 4035, &[3, 4, 14])?;
+            playback.bank(&wet, 4036, &[4, 14])?;
+            // Source clips 1469 (sprint slash) and 1474 (successful guard).
+            playback.bank(&weapon, 4022, &[15, 17])?;
+            playback.bank(&dry, 4035, &[15])?;
+            playback.bank(&wet, 4036, &[15])?;
             0
         }
         WeaponEffect::DualBlades => {
@@ -240,7 +268,7 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
                 playback.blade_strip(mesh)?;
             }
             playback.bank(&load_bank(4035)?, 4035, &[11, 13, 14])?;
-            playback.footfalls()?;
+            playback.footfalls(0.)?;
             playback.spirit_full()?;
             playback.bank(&load_bank(4036)?, 4036, &[11, 13, 14])?;
             7
@@ -418,8 +446,9 @@ fn motion_fx(data: &[u8], weapon_id: usize) -> Result<Vec<u8>> {
             let keep = match (weapon_id, clip, kind) {
                 (_, _, 8) => false, // 817BD8FE immediately returns.
                 (0, 1465 | 1476, 5..=7) => (bank, selector) != (4022, 8), // Alpha stays zero.
+                (0, 1469 | 1474, 5 | 6) => true,
                 (6, 1444..=1447, 0 | 3 | 5 | 7) | (6, 1448, 2 | 5) | (6, 1450, 0) => true,
-                (4, _, 1 | 3..=7) => true,
+                (4 | 9, _, 1 | 3..=7) => true,
                 (12, _, 1 | 5..=7) => true,
                 (7, _, _) => match (kind, bank, selector, row[8], row[9]) {
                     (0, 5, _, 0, 0)

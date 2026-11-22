@@ -23,7 +23,7 @@ static BANK: Bank = Bank::new(
 );
 
 pub(super) unsafe fn preload() {
-    unsafe { BANK.resource() };
+    unsafe { BANK.preload() };
 }
 
 fn effect_route(bank: u16, selector: u16) -> Option<usize> {
@@ -55,7 +55,9 @@ unsafe fn attachment(actor: u32, node: u16) -> Option<(u32, i16)> {
 unsafe fn attached(actor: u32, node: u16, offset: [f32; 3]) -> Option<Anchor> {
     unsafe {
         let (model, joint) = attachment(actor, node)?;
-        Some(Anchor::Joint {
+        // FZ 8181818A uses 81FD3A54 to sample the joint basis on every update.
+        // Motion kind 7 mode 0 and the left-hand cartridge also use the live pose.
+        Some(Anchor::JointPose {
             parent: particle::parent(model)?,
             joint,
             offset: Some(offset),

@@ -213,6 +213,7 @@ impl Battle {
             // GU w07 1199114 maps X+A but omits 27CA28's shoulder chord.
             let shoulder_chord = attack_chord_with_shoulder(actor);
             let chord = input.weapon_command(1) || shoulder_chord;
+            let shoulder_held = input.command(27);
             if chord {
                 bits |= 1 << CMD_EVADE_SLASH;
                 if yaw.unsigned_abs() > 0x6000 {
@@ -242,13 +243,13 @@ impl Battle {
             if input.weapon_command(0) || chord || input.weapon_command(2) {
                 bits |= 1 << 20;
             }
-            if shoulder_chord {
+            if shoulder_chord || (chord && shoulder_held) {
                 self.spirit_hold = None;
             } else if input.command(70) {
                 self.spirit_hold = Some(0.);
             }
             if let Some(held) = self.spirit_hold.as_mut() {
-                if input.command(27) {
+                if shoulder_held {
                     *held += dt;
                     if *held >= 28. {
                         let (group, slot) = action::current(actor);
@@ -263,7 +264,7 @@ impl Battle {
                     self.spirit_hold = None;
                 }
             }
-            if !input.command(27) {
+            if !shoulder_held {
                 bits |= 1 << 19;
             }
             if input.auxiliary_pressed != 0 {

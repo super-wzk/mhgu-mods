@@ -77,8 +77,17 @@ impl<'a> Contact<'a> {
             let adjust: unsafe extern "C" fn(u32, u32, *const u32, u32) =
                 core::mem::transmute(entry(0x2b76cc));
             init(self.as_raw(), 0, actor, row.as_ptr(), shape, 0, 15, 1);
-            self.0.set(CONTACT_FLAGS, 0x0a00_0428);
-            adjust(actor, self.as_raw(), row.as_ptr(), 7);
+            let mut flags = 0x0a00_0428;
+            let mut modifiers = crate::style::action::Attack::WEAPON_MODIFIERS;
+            if crate::style::hunter::equipped_weapon(actor) == Some(1) {
+                // Match the SnS weapon bit from 2B72D4 and the draw check in 2B7ED8.
+                flags |= 0x800;
+                if *((actor + 10057) as *const u8) & 8 != 0 {
+                    modifiers |= 0x10;
+                }
+            }
+            self.0.set(CONTACT_FLAGS, flags);
+            adjust(actor, self.as_raw(), row.as_ptr(), modifiers);
         }
     }
 

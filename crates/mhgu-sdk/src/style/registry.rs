@@ -27,6 +27,60 @@ pub unsafe fn publish(api: &'static ServiceV1) -> bool {
     unsafe { service::publish(NAME, MAGIC, api) }
 }
 
+// Forge can initialize content before the registry. The first such NRO hosts
+// the process-wide queue and owns its allocation until startup completes.
+const STARTUP: &CStr = c"mhgu::StyleStartupV1";
+const STARTUP_MAGIC: u32 = u32::from_le_bytes(*b"SSI1");
+type Init = extern "C" fn();
+
+#[repr(C)]
+struct Startup {
+    enqueue: extern "C" fn(Init),
+    drain: extern "C" fn(),
+}
+
+static WAITING: crate::sync::Shared<alloc::vec::Vec<Init>> =
+    crate::sync::Shared::new(alloc::vec::Vec::new());
+
+extern "C" fn enqueue(init: Init) {
+    WAITING.with(|waiting| waiting.push(init));
+}
+
+extern "C" fn drain() {
+    for init in WAITING.with(core::mem::take) {
+        init();
+    }
+}
+
+/// Run a content NRO's complete setup once the registry and its hooks are ready.
+/// Call once from the weapon's serialized Forge entry point.
+pub fn when_ready(init: extern "C" fn()) {
+    if !service::on_game_thread() {
+        return;
+    }
+    if StyleRegistry::current().is_some() {
+        init();
+        return;
+    }
+    static LOCAL: Startup = Startup { enqueue, drain };
+    unsafe {
+        if let Some(queue) = service::find::<Startup>(STARTUP, STARTUP_MAGIC) {
+            (queue.enqueue)(init);
+        } else if service::publish(STARTUP, STARTUP_MAGIC, &LOCAL) {
+            enqueue(init);
+        }
+    }
+}
+
+/// # Safety
+/// Provider only. Call after installing every runtime service on the init thread.
+#[doc(hidden)]
+pub unsafe fn finish_startup() {
+    if let Some(queue) = unsafe { service::find::<Startup>(STARTUP, STARTUP_MAGIC) } {
+        (queue.drain)();
+    }
+}
+
 /// A handle to the published registry, restricted to GU's initialized game thread.
 pub struct StyleRegistry(&'static ServiceV1, PhantomData<*const ()>);
 

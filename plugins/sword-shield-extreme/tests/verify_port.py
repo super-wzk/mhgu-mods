@@ -1,14 +1,16 @@
 """Replay the packaged w01 controller, GU Chaos Oil application and independent wave."""
 
+import math
 import struct
 import sys
+import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parents[1]
 sys.path.insert(0, str(REPO / "plugins/style-registry/tests"))
 from verify_weapon_arts import Scene, float_bits
-from verify_style import api_for
+from verify_style import api_for, quest_entries
 
 
 def source():
@@ -53,6 +55,76 @@ def source():
         "FZ w04: all 48 programmed openings match both source layers, start frames and blends"
     )
 
+    # Common 0:145 is outside the w04 weapon table. Run that dispatch case
+    # and record the actual clip, blend, base invulnerability and stamina debit.
+    for address in (0x817CC77A, 0x8186A038, 0x8114690C, 0x8101450C, 0x81838E38,
+                    0x8182DFB6, 0x818DD7B8):
+        m.trap(address, lambda *_: 0)
+    clips, costs = [], []
+    m.trap(0x8184373A, lambda *_: 75)
+    m.trap(0x8184390A, lambda _, cost, *__: costs.append(cost & 0xffff))
+    m.trap(0x8183E574, lambda _, clip, blend, start: clips.append((clip, blend, start)))
+    m.c.mem_write(actor, bytes(4176))
+    m.c.mem_write(actor + 3, b"\x04")
+    m.c.mem_write(actor + 20, bytes([145]))
+    m.call(0x817E5C4A, actor)
+    assert clips == [(1422, 2, 0)] and costs == [(-75) & 0xffff]
+    assert struct.unpack("<H", m.c.mem_read(actor + 1262, 2))[0] == 7
+
+    # Execute the Vita destination resolver for the table's indirect routes.
+    def stick(_, out, *__):
+        if yaw is None:
+            return 0
+        m.c.mem_write(out, struct.pack("<H", yaw))
+        return 1
+
+    transitions = []
+    for address in (0x8182D1D8, 0x8182D1EE):
+        m.trap(address, lambda _, group, state, __: transitions.append((group, state)))
+    m.trap(0x817C5C40, lambda *_: 0)
+    m.trap(0x8182B03C, lambda *_: 1)
+    m.trap(0x8182B4FE, lambda *_: 0)
+    m.trap(0x8182E032, lambda *_: 3)
+    m.trap(0x8172C2D4, stick)
+    destinations = [
+        (53, angle, (0, state), 0)
+        for angle, state in ((None, 145), (0x1FFF, 148), (0x2000, 146),
+                             (0x6000, 145), (0xA000, 147), (0xE000, 148))
+    ]
+    destinations.extend((key, None, target, 0) for key, target in (
+        (54, (2, 12)), (55, (0, 200)), (56, (1, 13)), (57, (1, 8)),
+    ))
+    destinations.extend((key, 0x4000, (1, state), 0xE000)
+                        for key, state in enumerate((1, 2, 11, 13), 58))
+    for key, (stationary, advancing) in enumerate(
+        zip((43, 44, 45, 46, 51), (47, 48, 49, 50, 52)), 62
+    ):
+        destinations.extend((
+            (key, 0x3000, (1, stationary), 0xFC00),
+            (key, 0xD000, (1, advancing), 0x0400),
+        ))
+    for branch, yaw, expected, facing in destinations:
+        transitions.clear()
+        m.c.mem_write(actor + 14, bytes(2))
+        m.call(0x811EAD82, actor, branch)
+        turned, = struct.unpack("<H", m.c.mem_read(actor + 14, 2))
+        assert transitions == [expected] and turned == facing, (branch, yaw, transitions, turned)
+
+    # The shoulder chords and evade follow-up use a different selector from
+    # the ordinary B destinations above.
+    def input_stick(out, *_):
+        m.c.mem_write(out, struct.pack("<H", -yaw & 0xffff))
+        return 1
+
+    m.trap(0x8172BE6A, input_stick)
+    m.trap(0x819374CA, lambda *_: 0)
+    m.c.mem_write(0x82C3B336, b"\x01")
+    m.put(actor + 164, 0)
+    for yaw, expected in ((0x2000, 8192), (0x2001, 1024), (0x6000, 1024),
+                          (0x6001, 4096), (0x9FFF, 4096), (0xA000, 2048)):
+        assert m.call(0x8172C3D4, actor) == expected, yaw
+    print("FZ w04: indirect destinations 53–66, evade sectors and shield diagonal branches passed")
+
 
 def resources():
     assets = ROOT / "target/assets"
@@ -66,6 +138,7 @@ def resources():
         1419,
         1420,
         1421,
+        1422,
         1448,
         1449,
         1450,
@@ -86,13 +159,17 @@ def resources():
             for clip in clips:
                 if (clip - 1000) // 100 == group:
                     assert 0 < offsets[clip % 100] < len(bank), (sex, clip)
+            if group == 4:
+                x, _, z = struct.unpack_from("<3f", bank, offsets[22] + 16)
+                assert x == 0 and z < 0, (sex, x, z)
     effects = nx / "effect/frontier_sns"
     routes = list(
         struct.iter_unpack("<HH", (assets / "effects/routes.bin").read_bytes())
     )
-    assert len(routes) == 23
+    assert len(routes) == 24
     for route, meshes in [
         (0, [335, 335, 334, 175]),
+        (23, [175]),
         *[(18 + i, [mesh]) for i, mesh in enumerate([501, 504, 505, 506, 507])],
     ]:
         first, count = routes[route]
@@ -104,6 +181,146 @@ def resources():
     print(
         "Packaged male/female motion slots, four vacuum emitters and five independent blade strips passed"
     )
+
+
+def round_force(s, waves, load, shape):
+    g, a, peer = s.g, s.actor, s.remote
+    commands = [
+        struct.unpack_from("<H4xH", zlib.decompress(raw), 0x1F8)
+        for name, kind, raw in quest_entries("w01_m.arc")
+        if kind == 0x5139901D and b"plcmd_w01_sa0001_" in name
+    ]
+    assert commands == [(16, 43), (16, 44), (16, 45)]
+    pma = g.alloc(18 * 4)
+    events = {}
+    for name, kind, raw in quest_entries("w01.arc"):
+        if kind != 0x18A9225C or name[-3:] not in (b"015", b"016", b"017"):
+            continue
+        table = int(name[-3:])
+        blob = zlib.decompress(raw)
+        rows = list(struct.iter_unpack("<fhBB", blob[8:]))
+        obj, decoded = g.alloc(112), g.alloc(len(rows) * 12)
+        g.put(pma + 4 * table, obj)
+        g.put(obj + 100, len(rows))
+        g.put(obj + 108, decoded)
+        for i, row in enumerate(rows):
+            g.cpu.mem_write(decoded + 12 * i + 4, struct.pack("<fhBB", *row))
+        events[table] = [frame for frame, *_ in rows]
+    # Exercise the native art dispatcher and PMA clock. Blade damage is
+    # covered separately with the real weapon/part modifier path.
+    s.stub(0x2A8D10, lambda *_: 0)
+    s.stub(0x2B72D4, lambda *_: 0)
+    s.stub(g.get(0x174A354 + 1132), lambda *_: 0)
+    for actor in (a, peer):
+        g.put(actor + 12704, pma)
+        g.put(actor + 1284, float_bits(120))
+        g.put(actor + 5078, 100)
+    g.put(g.get(0x1885B58) + 32, peer)
+    g.cpu.mem_write(peer + 4180, bytes(g.cpu.mem_read(a + 4180, 1)))
+    packet = g.alloc(192)
+    # Let the registry encode and decode the marker around an accepted action.
+    for pc in (0x1FED90, 0x1FF308):
+        s.stub(g.originals[pc], lambda *_: 0)
+    stock = next(zlib.decompress(raw) for name, _, raw in quest_entries("w01.arc")
+                 if name.endswith(b"pl_we01_hitsize"))
+    collision = g.get(0x1857830)
+    # Capture the native PEL submission as well as the contact. Both must use
+    # the same center and tier-dependent radius on the sender and receiver.
+    from unicorn import arm_const
+    pel, handle = g.alloc(128), g.alloc(32)
+    g.put(pel + 80, 1)
+    s.stub(load, lambda _, kind, *__: {0x1889FDC: pel, 0x1857810: shape}.get(kind, 0))
+    g.put(0x188A0D4, g.alloc(128))
+    g.put(0x2126F48, g.alloc(128))
+    s.stub(0x3268D8, lambda *_: handle)
+    s.stub(0x3288C4, lambda *_: g.alloc(416))
+    s.stub(0x328900, lambda *_: 0)
+    s.stub(0x326C78, lambda *_: 0)
+    visuals = []
+
+    def spawn(_, unit, *__):
+        selector = g.get(g.cpu.reg_read(arm_const.UC_ARM_REG_SP))
+        pos = struct.unpack("<3f", g.cpu.mem_read(unit + 128 + 176, 12))
+        scale = struct.unpack("<3f", g.cpu.mem_read(unit + 128 + 48, 12))
+        visuals.append((selector, pos, scale))
+        return 1
+
+    s.stub(0x3267D0, spawn)
+
+    def check_ring(actor, tier, hit):
+        count, start = struct.unpack_from("<2I", stock, 16 + (10 + tier) * 8)
+        reach = max(
+            math.hypot(x, z) + radius
+            for n in range(count)
+            for radius, x, _, z in [struct.unpack_from("<4f", stock, start + n * 48 + 12)]
+        ) * 1.15
+        x, y, z = struct.unpack("<3f", g.cpu.mem_read(actor + 64, 12))
+        (selector, pos, scale), = visuals
+        assert selector == struct.unpack_from("<H", (ROOT / "target/assets/effects/routes.bin").read_bytes(), 4 * 23)[0]
+        assert pos == (x, y + 100, z)
+        assert all(math.isclose(v * 100, reach, abs_tol=.001) for v in scale)
+        for age in range(0, 34, 2):
+            g.run(g.hooks[0x16ABAC], collision)
+            g.put(collision + 10288, 0)
+            assert g.run(g.hooks[0x1696FC], hit) == 8
+            expected = reach * (.10 + .78 * min(1, age / 30))
+            starts, ends = [], []
+            for i in range(8):
+                kind, width, ax, ay, az, bx, by, bz = struct.unpack(
+                    "<B3x7f", g.cpu.mem_read(collision + 8240 + 32 * i, 32))
+                assert kind == 2 and math.isclose(width, reach * .12, abs_tol=.001)
+                assert ay == by == y + 100
+                assert math.isclose(math.hypot(ax - x, az - z), expected, abs_tol=.001)
+                starts.append((ax, az))
+                ends.append((bx, bz))
+            assert ends == starts[1:] + starts[:1]
+            assert min(px for px, _ in starts) < x < max(px for px, _ in starts)
+            assert min(pz for _, pz in starts) < z < max(pz for _, pz in starts)
+
+    def run(actor, tier, active, marked=True):
+        group, slot = commands[tier]
+        s.action(group, slot)
+        g.cpu.mem_write(actor + 9478, struct.pack("<H2xH", group, slot))
+        g.cpu.mem_write(actor + 5, b"\0")
+        if actor == peer:
+            g.put(packet + 16, 0)
+            g.cpu.mem_write(packet + 54, struct.pack("<2H", group, slot))
+            if marked:
+                g.run(g.hooks[0x1FED90], packet, a, 0x40)
+                assert g.get(packet + 16) == 9 << 16
+            g.run(g.hooks[0x1FF308], packet, peer)
+            g.put(peer + 10340, 8 if active else 0)
+        else:
+            g.put(a + 13100, 7)
+            g.put(a + 13108, float_bits(80))
+        waves.clear()
+        visuals.clear()
+        g.run(0x1169A7C, actor)
+        assert (g.get(actor + 12712), g.get(actor + 12716)) == (15 + tier, 0)
+        first = events[15 + tier][0]
+        g.put(actor + 5328, float_bits(first - 1))
+        g.run(0x1169A7C, actor)
+        assert not waves
+        if actor == a and not active:
+            g.put(a + 13108, 0)  # expires between windup and first strike
+        for i, frame in enumerate(events[15 + tier], start=1):
+            g.put(actor + 5328, float_bits(frame))
+            g.run(0x1169A7C, actor)
+            g.run(0x1169A7C, actor)
+            assert g.get(actor + 12716) == i
+            assert [power for _, power in waves] == ([16] if active and marked else [])
+        if active and marked:
+            check_ring(actor, tier, waves[0][0])
+        else:
+            assert not visuals
+
+    for tier in range(3):
+        run(a, tier, True)
+        run(a, tier, False)
+    run(peer, 1, True)
+    run(peer, 1, True, marked=False)
+    run(peer, 2, False)
+    print("Round Force I/II/III: one wave at the first native hit, expiry and peer style marker passed")
 
 
 def replay():
@@ -300,6 +517,7 @@ def replay():
     print(
         "GU w01: all oil levels and interruption, 31+16 independent contacts, expiry, buffered slash and shield loop passed"
     )
+    round_force(s, waves, load, shape)
 
 
 if __name__ == "__main__":

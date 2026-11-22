@@ -21,7 +21,9 @@ use mhgu_sdk::style::{
         MotionFrame,
         command::{BufferedCommand, CommandInput, CommandSet, MAX_COMMAND_FRAME},
     },
-    guard, movement,
+    guard,
+    input::{attack_chord_pressed, attack_chord_with_shoulder, attack_combo_pending},
+    movement,
 };
 const DASH: u8 = 200;
 const DASH_SLOT: u16 = action::slot(DASH);
@@ -190,6 +192,8 @@ struct Battle {
     charging: bool,
     charge_effect: Option<ChargeEffect>,
     draw_released: bool,
+    uppercut_recovery_x: bool,
+    chord_x_held: bool,
     level: u8,
     hit: bool,
     deflected: bool,
@@ -238,6 +242,8 @@ impl Battle {
             charging: false,
             charge_effect: None,
             draw_released: false,
+            uppercut_recovery_x: false,
+            chord_x_held: false,
             level: 0,
             hit: false,
             deflected: false,
@@ -366,6 +372,7 @@ impl Battle {
             self.deflected = false;
             self.charging = false;
             self.draw_released = false;
+            self.uppercut_recovery_x = false;
             if charge_state(state) {
                 self.level = 0;
                 self.charge = 0.;
@@ -513,14 +520,27 @@ impl Battle {
                 _ => return false,
             };
             peer::publish(p, self.level);
-            if !action::transition_to(p, action::GROUP, action::slot(next)) {
+            // The draw windup and release are one attack. GU's command table
+            // drops the draw flag, so pass it to the common transition here.
+            let accepted = if matches!((self.cursor.state, branch), (20, 85) | (47, 86)) {
+                action::enter_draw_attack(p, next)
+            } else {
+                action::transition_to(p, action::GROUP, action::slot(next))
+            };
+            if !accepted {
                 return false;
             }
             motion::aim(p, branch);
             self.begin(p, next)
         }
     }
-    unsafe fn advance(&mut self, p: u32, input: &Input, dash_input: bool) -> bool {
+    unsafe fn advance(
+        &mut self,
+        p: u32,
+        input: &Input,
+        dash_input: bool,
+        uppercut_input: bool,
+    ) -> bool {
         unsafe {
             let state = self.cursor.state;
             self.deflected |= action::melee::take_deflection(p);
@@ -639,13 +659,13 @@ impl Battle {
                     if input.command(3) {
                         return self.evade(p);
                     }
+                    if uppercut_input {
+                        return self.begin(p, 70);
+                    }
                     if input.command(70) {
                         self.cancel();
                         native!(0x2ab670, p, u32::from(GUARD_GROUP), 0, 0);
                         return true;
-                    }
-                    if input.weapon_command(1) {
-                        return self.begin(p, 70);
                     }
                     if input.weapon_command(12) {
                         return self.begin(p, 64);
@@ -656,9 +676,22 @@ impl Battle {
                 }
             } else if state < 74 {
                 let mut cmd = 0u32;
-                let side = if (input.weapon_command(5) || input.weapon_command(22))
-                    && native!(0x27e608, p, 0) > 0
-                {
+                let x_held = input.weapon_command(5);
+                let a_held = input.weapon_command(22);
+                let x_pressed = input.weapon_command(12);
+                // The GS mapper reports held X before GU resolves the chord.
+                let single_x =
+                    !uppercut_input && !self.chord_x_held && !a_held && !attack_combo_pending(p);
+                let vertical_input = if matches!(state, 54..=58) {
+                    // Only an X resolved by GU can start a held vertical
+                    // follow-up. The X held by an early chord cannot queue it.
+                    self.uppercut_recovery_x =
+                        single_x && x_held && (x_pressed || self.uppercut_recovery_x);
+                    single_x && (x_pressed || self.uppercut_recovery_x)
+                } else {
+                    single_x && (x_held || x_pressed)
+                };
+                let side = if (x_held || a_held) && native!(0x27e608, p, 0) > 0 {
                     // GU measures sectors relative to the camera and the actor,
                     // including the alternate controller setup.
                     if native!(0x27e638, p, 0, 0x2000, 0x6000, 1) != 0 {
@@ -673,7 +706,7 @@ impl Battle {
                 };
                 if input.command(8) {
                     cmd |= 1 << 18;
-                } else if input.weapon_command(1) {
+                } else if uppercut_input {
                     cmd |= 1 << 15;
                     if input.command(0) {
                         cmd |= 1 << 28 | 1 << (28 + side);
@@ -681,9 +714,9 @@ impl Battle {
                     if side == 2 {
                         cmd |= 1 << 16;
                     }
-                } else if input.weapon_command(5) || input.weapon_command(12) {
+                } else if vertical_input {
                     cmd |= 1 << 10 | 1 << (10 + side);
-                    if input.weapon_command(12) {
+                    if x_pressed {
                         cmd |= 1 << 3 | 1 << (3 + side) | 1 << 23 | 1 << (23 + side);
                     }
                 } else if input.weapon_command(2) {
@@ -706,13 +739,13 @@ impl Battle {
                 {
                     cmd |= 1 << 19;
                 }
-                if !input.weapon_command(5) {
+                if !x_held {
                     cmd |= 1 << 6
                 }
-                if !(input.weapon_command(5) && input.weapon_command(22)) {
+                if !(x_held && a_held) {
                     cmd |= 1 << 17
                 }
-                if input.command(70) {
+                if !uppercut_input && input.command(70) {
                     cmd |= 1 << 31
                 }
                 if input.command(3) {
@@ -812,6 +845,13 @@ impl Battle {
             }
             let phase: u8 = read(p, 5);
             let physical: u16 = read(p, 1204);
+            let clip = motion::source_clip(p, physical);
+            let uppercut_input = input.weapon_command(1)
+                || attack_chord_with_shoulder(p)
+                // GU can report standalone X if A is still held from the sweep.
+                || (clip == Some(1406) && attack_chord_pressed(p));
+            // Releasing A first must not turn an early chord into a new X.
+            self.chord_x_held = input.weapon_command(5) && (uppercut_input || self.chord_x_held);
             if self.guard != 3 {
                 self.aura_time = 0.;
             } else if native!(0x2a2444, p) == 0 {
@@ -824,13 +864,7 @@ impl Battle {
                 }
                 self.aura_time += read::<f32>(p, 28).max(0.);
             }
-            sound::update(
-                &mut self.audio,
-                p,
-                motion::source_clip(p, physical),
-                read(p, 1280),
-                None,
-            );
+            sound::update(&mut self.audio, p, clip, read(p, 1280), None);
             let dash_input = self.flick.update(input, read::<f32>(p, 28).max(0.));
             let was_sprinting = self.cursor.state == DASH;
             if self.cursor.state != IDLE {
@@ -839,7 +873,7 @@ impl Battle {
                     && phase != 0
                     && read::<u8>(p, 9493) & 4 == 0
                 {
-                    return self.advance(p, input, dash_input);
+                    return self.advance(p, input, dash_input, uppercut_input);
                 }
                 self.cancel(); // damage, sheathing, warp or another GU action took ownership
             }
@@ -954,12 +988,12 @@ impl Battle {
             if self.guard >= 3 && input.command(8) {
                 return self.begin(p, 59);
             }
+            if uppercut_input {
+                return self.begin(p, 48);
+            }
             if input.command(70) {
                 native!(0x2ab670, p, u32::from(GUARD_GROUP), 0, 0);
                 return true;
-            }
-            if input.weapon_command(1) {
-                return self.begin(p, 48);
             }
             if input.weapon_command(12) {
                 return self.begin(p, 19);

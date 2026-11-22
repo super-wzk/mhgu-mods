@@ -19,9 +19,9 @@ static BANKS: MotionBanks = MotionBanks::new([
 pub(super) unsafe extern "C" fn preload(actor: u32) {
     unsafe {
         BANKS.preload_for_hunt(actor, 1401);
+        crate::collision::preload();
         crate::sound::preload();
         crate::fx::preload();
-        crate::collision::preload();
     }
 }
 
@@ -77,9 +77,16 @@ pub(super) static ROLL: DrawnRoll = DrawnRoll::new(1420, 1421);
 static FRONT_STEP: AtomicU32 = AtomicU32::new(0);
 
 pub unsafe fn evade(actor: u32, yaw: Option<u16>) -> bool {
-    let forward = yaw.is_some_and(|v| v.wrapping_add(0x2000) < 0x4000);
-    FRONT_STEP.store(if forward { actor } else { 0 }, Relaxed);
-    let accepted = unsafe { ROLL.enter(actor, yaw.unwrap_or(0)) };
+    // 811EAD82 resolves ordinary B before GU enters the roll. Keep w04's
+    // exact four-sector boundaries when saving the lateral clip.
+    let sector = yaw.map(|angle| angle.wrapping_add(0x2000) >> 14);
+    FRONT_STEP.store(if sector == Some(0) { actor } else { 0 }, Relaxed);
+    let roll_angle = match sector {
+        Some(1) => 0x4000,
+        Some(3) => 0xc000,
+        _ => 0,
+    };
+    let accepted = unsafe { ROLL.enter(actor, roll_angle) };
     if !accepted {
         clear_roll(actor);
     }

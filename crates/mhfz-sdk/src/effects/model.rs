@@ -6,6 +6,7 @@ use mhgu_sdk::style::particle::{self, DrawModel, ModelRenderer};
 const SUBMIT: u32 = 0xc90380;
 const MODEL_PATH: u32 = 80;
 const MODEL_DRAW_RETURNS: [u32; 4] = [0xa95d10, 0xa96458, 0xa96b28, 0xa96fa8];
+const FACE_CAMERA_ALONG_Z: u8 = 1 << 2;
 // FZ HD pixel shader 0x37 encodes linear depth as (view_depth - 7) / 4993.
 const FZ_DEPTH_RANGE: f32 = 5000. - 7.;
 static mut GAME_TEXT: u32 = 0;
@@ -16,17 +17,20 @@ unsafe fn read<T: Copy>(address: u32, offset: u32) -> T {
 }
 
 unsafe extern "C" fn matches(params: u32) -> bool {
-    params != 0
-        && unsafe {
-            match &read::<[u8; 19]>(params, MODEL_PATH) {
-                b"effect\\frontier_gs\\"
-                | b"effect\\frontier_db\\"
-                | b"effect\\frontier_ls\\"
-                | b"effect\\frontier_sa\\" => true,
-                b"effect\\frontier_sns" => read::<u8>(params, MODEL_PATH + 19) == b'\\',
-                _ => false,
-            }
-        }
+    if params == 0 {
+        return false;
+    }
+    let path = unsafe { read::<[u8; 48]>(params, MODEL_PATH) };
+    let Some(relative) = path.strip_prefix(b"effect\\frontier_") else {
+        return false;
+    };
+    let tag = relative
+        .iter()
+        .take_while(|&&byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        .count();
+    tag != 0
+        && relative.get(tag) == Some(&b'\\')
+        && relative.get(tag + 1).is_some_and(|&byte| byte != 0)
 }
 
 // C90380 takes the first four words in r0-r3, six more on the stack,
@@ -92,6 +96,34 @@ unsafe extern "C" {
     fn frontier_call_model(args: *const DrawArgs, original: *const c_void, specular: u32) -> u32;
 }
 
+fn face_camera_along_z(matrix: &mut [[f32; 4]; 4], eye: [f32; 4]) {
+    let cross =
+        |[x, y, z]: [f32; 3], [a, b, c]: [f32; 3]| [y * c - z * b, z * a - x * c, x * b - y * a];
+    let length = |[x, y, z]: [f32; 3]| libm::sqrtf(x * x + y * y + z * z);
+    let xyz = |[x, y, z, _]: [f32; 4]| [x, y, z];
+    let forward = xyz(matrix[2]);
+    let axis_length = length(forward);
+    if axis_length <= 0. || !axis_length.is_finite() {
+        return;
+    }
+    let axis = forward.map(|v| v / axis_length);
+    let sight = core::array::from_fn(|i| eye[i] - matrix[3][i]);
+    let side = cross(sight, axis);
+    let side_length = length(side);
+    if side_length <= 0.01 || !side_length.is_finite() {
+        return;
+    }
+    // Vita 8171A364 rotates the XZ plane around its longitudinal axis.
+    let side_axis = side.map(|v| v / side_length);
+    let normal_axis = cross(axis, side_axis);
+    for (basis, direction) in matrix[..2].iter_mut().zip([side_axis, normal_axis]) {
+        let scale = length(xyz(*basis));
+        for (component, value) in basis[..3].iter_mut().zip(direction) {
+            *component = value * scale;
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn frontier_model_packet(
     saved: *const u32,
@@ -146,11 +178,19 @@ unsafe extern "C" fn frontier_model_packet(
         }
         let mut matrix: [[f32; 4]; 4] = read(args.transform, 0);
         args.transform = (&raw const matrix) as u32;
-        let axes: u8 = read(params, 139);
+        let draw_flags: u8 = read(params, 139);
+        let has_view = read::<u32>(context, 0xd7c) & !15 != 0;
+        let camera: unsafe extern "C" fn(u32) -> *const [[f32; 4]; 4] =
+            core::mem::transmute(base + 0x885824);
+        if draw_flags & FACE_CAMERA_ALONG_Z != 0 && has_view {
+            face_camera_along_z(&mut matrix, (*camera(context))[3]);
+        }
         for (axis, basis) in matrix[..2].iter_mut().enumerate() {
             // C90380 receives the particle at +24. Reuse the fixed scale
             // samples A9958C stores at particle +272 and +276.
-            if axes & (1 << axis) != 0 && read::<f32>(args.particle, 248 + 4 * axis as u32) >= 0.5 {
+            if draw_flags & (1 << axis) != 0
+                && read::<f32>(args.particle, 248 + 4 * axis as u32) >= 0.5
+            {
                 for component in basis {
                     // MHGURecomp's plugin interpreter rejects NEON VNEG.F32.
                     let mut bits = component.to_bits();
@@ -166,18 +206,12 @@ unsafe extern "C" fn frontier_model_packet(
 
         let threshold: f32 = read(params, 140);
         let alpha = color >> 24;
-        if !(threshold > 0. && threshold.is_finite())
-            || alpha == 0
-            || !main_pass
-            || read::<u32>(context, 0xd7c) & !15 == 0
-        {
+        if !(threshold > 0. && threshold.is_finite()) || alpha == 0 || !main_pass || !has_view {
             return submit(&args);
         }
 
         let view: unsafe extern "C" fn(u32) -> *const [[f32; 4]; 4] =
             core::mem::transmute(base + 0x885804);
-        let camera: unsafe extern "C" fn(u32) -> *const [[f32; 4]; 4] =
-            core::mem::transmute(base + 0x885824);
         let view = &*view(context);
         let eye = (*camera(context))[3];
         let depth = -(matrix[3][0] * view[0][2]

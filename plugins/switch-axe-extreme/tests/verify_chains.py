@@ -117,9 +117,12 @@ def replay(g, root, actor, form, weapon, set_action):
     # Both light-sword branches are open at frame 56 of the standing X slash.
     aim = (facing + 0x4000) & 0xffff
     for strength, target in ((49, 70), (50, 153)):
-        refill_light()
-        enter(5, sword=True)
-        assert tap(0x120, 56, stick=strength) == target, (strength, state())
+        for first in (0, 0x20, 0x100):
+            refill_light()
+            enter(5, sword=True)
+            if first:
+                assert pad(55, first, stick=strength) == 5
+            assert pad(56, 0x120, stick=strength) == target, (strength, first, state())
 
     # Start a thrust with the native chord, then restore its directional chord
     # from GU's pad state when the weapon mapper omits X+A.

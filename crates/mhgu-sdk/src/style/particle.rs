@@ -1,10 +1,11 @@
 //! GU particle resources, attachment proofs and floor sampling for hunter styles.
+use super::resource::CachedResource;
 use crate::{
     memory::{Field, Object, entry, singleton},
     service,
 };
 use core::{
-    ffi::{CStr, c_char},
+    ffi::CStr,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
@@ -166,6 +167,12 @@ pub enum Anchor {
         joint: i16,
         offset: Option<[f32; 3]>,
     },
+    /// Follow the live joint basis even when the PEL defaults to world orientation.
+    JointPose {
+        parent: u32,
+        joint: i16,
+        offset: Option<[f32; 3]>,
+    },
 }
 
 /// # Safety
@@ -189,18 +196,24 @@ pub fn transform_offset(m: &[f32; 16], offset: [f32; 3]) -> [f32; 3] {
 }
 
 pub struct Bank {
-    path: &'static CStr,
     routes: &'static [u8],
-    resource: AtomicU32,
+    resource: CachedResource,
 }
 
 impl Bank {
     pub const fn new(path: &'static CStr, routes: &'static [u8]) -> Self {
         Self {
-            path,
             routes,
-            resource: AtomicU32::new(0),
+            resource: CachedResource::new(0x1889fdc, path),
         }
+    }
+
+    /// Queue the PEL and its dependencies on GU's resource loader.
+    ///
+    /// # Safety
+    /// Call on the game thread after the native resource manager is initialized.
+    pub unsafe fn preload(&self) {
+        unsafe { self.resource.preload() };
     }
 
     /// Borrow the process-lifetime PEL resource for custom particle units.
@@ -208,37 +221,7 @@ impl Bank {
     /// # Safety
     /// Call on the game thread after the native resource manager is initialized.
     pub unsafe fn resource(&self) -> u32 {
-        let cached = self.resource.load(Ordering::Acquire);
-        if cached != 0 {
-            return cached;
-        }
-        unsafe {
-            let Some(manager) = singleton(0x2126a64) else {
-                return 0;
-            };
-            let vtable: *const usize = manager.get(Field::at(0));
-            let load: unsafe extern "C" fn(u32, u32, *const c_char, u32) -> u32 =
-                core::mem::transmute(vtable.add(48 / 4).read());
-            let resource = load(
-                manager.addr(),
-                entry(0x1889fdc) as u32,
-                self.path.as_ptr(),
-                1,
-            );
-            let Some(pel) = Object::at(resource) else {
-                return 0;
-            };
-            if pel.get(Field::<u32>::at(80)) & 1 == 0
-                || self
-                    .resource
-                    .compare_exchange(0, resource, Ordering::AcqRel, Ordering::Acquire)
-                    .is_err()
-            {
-                let release: unsafe extern "C" fn(u32) = core::mem::transmute(entry(0x887660));
-                release(resource);
-            }
-            self.resource.load(Ordering::Acquire)
-        }
+        unsafe { self.resource.get() }.unwrap_or(0)
     }
 
     /// Spawn the selectors in this route using a world or joint anchor.
@@ -371,11 +354,22 @@ impl Bank {
                         parent,
                         joint,
                         offset,
+                    }
+                    | Anchor::JointPose {
+                        parent,
+                        joint,
+                        offset,
                     } => {
                         if let Some(offset) = offset {
                             proof.set(Field::at(16), offset);
                         }
-                        proof.set(Field::at(4), 0x28u32 | u32::from(offset.is_some()));
+                        let mut properties = 0x28u32 | u32::from(offset.is_some());
+                        if matches!(anchor, Anchor::JointPose { .. }) {
+                            // GU 31CC6C keeps explicitly supplied PEL property 7.
+                            properties |= 1 << 7;
+                            proof.set(Field::at(72), 0u8);
+                        }
+                        proof.set(Field::at(4), properties);
                         proof.set(Field::at(12), 2u32);
                         proof.set(Field::at(66), joint);
                         proof.set(Field::at(70), 0u8);
@@ -411,6 +405,17 @@ pub unsafe fn parent(actor: u32) -> Option<u32> {
             core::mem::transmute(vtable.add(304 / 4).read());
         let parent = get(actor.addr());
         (parent != 0).then_some(parent)
+    }
+}
+
+/// Draw from GU's particle RNG (AECE50), independently of combat rolls.
+/// # Safety
+/// Call only on the game's particle thread.
+pub unsafe fn random_u32() -> u32 {
+    unsafe {
+        let Some(manager) = singleton(0x2126554) else { return 0 };
+        let draw: unsafe extern "C" fn(u32, u32) -> u32 = core::mem::transmute(entry(0xb91e68));
+        draw(manager.addr(), 1)
     }
 }
 

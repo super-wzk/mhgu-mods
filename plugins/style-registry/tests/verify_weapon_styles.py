@@ -8,7 +8,7 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "plugins/great-sword-extreme/tests"))
 from verify_native_fx import binding_stack
 from verify_style import (
-    ENCODE, GAME_STYLE, INIT_HUNTER, SUBMIT_MODEL, api_for, boot, hunters,
+    ENCODE, GAME_STYLE, INIT_HUNTER, MANAGER, PROVIDER, SUBMIT_MODEL, api_for, boot, hunters,
     load_registered_style, service, setup_controller,
 )
 
@@ -84,7 +84,8 @@ def replay_style(repo, elf, name, weapon_id, style, hunter_vtable, clip, tag, au
         g.put(hunter, hunter_vtable)
     set_action = setup_controller(g, actor)
     g.stub(0x887648, lambda *_: 0)
-    g.stub(0x887660, lambda *_: 0)
+    released = []
+    g.stub(0x887660, lambda resource, *_: released.append(resource) or 0)
 
     manager, vtable, load_fn = (g.alloc(n) for n in (16, 52, 4))
     g.put(manager, vtable)
@@ -92,6 +93,7 @@ def replay_style(repo, elf, name, weapon_id, style, hunter_vtable, clip, tag, au
     g.put(0x2126A64, manager)
     paths = []
     resources = {}
+    background = []
     native_calls = []
     extensions = {
         0x2125210: ".lmt", 0x2125BEC: ".srqr", 0x1889FDC: ".pel",
@@ -99,12 +101,12 @@ def replay_style(repo, elf, name, weapon_id, style, hunter_vtable, clip, tag, au
     }
 
     def load(_, kind, path, flags):
-        assert flags == 1
+        critical = kind in (0x2125210, 0x1857810)
+        assert flags == (1 if critical else 2)
         assert native_calls[-1] == actor
         relative = g.string(path).replace("\\", "/") + extensions[kind]
         data = (nx / relative).read_bytes()
-        resource = g.alloc(176)
-        g.put(resource + 80, 1)
+        resource = g.alloc(228 if kind == 0x21255D0 else 176)
         if kind == 0x2125210:
             count, = struct.unpack_from("<H", data, 6)
             header = g.alloc(8 + 4 * count)
@@ -118,10 +120,13 @@ def replay_style(repo, elf, name, weapon_id, style, hunter_vtable, clip, tag, au
             g.put(resource + 104, count)
             g.put(resource + 108, rows)
         elif kind == 0x21255D0:
-            resource = g.alloc(228)
+            dimensions, = struct.unpack_from("<I", data, 8)
+            g.put(resource + 220, (dimensions >> 6) & 8191)
+            g.put(resource + 224, dimensions >> 19)
+        if critical:
             g.put(resource + 80, 1)
-            g.put(resource + 220, 128 if weapon_id == 11 else 3072)
-            g.put(resource + 224, 1024)
+        else:
+            background.append(relative)
         paths.append(relative)
         resources[relative] = resource
         return resource
@@ -160,6 +165,20 @@ def replay_style(repo, elf, name, weapon_id, style, hunter_vtable, clip, tag, au
     if hud:
         expected.add(f"GUI/frontier_{tag}/{hud}.tex")
     assert set(paths) == expected and not queued, (expected - set(paths), paths, queued)
+    particles = f"effect/frontier_{tag}/particles.pel"
+    assert set(background) == expected - {
+        path for path in expected if path.endswith((".lmt", ".hts"))
+    }
+    assert paths[-len(background):] == background
+    assert all(g.get(resources[path] + 80) == 0 for path in background)
+    prepared = list(paths)
+    assert g.run(init, actor) == 7 and paths == prepared
+
+    # A failed request gives up its retained reference and can be queued again.
+    failed = resources[particles]
+    g.put(failed + 80, 0x10)
+    assert g.run(init, actor) == 7 and paths == [*prepared, particles]
+    assert released == [failed] and resources[particles] != failed
     prepared = list(paths)
     assert bytes(g.cpu.mem_read(banks, 8 * 4)) == before
 
@@ -174,6 +193,19 @@ def replay_style(repo, elf, name, weapon_id, style, hunter_vtable, clip, tag, au
         g.cpu.mem_write(actor + 1280, struct.pack("<f", value))
         g.cpu.mem_write(actor + 1206, bytes([4 if end else 0]))
         g.run(tick, actor, inputs)
+
+    if weapon_id == 9:
+        # A player can already use a private motion while presentation is pending.
+        # No unfinished sound bank reaches the native queue and nothing reloads it.
+        set_action(16, 0x8000 + 73)
+        for sample in (0, 2, 6, 14, 24):
+            frame(sample)
+        assert g.half(actor + 1204) == 1478 and not queued and paths == prepared
+        set_action(1, 0)
+        frame(25)
+
+    for path in background:
+        g.put(resources[path] + 80, 1)
 
     if weapon_id == 1:
         set_action(16, 0x8002)
@@ -191,6 +223,16 @@ def replay_style(repo, elf, name, weapon_id, style, hunter_vtable, clip, tag, au
         frame(37, end=True)
         frame(40)
         assert strikes == [resources["player/hit/frontier_sa/hit_106_0.hts"]]
+    elif weapon_id == 9:
+        set_action(16, 0x8000 + 73)
+        for sample in (0, 2, 6, 14, 24):
+            frame(sample)
+        assert queued == [
+            (resources[sounds[0]], 4097),
+            (resources[sounds[2]], 4098),
+            (resources[sounds[2]], 4099),
+            (resources[sounds[1]], 4170),
+        ], queued
     elif weapon_id == 11:
         set_action(16, 0x8000 + 16)
         for sample in (0, 2, 8):
@@ -221,9 +263,10 @@ CASES = (
      ("guard_counter", "radiance"), None),
     ("dual-blades", 11, 2, 0x174F2B4, 1413, "db", ("blade", "common", "weapon"), (), "gauge"),
     ("sword-shield", 1, 5, 0x174A354, 1405, "sns", ("blade", "common", "weapon"),
-     ("blade_6", "blade_7", "blade_23", "blade_28", "blade_29"), None),
+     ("blade_6", "blade_7", "blade_23", "blade_28", "blade_29", "round_force"), None),
     ("long-sword", 7, 3, 0x174CF64, 1415, "ls", ("weapon", "common", "blade"),
      ("blade_0", "blade_32", "blade_33", "discharge", "instant", "release"), "gauge"),
+    ("gunlance", 9, 6, 0x174E110, 1405, "gl", ("blade", "common", "weapon"), (), None),
     ("switch-axe", 8, 4, 0x174D838, 1412, "sa", ("weapon", "blade", "common"),
      tuple(f"hit_{family}_{group}" for family, count in ((106, 7), (107, 4)) for group in range(count)), "gauge"),
 )
@@ -240,9 +283,31 @@ def check_case_coverage(repo):
     )
 
 
+def replay_load_order(repo, elf):
+    config = b"[Weapons]\n" + b"".join(f"{weapon}={style}\n".encode() for _, weapon, style, *_ in CASES)
+    modules = [PROVIDER]
+    for name, *_ in CASES:
+        mod = name + "-extreme"
+        modules.append(repo / "plugins" / mod / "dist" / mod / "romfs/nativeNX/plugins" / (mod.replace("-", "_") + ".nro"))
+    ordered = sorted(modules, key=lambda p: p.name)
+    for paths in (ordered, [p for p in ordered if p != PROVIDER] + [PROVIDER]):
+        g = boot(elf, config, ())
+        for i, path in enumerate(paths):
+            exports = g.load(path, 0x9000000 + i * 0x100000)
+            for callback in ("forge_onLoad", "forge_onInit"):
+                g.run(exports[callback], MANAGER)
+        _, selected = service(g)
+        found = [name for name, weapon, style, *_ in CASES if g.run(selected, weapon) == style]
+        assert len(found) == len(CASES), found
+    print("All six weapon styles registered in filename order and with the registry last.")
+
+
 def replay(repo=REPO):
     check_case_coverage(repo)
     elf = (repo / "mhgu/main.elf").read_bytes()
+    replay_load_order(repo, elf)
+    from verify_manual import replay as verify_manual
+    verify_manual(repo, elf, CASES)
     for case in CASES:
         print(f"Checking {case[0]}-extreme", flush=True)
         replay_style(repo, elf, *case)

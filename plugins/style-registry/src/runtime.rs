@@ -12,6 +12,7 @@ mod commands;
 mod deflection;
 mod effect;
 mod guard;
+mod manual;
 mod menu;
 mod physical;
 mod weapon;
@@ -23,6 +24,7 @@ use mhgu_sdk::style::{
 };
 
 struct Entry {
+    manual: mhgu_sdk::sync::Shared<Option<&'static [manual::Page]>>,
     style: &'static Style,
     name: CString,
     details: CString,
@@ -75,6 +77,7 @@ unsafe extern "C" fn register(
             unsafe { CStr::from_ptr(details) }.into()
         };
         let node = Box::into_raw(Box::new(Entry {
+            manual: mhgu_sdk::sync::Shared::new(None),
             style,
             name,
             details,
@@ -227,7 +230,7 @@ unsafe extern "C" fn bind_peer_frame(id: u32, callback: remote::Observe) -> bool
 
 unsafe extern "C" fn bind_action_state(id: u32, state: &'static remote::ActionState) -> bool {
     // These weapons leave the packet flag nibble at bits 16..19 free.
-    let Some(entry) = registered_entry(id).filter(|e| matches!(e.style.weapon, 0 | 8 | 11)) else {
+    let Some(entry) = registered_entry(id).filter(|e| matches!(e.style.weapon, 0 | 1 | 8 | 11)) else {
         return false;
     };
     entry
@@ -237,7 +240,7 @@ unsafe extern "C" fn bind_action_state(id: u32, state: &'static remote::ActionSt
 }
 
 // Retail 1FED90 and 1FF308 use bits 16..19 at packet +16 only for
-// weapon 4, 6 and 14. W00, W08 and W11 ignore that nibble.
+// weapon 4, 6 and 14. W00, W01, W08 and W11 ignore that nibble.
 const STATE_PRESENT: u8 = 0b1000;
 const STATE_VALUE: u8 = 0b0111;
 const STATE_SHIFT: u32 = 16;
@@ -667,4 +670,6 @@ fn start() {
     guard::install(base);
     weapon::install(base);
     menu::install(base);
+    manual::install(base);
+    unsafe { registry::finish_startup() };
 }

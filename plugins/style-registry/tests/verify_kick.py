@@ -39,6 +39,9 @@ def replay(elf, row, weapon, style, plugin, vtable):
     g.stub(0x2B72D4, lambda *_: hits.append(g.get(g.cpu.reg_read(UC_ARM_REG_SP) + 12)) or 0)
     for address in (0x27D5C4, 0x3A5ED0, 0x5584A0, 0x27FE18):
         g.stub(address, lambda *_: 0)
+    if weapon == 9:
+        g.stub(0x27F728, lambda *_: 0)
+        g.put(0x1897F78, g.alloc(17600))
     for offset in (752, 756, 792, 796, 808, 812, 1992):
         g.stub(g.get(vtable + offset), lambda *_: 0)
     g.put(actor + 5068, 1)
@@ -85,5 +88,6 @@ if __name__ == "__main__":
         (11, 2, "dual-blades-extreme", 0x174F2B4),
         (7, 3, "long-sword-extreme", 0x174CF64),
         (8, 4, "switch-axe-extreme", 0x174D838),
+        (9, 6, "gunlance-extreme", 0x174E110),
     ):
         replay(elf, row, weapon, style, plugin, vtable)

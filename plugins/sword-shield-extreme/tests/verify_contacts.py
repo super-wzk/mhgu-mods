@@ -69,7 +69,6 @@ def replay():
     # Neutral equipment with base attack 100. GU resolves the collision and HP;
     # the shared target supplies a neutral hitzone and suppresses visual reactions.
     g.cpu.mem_write(g.get(a + 5060) + 800, struct.pack("<H", 100))
-    s.stub(0x2B76CC, lambda *_: 0)
     joints, mapping = g.alloc(512), g.alloc(256)
     g.put(a + 1172, joints)
     g.put(a + 1176, mapping)
@@ -99,6 +98,7 @@ def replay():
     s.action(16, 0x8037)
     g.put(a + 13100, 7)
     g.put(a + 13108, float_bits(80))
+    g.run(0x1168EEC, a)
     tick(0)
     assert (g.half(sword + 56), g.get(sword + 132)) == (31, shapes["blade_6"])
     assert struct.unpack("<2f", g.cpu.mem_read(sword + 92, 8)) == (24, 8)
@@ -113,6 +113,70 @@ def replay():
     assert g.half(wave + 52) != g.half(sword + 52)
     resolve(wave, 16, (0, 100, 0))
     assert g.get(status + 880) == 953
+
+    # Let GU construct both hits from the same equipped stats and live oils.
+    eq = g.get(a + 5060)
+    s.stub(g.get(vtable + 508), lambda *_: 3)
+    g.cpu.mem_write(eq + 802, struct.pack("<h", 35))  # effective affinity
+    g.cpu.mem_write(eq + 804, struct.pack("<h", 21))  # element value
+    g.cpu.mem_write(eq + 834, struct.pack("<h", 1))   # fire
+    for oil, ko, exhaust, part_factor in [(0, 7, 8, 1.15), (3, 12, 14, 1.15), (2, 7, 8, 1.30)]:
+        g.run(s.controller, 0, 0)
+        s.action(16, 0x8037)
+        g.put(a + 13096, oil)
+        g.put(a + 13104, float_bits(80))
+        g.put(a + 10336, 0)
+        g.run(0x1168EEC, a)
+        tick(0)
+        tick(30)
+        waves.clear()
+        g.run(g.hooks[0x16ABAC], collision)
+        (wave,) = waves
+        for hit, divisor, power in ((sword, 1, 31), (wave, 2, 16)):
+            assert g.half(hit + 56) == power
+            assert g.half(hit + 144) == 35 and g.get(hit + 48) & 0x20000
+            assert g.get(hit + 72) == 16 and g.half(hit + 80) == 21
+            assert (g.cpu.mem_read(hit + 86, 1)[0], g.cpu.mem_read(hit + 89, 1)[0]) == (ko // divisor, exhaust // divisor)
+            assert g.get(hit + 152) == float_bits(part_factor)
+    print("Blade and wave: independent native affinity, fire, KO, exhaust and part modifiers passed")
+    # Control only GU's status roll. Either hit can proc while its partner misses.
+    for kind, mask, procs in ((6, 2, (1, 0)), (6, 2, (0, 1)), (7, 4, (1, 1)),
+                              (8, 1, (1, 1)), (9, 0x20000, (1, 1))):
+        g.cpu.mem_write(eq + 834, struct.pack("<h", kind))
+        rolls = iter(procs)
+        s.stub(0x302208, lambda *_: next(rolls))
+        g.run(s.controller, 0, 0)
+        s.action(16, 0x8037)
+        tick(0)
+        tick(30)
+        waves.clear()
+        g.run(g.hooks[0x16ABAC], collision)
+        (wave,) = waves
+        for hit, proc, amount in zip((sword, wave), procs, (21, 10)):
+            assert g.get(hit + 72) == mask * proc and g.half(hit + 80) == amount * proc
+    s.stub(0x302208, lambda *_: 1)
+
+    # Cancel into Round Force with the forward wave still in flight. The
+    # previous replay checks the native PMA. Here isolate its first cue and
+    # keep GU's real contact constructors, HTS resources and list expansion.
+    s.stub(g.originals[0x116D464], lambda owner, *_: g.put(owner + 12716, 1))
+    s.action(16, 43)
+    g.cpu.mem_write(a + 5, bytes([1]))
+    g.put(a + 12716, 0)
+    g.run(0x1169A7C, a)
+    waves.clear()
+    g.run(g.hooks[0x16ABAC], collision)
+    forward, ring = waves
+    assert forward == wave and g.half(ring + 52) != g.half(forward + 52)
+    assert g.get(ring + 132) == shapes["round_force"]
+    assert g.get(groups[shapes["round_force"]] + 4) == 8
+    assert g.get(ring + 152) == float_bits(1.3) and g.half(ring + 56) == 16
+    assert g.get(ring + 72) == 0x20000 and g.half(ring + 80) == 10
+    assert (g.cpu.mem_read(ring + 86, 1)[0], g.cpu.mem_read(ring + 89, 1)[0]) == (3, 4)
+    g.put(collision + 10288, 0)
+    assert g.run(g.hooks[0x1696FC], forward) == 1
+    assert g.run(g.hooks[0x1696FC], ring) == 8
+    print("Independent status rolls and overlapping forward/ring contacts passed")
 
     s.action(16, 0x802F)
     tick(0)

@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 
 const EFL: u32 = 0x6d5ae854;
 const PEL: u32 = 0x5a525c16;
+const FACE_CAMERA_ALONG_Z: u8 = 1 << 2;
 type V3 = [f32; 3];
 type Keys = Vec<(u32, V3)>;
 
@@ -75,6 +76,31 @@ fn sample(keys: &[(u32, V3)], t: u32) -> V3 {
     prev.1
 }
 
+// 81F4C332 samples the short definition's inner rotation before 81F4DD32
+// advances its bank age by two. GU draws the intervening 60 Hz frame too.
+fn short_rotation_samples(keys: &[(u32, V3)], rate: f32, life: u16, looping: bool) -> Keys {
+    let mut samples = Vec::new();
+    let period = (keys.last().unwrap().0 as f32 * rate) as u32;
+    for frame in 0..=u32::from(life) {
+        let mut tick = frame & !1;
+        if looping { tick %= period.max(1); }
+        let age = tick as f32 / rate;
+        let next = keys.partition_point(|&(time, _)| (time as f32) < age);
+        let value = match next {
+            0 => keys[0].1,
+            n if n == keys.len() => keys[n - 1].1,
+            n => {
+                let (a, from) = keys[n - 1];
+                let (b, to) = keys[n];
+                let t = (age - a as f32) / (b - a) as f32;
+                core::array::from_fn(|i| from[i] + t * (to[i] - from[i]))
+            }
+        };
+        samples.push((frame, value));
+    }
+    samples
+}
+
 fn wide_curves(def: &[u8], life: u16, mut size: V3, velocity_curve: &[(u32, V3)]) -> (Keys, Keys) {
     let mut position = [0.; 3];
     let mut velocity = vec(def, 20);
@@ -123,6 +149,7 @@ fn primary_uv(
     speed: [f32; 2],
     origin: [f32; 2],
     offsets: &[(u32, V3)],
+    stepped: bool,
     delay: u32,
 ) -> Result<()> {
     if sheet.is_none() && offsets.is_empty() && speed == [0.; 2] && origin == [0.; 2] {
@@ -147,7 +174,7 @@ fn primary_uv(
         ensure!(offsets.len() < 256, "too many primary UV keys");
         for axis in 0..2 {
             put(&mut uv, 48 + axis * 4, model.len().try_into()?);
-            model.extend((offsets.len() as u32).to_le_bytes());
+            model.extend((offsets.len() as u32 | if stepped { 0x18000000 } else { 0 }).to_le_bytes());
             for &(age, value) in offsets {
                 model.extend((delay + age).to_le_bytes());
                 model.extend(value[axis].to_le_bytes());
@@ -195,6 +222,7 @@ enum Facing {
     Camera = 1,
     CameraYaw = 3,
     CameraPosition = 13,
+    CameraAlongZ,
 }
 
 impl Facing {
@@ -238,6 +266,7 @@ struct Layer {
     uv_speed: [f32; 2],
     uv_origin: [f32; 2],
     uv_keys: Keys,
+    uv_stepped: bool,
     pulse: bool,
     rotation_order: EulerOrder,
     facing: Facing,
@@ -269,6 +298,7 @@ impl Layer {
             uv_speed: [0.; 2],
             uv_origin: [0.; 2],
             uv_keys: Vec::new(),
+            uv_stepped: false,
             pulse: false,
             rotation_order: EulerOrder::Legacy,
             facing: Facing::World,
@@ -384,18 +414,22 @@ impl Compiler {
             None => format!(r"effect\{}\m{}", self.namespace, layer.mesh),
         };
         model[80..80 + mesh.len()].copy_from_slice(mesh.as_bytes());
-        if layer.mirror_axes != 0 || layer.soft_particle > 0. {
+        let (native_facing, draw_flags) = match layer.facing {
+            Facing::CameraAlongZ => (Facing::World, layer.mirror_axes | FACE_CAMERA_ALONG_Z),
+            facing => (facing, layer.mirror_axes),
+        };
+        if draw_flags != 0 || layer.soft_particle > 0. {
             // Private fields after the NUL-terminated model path and FZD1 data.
             ensure!(mesh.len() < 48, "model name overlaps Frontier draw fields");
             model[136..139].copy_from_slice(b"FZF");
-            model[139] = layer.mirror_axes;
+            model[139] = draw_flags;
             float(&mut model, 140, layer.soft_particle);
         }
         // A949F8 reads the Euler order and axis 6 disables travel alignment.
         put(
             &mut model,
             256,
-            0x60 | layer.rotation_order as u32 | (layer.facing as u32) << 8,
+            0x60 | layer.rotation_order as u32 | (native_facing as u32) << 8,
         );
         let depth = &layer.camera_depth;
         if depth.iter().any(|&(_, v)| v[2] != 0.) {
@@ -461,6 +495,7 @@ impl Compiler {
             layer.uv_speed,
             layer.uv_origin,
             &layer.uv_keys,
+            layer.uv_stepped,
             delay,
         )?;
         self.sheets.extend(sheet);
@@ -670,7 +705,16 @@ impl Compiler {
                     } else {
                         half(def, 16)?
                     };
-                    let mut rotation = vector_curve(rotation_id, [0.; 3], time_scale);
+                    let life = ((f32::from(half(def, 12)?) * time_scale).ceil() as u16).max(1);
+                    let mut rotation = if self.namespace == "frontier_sa" && local_rotation_id != 0 {
+                        let keys = vector_curve(rotation_id, [0.; 3], 1.);
+                        let looping = vectors.chunks_exact(24)
+                            .find(|key| u16::from(key[18]) == rotation_id)
+                            .is_some_and(|key| key[16] & 1 != 0);
+                        short_rotation_samples(&keys, time_scale, life, looping)
+                    } else {
+                        vector_curve(rotation_id, [0.; 3], time_scale)
+                    };
                     for (_, angles) in &mut rotation {
                         if local_rotation_id != 0 {
                             *angles = angles.map(f32::to_radians);
@@ -700,11 +744,35 @@ impl Compiler {
                     let uv_mode = def[if wide { 108 } else { 22 }];
                     let mut uv_origin = [0.; 2];
                     let mut uv_keys = Vec::new();
+                    let uv_stepped = wide && (4..=6).contains(&uv_mode);
                     let scroll_axes = match uv_mode {
                         0 => [false, false],
                         1 => [true, true],
                         2 => [true, false],
                         3 => [false, true],
+                        4..=6 if wide => {
+                            // HD 113D1CF0 / 113D1DC0 / 113D1E45 step a tiled
+                            // texture over the authored, time-scaled period.
+                            let tiles = u32::from(half(def, 112)?);
+                            ensure!(tiles > 0, "empty wide UV atlas");
+                            let span = ((f32::from(half(def, 114)?) * time_scale) as u32).max(1);
+                            let dwell = span / tiles;
+                            ensure!(dwell > 0, "zero wide UV atlas tile duration");
+                            let side = if uv_mode == 4 { tiles.isqrt() } else { tiles };
+                            for frame in (0..=u32::from(life)).step_by(2) {
+                                let tile = (frame / dwell) % tiles;
+                                let [x, y] = match uv_mode {
+                                    4 => [tile % side, tile / side],
+                                    5 => [tile, 0],
+                                    _ => [0, tile],
+                                };
+                                let value = [x as f32 / side as f32, y as f32 / side as f32, 0.];
+                                if uv_keys.last().is_none_or(|&(_, prior)| prior != value) {
+                                    uv_keys.push((frame, value));
+                                }
+                            }
+                            [false, false]
+                        }
                         7 if !wide => {
                             // 113D0A17 samples a vector UV offset at particle age.
                             let id = word(def, 24).try_into()?;
@@ -737,7 +805,6 @@ impl Compiler {
                         uv_speed[axis] = 0.5 / (period * time_scale);
                     }
                     let mesh = half(def, 8)?;
-                    let life = ((f32::from(half(def, 12)?) * time_scale).ceil() as u16).max(1);
                     let flags = word(def, 0);
                     let movement_id = half(def, 14)?;
                     let short_ground = !wide && bank == 4035;
@@ -823,6 +890,7 @@ impl Compiler {
                         uv_speed,
                         uv_origin,
                         uv_keys,
+                        uv_stepped,
                         pulse: false,
                         // FZ 81F4E4C2 and 81F4FF30 apply local X, Y, Z in sequence.
                         rotation_order: EulerOrder::LocalXyz,
@@ -1127,13 +1195,14 @@ impl Compiler {
         Ok(())
     }
 
-    fn surface_spray(&mut self, size: f32) -> Result<()> {
+    fn surface_spray(&mut self, size: f32, soft_particle: f32) -> Result<()> {
         let white = [255; 4];
         // 81F90ADA type 5: six surface sprites, alternating a four-tick delay.
         for i in 0..6 {
             let mut surface = Layer::legacy(26, 20);
             surface.facing = Facing::Camera;
             surface.blend = Blend::Alpha;
+            surface.soft_particle = soft_particle;
             surface.delay = 4 * (i % 2);
             surface.spread = [5.12 * size * f32::from(i), 0., 5.12 * size * f32::from(i)];
             surface.scale = [
@@ -1152,9 +1221,9 @@ impl Compiler {
         Ok(())
     }
 
-    pub fn footfalls(&mut self) -> Result<()> {
+    pub fn footfalls(&mut self, soft_particle: f32) -> Result<()> {
         let first = self.count;
-        self.surface_spray(0.45)?;
+        self.surface_spray(0.45, soft_particle)?;
         self.route(first);
         // 81F9A86C uses common mesh 74. Normal contacts create one
         // particle, while type 7 (a full-body slide) creates five.
@@ -1165,10 +1234,211 @@ impl Compiler {
             dust.blend = Blend::Alpha;
             dust.spread = if slide { [30., 0., 30.] } else { [0.; 3] };
             dust.facing = Facing::Camera;
+            dust.soft_particle = soft_particle;
             dust.scale = vec![(0, [0.55; 3]), (16, [1.5; 3])];
             dust.color = vec![(0, [255, 255, 255, 130]), (16, [255, 255, 255, 0])];
             dust.movement.push((16, [0., 32., 0.]));
             self.layer(dust, None)?;
+            self.route(first);
+        }
+        Ok(())
+    }
+
+    pub fn gunlance_shell_feedback(&mut self) -> Result<()> {
+        // Type 31/3 and 31/7 launch spent casings from the breech.
+        let first = self.count;
+        let mut casing = Layer::legacy(151, 22);
+        casing.blend = Blend::Alpha;
+        casing.scale = vec![(0, [0.7; 3])];
+        casing.spread = [4., 4., 8.];
+        casing.rotation_range = [1.; 3];
+        casing.rotation.push((22, [5., 3., 1.]));
+        casing.movement = (0..=22).map(|age| {
+            let t = age as f32;
+            (age, [3.6 * t, 12. * t - 0.68 * t * t, -1.4 * t])
+        }).collect();
+        casing.color = vec![(0, [205, 172, 118, 255]), (16, [205, 172, 118, 255]),
+            (22, [205, 172, 118, 0])];
+        self.layer(casing, None)?;
+        self.route(first);
+
+        // Local equivalents of the type 31 charge and 4004 chambering layers.
+        for (mesh, life, size, tint) in [
+            (59, 50, 1.6, [255, 180, 105, 108]), // Wyvern Fire charge
+            (66, 12, 1.1, [255, 209, 135, 126]), // one shell inserted
+            (74, 19, 0.9, [187, 178, 163, 96]),  // chamber vapour
+        ] {
+            let first = self.count;
+            let mut layer = Layer::legacy(mesh, life);
+            layer.facing = Facing::Camera;
+            let end = u32::from(life);
+            layer.scale = vec![(0, [size * 0.6; 3]), (4, [size; 3]), (end, [size * 1.3; 3])];
+            let clear = [tint[0], tint[1], tint[2], 0];
+            layer.color = vec![(0, clear), (3, tint), (end, clear)];
+            layer.soft_particle = if mesh == 74 { 0.03 } else { 0.01 };
+            if mesh == 74 {
+                layer.blend = Blend::Alpha;
+                layer.movement = vec![(0, [0.; 3]), (end, [0., 28., 8.])];
+            }
+            self.layer(layer, None)?;
+            self.route(first);
+        }
+
+        // FZ 31/6 and 31/8 run four short afterburn layers in succession.
+        let first = self.count;
+        for delay in [0, 6, 12, 18] {
+            let mut smoke = Layer::legacy(74, 19);
+            smoke.delay = delay;
+            smoke.facing = Facing::Camera;
+            smoke.blend = Blend::Alpha;
+            smoke.soft_particle = 0.03;
+            smoke.spread = [12., 5., 12.];
+            smoke.scale = vec![(0, [0.45; 3]), (19, [1.35; 3])];
+            smoke.color = vec![(0, [212, 201, 181, 0]), (3, [212, 201, 181, 74]),
+                (19, [212, 201, 181, 0])];
+            smoke.movement = vec![(0, [0.; 3]), (19, [0., 44., 12.])];
+            self.layer(smoke, None)?;
+        }
+        self.route(first);
+
+        // Type 31/0 (81FC3396). The muzzle flash uses meshes 16, 17 and 81
+        // with the scale and color curves at 82C8B038..82C8B130.
+        for size in [0.8, 1.2] {
+            let first = self.count;
+            for (mesh, facing, peak, start, middle, end) in [
+                (16, Facing::World, 2, [0.; 3], [6., 6., 1.], [3., 3., 1.]),
+                (17, Facing::CameraAlongZ, 2, [0.; 3], [3., 1., 2.], [1., 1., 5.]),
+                (81, Facing::Camera, 3, [1.; 3], [6., 6., 1.], [6., 6., 1.]),
+            ] {
+                let mut flash = Layer::legacy(mesh, if mesh == 81 { 3 } else { 6 });
+                flash.facing = facing;
+                flash.inherit_joint_rotation = true;
+                flash.soft_particle = 0.01;
+                let sized = |scale: V3| scale.map(|axis| axis * size);
+                flash.scale = vec![(0, sized(start)), (peak, sized(middle))];
+                flash.color = if mesh == 81 {
+                    vec![(0, [255; 4]), (3, [48, 16, 64, 16])]
+                } else {
+                    flash.scale.insert(1, (1, sized(start)));
+                    flash.scale.push((6, sized(end)));
+                    vec![(0, [255, 255, 255, 0]), (2, [255; 4]), (6, [48, 16, 64, 16])]
+                };
+                self.layer(flash, None)?;
+            }
+            self.route(first);
+        }
+        Ok(())
+    }
+
+    pub fn gunlance_blade(&mut self) -> Result<()> {
+        // Type 31/4. Vita 827BF144 selects the two core layers by element.
+        // 81FBE17C evaluates separate colour keys at 0, 15, 30, 40 and 50.
+        let palettes = [
+            [
+                [0x00ff967c, 0x96ffb47c, 0x96ff965e, 0x96ff7c30, 0x00ff5e00],
+                [0x00ff967c, 0x5effb47c, 0x5eff965e, 0x5eff7c30, 0x00ff5e00],
+            ],
+            [
+                [0x0066aaff, 0x966699ff, 0x9699ccff, 0x9688aaff, 0x004488ff],
+                [0x0066aaff, 0x5e6699ff, 0x5e99ccff, 0x5e88aaff, 0x004488ff],
+            ],
+            [
+                [0x0096c8ff, 0x9696c8ff, 0x9696b4ff, 0x969696ff, 0x00965eff],
+                [0x0096c8ff, 0x5e96c8ff, 0x5e96b4ff, 0x5e9696ff, 0x00965eff],
+            ],
+            [
+                [0x00ff7c5e, 0x96ff305e, 0x96ff4030, 0x96ff0000, 0x00ff0000],
+                [0x00c8ff00, 0x4896c8ff, 0x485ee6ff, 0x48005e96, 0x00005e5e],
+            ],
+            [
+                [0x005ee6ff, 0x9696c8ff, 0x967cb4ff, 0x965e96ff, 0x00007cff],
+                [0x005ee6ff, 0x5e96c8ff, 0x5e7cb4ff, 0x5e5e96ff, 0x00007cff],
+            ],
+            [
+                [0x00ffb47c, 0x96ffc896, 0x96ffe6c8, 0x96ffc8b4, 0x00ffb47c],
+                [0x00ffb47c, 0x5effc896, 0x5effe6c8, 0x5effc8b4, 0x00ffb47c],
+            ],
+        ];
+        // The original table has separate delayed slots for every element.
+        // Reuse the overlay's existing particle meshes for the secondary
+        // effects, with spacing and size fitted to GU's gunlance.
+        let accents: &[&[(u16, u16)]] = &[
+            &[(94, 0), (94, 5), (54, 0), (54, 5), (54, 10)], // fire
+            &[(94, 0), (94, 5), (93, 0), (93, 5), (93, 10)], // water
+            &[(38, 0), (38, 5), (32, 0), (66, 0)],           // thunder
+            &[(94, 0), (94, 5), (32, 0), (36, 0)],           // dragon
+            &[(38, 0), (38, 5), (16, 0), (16, 3), (16, 6)],  // ice
+            &[(94, 0), (94, 5), (38, 0), (38, 5), (65, 0), (65, 5)], // raw/status
+        ];
+        let flame_size = [(0, [0.4, 1., 0.5]), (45, [0.5, 1., 2.]), (50, [0.8, 1., 2.])];
+        let glow_size = [(0, [0.3, 0.3, 1.]), (50, [0.6, 0.6, 1.])];
+        for (index, ([core, halo], accessories)) in palettes.into_iter().zip(accents).enumerate() {
+            let first = self.count;
+            // Vita 81FBE3D4 / 81FBE5BC. Model 17 uses unit multipliers;
+            // model 121 uses row factors (5, 1, 9) from 827BF144.
+            let (mesh, width, length) = if index == 0 { (17, 1., 1.) } else { (121, 5., 9.) };
+            let mut flame = Layer::legacy(mesh, 50);
+            let mut glow = Layer::legacy(81, 50);
+            for (layer, sizes, multipliers, colors) in [
+                (&mut flame, flame_size.as_slice(), [width, 1., length], core),
+                (&mut glow, glow_size.as_slice(), [1.; 3], halo),
+            ] {
+                // 81FBE17C alternates the scale multiplier between 1.0 and 1.2.
+                layer.scale = (0..=50)
+                    .map(|age| {
+                        let pulse = if age % 2 == 0 { 1. } else { 1.2 };
+                        let size = sample(sizes, age);
+                        (
+                            age,
+                            core::array::from_fn(|axis| size[axis] * multipliers[axis] * pulse),
+                        )
+                    })
+                    .collect();
+                layer.color = [0, 15, 30, 40, 50]
+                    .into_iter()
+                    .zip(colors.map(argb_as_rgba))
+                    .collect();
+                layer.soft_particle = 0.01;
+            }
+            flame.inherit_joint_rotation = true;
+            flame.facing = Facing::CameraAlongZ;
+            glow.facing = Facing::Camera;
+            self.layer(flame, None)?;
+            self.layer(glow, None)?;
+            self.route(first);
+
+            let first = self.count;
+            for (slot, &(mesh, delay)) in accessories.iter().enumerate() {
+                let (life, size) = match mesh {
+                    32 => (10, 0.45), // short branched sparks
+                    93 => (22, 0.9),  // water rings
+                    65 => (20, 1.1),  // small motes
+                    _ => (18, 0.55),
+                };
+                let mut layer = Layer::legacy(mesh, life);
+                layer.delay = delay;
+                layer.soft_particle = 0.03;
+                layer.facing = Facing::Camera;
+                layer.blend = if mesh == 93 {
+                    Blend::Alpha
+                } else {
+                    Blend::Additive
+                };
+                let side = if slot % 2 == 0 { -1. } else { 1. };
+                // These particles retain the live attachment while their
+                // local movement and scale curves advance.
+                layer.position = [side * 12., 0., 0.];
+                layer.rotation_range[2] = core::f32::consts::PI;
+                layer.movement = vec![(0, [0.; 3]), (u32::from(life), [side * 28., 30., 0.])];
+                layer.scale = vec![(0, [size; 3]), (u32::from(life), [size * 1.6; 3])];
+                let [r, g, b, _] = argb_as_rgba(halo[2]);
+                layer.color = vec![
+                    (0, [r, g, b, 0]),
+                    (2, [r, g, b, 72]),
+                    (u32::from(life), [r, g, b, 0]),
+                ];
+                self.layer(layer, None)?;
+            }
             self.route(first);
         }
         Ok(())
@@ -1220,7 +1490,7 @@ impl Compiler {
             .to_vec();
         ring.color = vec![(0, [255; 4]), (13, [255; 4]), (25, [255, 255, 255, 25])];
         self.layer(ring, None)?;
-        self.surface_spray(2.5)?;
+        self.surface_spray(2.5, 0.)?;
         self.route(first);
         self.blade_strip(501)
     }
@@ -1238,6 +1508,19 @@ impl Compiler {
         Ok(())
     }
 
+    pub fn round_force_ring(&mut self) -> Result<()> {
+        let first = self.count;
+        // Mesh 175 is the horizontal, radius-100 band in the SnS vacuum effect.
+        // The world emitter scales it by the tier's reach / 100.
+        let mut ring = Layer::legacy(175, 34);
+        ring.frames_per_second = 60.;
+        ring.scale = vec![(0, [0.10, 0.48, 0.10]), (30, [0.88, 0.48, 0.88])];
+        ring.color = vec![(0, [255; 4]), (28, [255; 4]), (34, [255, 255, 255, 0])];
+        self.layer(ring, None)?;
+        self.route(first);
+        Ok(())
+    }
+
     pub fn blade_strip(&mut self, mesh: u16) -> Result<()> {
         let first = self.count;
         let mut trail = Layer::legacy(mesh, 2);
@@ -1250,7 +1533,7 @@ impl Compiler {
     pub fn ground_impacts(&mut self) -> Result<()> {
         let white = [255; 4];
         let first = self.count;
-        self.surface_spray(2.)?;
+        self.surface_spray(2., 0.)?;
         self.route(first);
         // The dry branch of 81F82A3C throws nine pieces of mesh 43. Use
         // samples from its velocity ranges and its per-tick gravity.
@@ -1361,8 +1644,8 @@ impl Compiler {
         for hand in [502, 503] {
             for color in colors {
                 let first = self.count;
+                // FZ 81F8B4F8 type 3 selects 81F81F7E(2): src-alpha, one.
                 let mut trail = Layer::legacy(hand, 6);
-                trail.blend = Blend::Alpha;
                 trail.color = vec![(0, color)];
                 self.layer(trail, None)?;
                 self.route(first);
@@ -1386,8 +1669,7 @@ impl Compiler {
             glow.rotation = vec![(0, [FRAC_PI_2, 0., if left { PI } else { 0. }])];
             glow.rotation_order = EulerOrder::LocalXyz;
             glow.inherit_joint_rotation = true;
-            // Composite the periodic glow coverage before GU's bloom pass.
-            glow.blend = Blend::Alpha;
+            // Both hands use the same additive blend as the strips (81F87696).
             glow.color = vec![(0, color), (6, color), (8, [0; 4])];
             self.layer(glow, None)?;
             self.route(first);

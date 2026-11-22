@@ -89,6 +89,43 @@ fn half(data: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([data[at], data[at + 1]])
 }
 
+/// FZ 81FC8398 types 0 and 17. The colour variant selects eight consecutive
+/// routes produced by the converter's sword_flash.
+/// # Safety
+/// Call on the game thread with a live hunter.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn sword_flash(bank: &mhgu_sdk::style::particle::Bank, actor: u32, first: usize) {
+    use mhgu_sdk::style::particle;
+    unsafe {
+        if let Some(parent) = particle::parent(actor) {
+            bank.emit(
+                first,
+                Anchor::Joint {
+                    parent,
+                    joint: 2,
+                    offset: Some([0.; 3]),
+                },
+            );
+        }
+        let Some(matrix) = particle::joint_matrix(actor, 2) else {
+            return;
+        };
+        let point = ((matrix + 48) as *const [f32; 3]).read_unaligned();
+        for i in 0..3 {
+            let angles = core::array::from_fn(|_| particle::random_u32() as u16);
+            let sign = ((particle::random_u32() >> 12) & 1) as usize;
+            bank.emit(
+                first + 2 + 2 * i + sign,
+                Anchor::RotatedWorld(point, angles),
+            );
+        }
+        let floor = ground_heights(actor, point)
+            .map_or_else(|| ((actor + 68) as *const f32).read(), |(height, _)| height);
+        let yaw = ((actor + 4076) as *const u16).read();
+        bank.emit(first + 1, Anchor::World([point[0], floor, point[2]], yaw));
+    }
+}
+
 /// Preserve the sampled bone basis when submitting a GU world particle.
 /// FZ 810050CC and GU 8A7DC4 use different Euler orders. GU builds Ry * Rx * Rz.
 pub fn world_pose_angles(pose: &[f32; 16]) -> [u16; 3] {

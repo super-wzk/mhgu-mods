@@ -31,9 +31,9 @@ def replay(g, actor, leave_style):
     put(atlas + 220, "2I", 3072, 1024)
     loads = []
     def load_atlas(_, kind, name, flags):
-        assert (kind, g.string(name), flags) == (0x21255d0, r"GUI\frontier_sa\gauge", 1)
+        assert (kind, g.string(name), flags) == (0x21255d0, r"GUI\frontier_sa\gauge", 2)
         loads.append(1)
-        return 0 if len(loads) == 3 else atlas
+        return 0 if len(loads) == 2 else atlas
     g.stub(load, load_atlas)
     g.stub(0x887660, lambda *_: 0)
     g.put(0x212668C, g.alloc(192))
@@ -137,7 +137,7 @@ def replay(g, actor, leave_style):
     g.put(atlas + 80, 1)
     draw()
     stock()
-    assert len(loads) == 3
+    assert len(loads) == 2
     draw()
     custom()
     assert not resets

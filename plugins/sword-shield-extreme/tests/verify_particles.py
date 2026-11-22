@@ -57,7 +57,18 @@ def replay():
                 )
         else:
             assert adapted == (original._replace(rgb=rgb),)
-    print("GU SnS model submissions: shared hook, dry/wet depth and vacuum RGB gain passed")
+    routes = (ROOT / "target/assets/effects/routes.bin").read_bytes()
+    layer, count = struct.unpack_from("<2H", routes, 4 * 23)
+    assert count == 1
+    ring = (NX / f"effect/frontier_sns/e{layer}.efl").read_bytes()
+    for frame in (2, 15, 30):
+        gen = emit_model_layer(g, load, ring, frame)
+        packet, = draw(gen)
+        radius = .10 + .78 * frame / 30
+        assert math.isclose(math.hypot(*packet.basis_x), radius, abs_tol=.001), (frame, packet)
+        assert math.isclose(math.hypot(*packet.normal), radius, abs_tol=.001)
+        assert packet.position == (0., 0., 0.) and packet.alpha > 0
+    print("GU SnS model submissions: depth, vacuum RGB gain and centered expanding ring passed")
 
 
 if __name__ == "__main__":

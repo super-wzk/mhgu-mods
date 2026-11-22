@@ -80,22 +80,41 @@ def replay(g, actor, descriptor, set_action, allow_transition):
         stub(addr, lambda *_: 0)
     shoulder_layout = g.get(0x1897F78) + 17518
     old_layout = bytes(g.cpu.mem_read(shoulder_layout, 1))
+    def mapped(frame, held, previous):
+        g.cpu.mem_write(actor + 5108, struct.pack("<3H", held, previous & ~held, held & ~previous))
+        g.cpu.mem_write(actor + 5140, bytes(32))
+        g.run(0x27CA28, actor)
+        g.run(0x1199114, actor)
+        common = int.from_bytes(g.cpu.mem_read(actor + 5140, 16), "little")
+        return tick(frame, weapon=g.get(actor + 5156), held=held, common=common, strength=0)
+
     for layout, shoulder in ((0, 0x40), (1, 0x800)):
         g.cpu.mem_write(shoulder_layout, bytes([layout]))
         chord = shoulder | 0x120
-        for presses in ((0x120,), (0x20, 0x120), (0x100, 0x120), (chord,), (shoulder, chord)):
+        for presses in (
+            (0x120,), (0x20, 0x120), (0x100, 0x120), (chord,), (shoulder, chord),
+            (shoulder,) * 4 + (chord,),
+        ):
             begin(0)
             g.cpu.mem_write(actor + 5188, bytes(8))
             previous = 0
-            for frame, held in (*zip(range(44, 48, 2), presses), (78, 0), (80, 0)):
-                g.cpu.mem_write(actor + 5108, struct.pack("<3H", held, previous & ~held, held & ~previous))
+            for frame, held in (*zip(range(44, 54, 2), presses), (78, 0), (80, 0)):
+                active = mapped(frame, held, previous)
                 previous = held
-                g.cpu.mem_write(actor + 5140, bytes(32))
-                g.run(0x27CA28, actor)
-                g.run(0x1199114, actor)
-                common = int.from_bytes(g.cpu.mem_read(actor + 5140, 16), "little")
-                active = tick(frame, weapon=g.get(actor + 5156), held=held, common=common, strength=0)
             assert active == 32, (layout, presses, active)
+        for use_chord, dest in ((False, 7), (True, 0)):
+            begin(0)
+            put_float(actor + 28, 1)
+            g.cpu.mem_write(actor + 5188, bytes(16))
+            previous = 0
+            # X+A arrives just before the evade-slash window. It also consumes
+            # the held shoulder so releasing it cannot later queue Spirit I.
+            for frame in range(18, 46):
+                held = (chord if use_chord else shoulder) if 43 <= frame < 45 else (
+                    shoulder if frame < 43 else 0)
+                assert mapped(frame, held, previous) == 0
+                previous = held
+            assert mapped(80, 0, 0) == dest, (layout, use_chord)
     g.cpu.mem_write(shoulder_layout, old_layout)
     print("GU LS evade slash: X+A survives overlapping weapon shoulder input in both layouts")
 

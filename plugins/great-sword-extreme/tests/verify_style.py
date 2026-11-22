@@ -132,7 +132,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
     g = Game(elf)
     # The fixture starts after class registration. Populate the real weapon
     # DTI parent links so GU's virtual type query can distinguish the lobby.
-    for vtable in (0x1749A88, 0x174A354, 0x174CF64, 0x174D838, 0x174F2B4):
+    for vtable in (0x1749A88, 0x174A354, 0x174CF64, 0x174D838, 0x174E110, 0x174F2B4):
         g.put(g.run(g.get(vtable + 20)) + 16, 0x1886BB8)
     g.stub(0x13EFDAC, lambda p, size, *_: g.cpu.mem_write(p, bytes(size)))
     g.inline_hooks = g.inline_hooks | {
@@ -206,6 +206,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             DECODE,
             MENU_OPEN,
             MENU_UPDATE,
+            0x5B1294, 0x5B0F70, 0x646A3C, 0x646AD0, 0x5CB780, 0x65F7A4,
             STATUS_STYLE,
             STATUS_STYLE_SMALL,
             GAME_STYLE,
@@ -239,7 +240,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         if "registry" in order
         else set()
     )
-    if order == ("registry", "sword"):
+    if "registry" in order and "sword" in order:
         expected.update((EQUIPMENT_GRIP, MODEL_DEPTH))
     actual = set(g.hooks)
     assert actual == expected, (
@@ -559,6 +560,11 @@ def verify_action_lifecycle(elf, config):
         assert g.cpu.mem_read(p + 12325, 1) == b"\0"
         assert g.cpu.mem_read(p + 10057, 1)[0] & 6 == 0
         assert g.get(p + 9488) == 0 and g.get(p + 13100) == 0x12345678
+    g.run(0x2A264C, p, 1)
+    g.run(GS_CHANGE_ACTION, p, 16, 0x8000 + 58, 0)
+    assert g.run(0x2A263C, p) == 0
+    g.run(GS_CHANGE_ACTION, p, 16, 0x8000 + 58, 0x80)
+    assert g.run(0x2A263C, p) == 1
     g.run(GS_CHANGE_ACTION, p, 64, 1, 0)
     assert (g.half(p + 9478), g.half(p + 9482)) == (64, 1)
     verify_weapon_arts(g, p)
@@ -632,7 +638,7 @@ def verify_battle(g, p, remote, resources):
     def phase(n):
         g.cpu.mem_write(p + 5, bytes([n]))
 
-    def action(group, act):
+    def action(group, act, flags=0):
         h(9480, g.half(p + 9478))
         h(9484, g.half(p + 9482))
         h(9478, group)
@@ -640,7 +646,10 @@ def verify_battle(g, p, remote, resources):
         f(5296, 1.)  # GU 28E538 resets the action's base animation rate.
         phase(0)
         g.cpu.mem_write(p + 9384, bytes(64))
-        g.cpu.mem_write(p + 10057, bytes([g.cpu.mem_read(p + 10057, 1)[0] & ~6]))
+        # Mirror the common transition's draw flag, checked with the real
+        # 2AB670 in verify_action_lifecycle.
+        pose = g.cpu.mem_read(p + 10057, 1)[0] & ~14
+        g.cpu.mem_write(p + 10057, bytes([pose | (8 if flags & 0x80 else 0)]))
 
     def draw_weapon(kind=0):
         route = g.run(DRAW_ROUTE, p, kind)
@@ -706,6 +715,7 @@ def verify_battle(g, p, remote, resources):
     g.put(p + 240, g.alloc(32))
     g.put(p + 1188, 1)
     g.put(p + 5068, 1)
+    g.put(p + 5104, 1)
     h(5078, 100)
     f(28, 2)
     g.stub(0x65F93C, lambda *_: 64)
@@ -714,7 +724,7 @@ def verify_battle(g, p, remote, resources):
         g.stub(g.get(0x1749A88 + off), lambda *_: 0)
     # Keep the two real detours. Replace only the common scene lifecycle,
     # independently exercised by verify_action_lifecycle.
-    g.stub(g.originals[CHANGE_ACTION], lambda actor, group, act, _: action(group, act))
+    g.stub(g.originals[CHANGE_ACTION], lambda actor, group, act, flags: action(group, act, flags))
     g.stub(0x2B6E5C, lambda *_: action(1, 0))
     g.stub(0x2C4EEC, lambda *_: phase(1))
     f(5088, 900)
@@ -1023,6 +1033,41 @@ def verify_battle(g, p, remote, resources):
     tick(10, held=0x60)
     tick(54, held=0x60)
     assert clip() == 1 and g.half(p + 9482) == 0x8000 + 20
+    skills.update((91, 92))
+    tick(58)
+    assert clip() == 28 and value() == 60
+    hit = p + 12320
+    actual = (g.half(hit + 144), g.cpu.mem_read(hit + 86, 1)[0])
+    assert actual == (100, 30), actual
+    # The same release state handles both a draw and a drawn uppercut.
+    for draw, equipped, bonus in (
+        (True, (91, 92), (100, 30)),
+        (True, (91,), (100, 0)),
+        (True, (92,), (0, 30)),
+        (True, (), (0, 0)),
+        (False, (91, 92), (0, 0)),
+    ):
+        neutral()
+        skills.clear()
+        skills.update(equipped)
+        if draw:
+            g.cpu.mem_write(p + 10057, b"\0")
+        tick(0, held=0x120, pressed=0x120, draw=draw)
+        assert clip() == (48 if draw else 37)
+        if draw:
+            end, = struct.unpack("<f", g.cpu.mem_read(p + 1284, 4))
+            tick(end, held=0x120)
+            assert clip() == 37
+        for elapsed in range(0, 202, 2):
+            tick(54 + elapsed % 68, held=0x120)
+        tick(54 + elapsed % 68)
+        assert g.half(p + 9482) == 0x8000 + 58 and not whiff()
+        actual = (g.half(hit + 144), g.cpu.mem_read(hit + 86, 1)[0])
+        assert actual == bonus, (draw, equipped, actual)
+        tick(76, held=0x120, pressed=0x120)
+        assert g.half(p + 9482) == 0x8000 + 42 and g.run(0x2A263C, p) == 0
+    skills.clear()
+    print("GU draw skills: charged draw slash and fourth-tier draw uppercut preserve affinity and KO")
     # Hold X; an early release buffers, and may execute only on frame 58.
     neutral()
     tick(held=32, pressed=32)
@@ -1113,6 +1158,9 @@ def verify_battle(g, p, remote, resources):
     assert clip() == 37
     tick(54)
     assert clip() == 39 and value() == 58
+    verify_uppercut_followups(g, p, tick, neutral)
+    verify_repeat_uppercut(g, p, tick, neutral)
+    verify_chord_release(g, p, tick, neutral)
     for side, slot in [(9102, 12), (32769, 13), (0, 28)]:
         neutral()
         tick(0, held=0x120, pressed=0x120)
@@ -1429,6 +1477,53 @@ def verify_battle(g, p, remote, resources):
     h(5136, 0)
     g.put(p + 4076, 0)
     g.put(p + 5280, 0)
+    # The GP-success clip has its own flash and terrain row before the X counter.
+    g.put(0x188A0D4, manager)
+    old_terrain = g.get(0x21270E0)
+    terrain = g.alloc(32)
+    g.put(0x21270E0, terrain)
+    water = -100001.
+
+    def ground(_, owner, point, end):
+        assert owner == p
+        sp = g.cpu.reg_read(arm.UC_ARM_REG_SP)
+        g.put(g.get(sp + 4), 0x41400000)  # Floor at 12.
+        g.cpu.mem_write(g.get(sp + 8) + 20, struct.pack("<f", water))
+        return 1
+
+    g.stub(0x18192C, ground)
+
+    def motion_layers(frame, expected):
+        def clip_units():
+            return [unit for unit in units if g.get(unit + 68) not in routes[8]]
+
+        units.clear()
+        tick(frame - 1)
+        assert not clip_units()
+        tick(frame)
+        layers = [layer for route, _ in expected for layer in routes[route]]
+        positions = [pos for route, pos in expected for _ in routes[route]]
+        actual = [g.get(u + 68) for u in clip_units()]
+        assert actual == layers, (clip(), frame, actual, layers, g.get(p + 1268))
+        world = [struct.unpack("<3f", g.cpu.mem_read(u + 304, 12)) for u in clip_units()]
+        assert world == positions, (frame, world, positions)
+        tick(frame)
+        assert len(clip_units()) == len(layers)
+
+    for yaw, height, ground_route, flash in (
+        (0, -100001., 34, (100., 120., 350.)),
+        (0x4000, 18., 35, (150., 120., 300.)),
+    ):
+        water = height
+        assert guard(8, 1, False) == 1 and clip() == 74
+        g.put(p + 4076, yaw)
+        for axis, value_ in zip((64, 68, 72), (100., 20., 300.)):
+            f(axis, value_)
+        motion_layers(2, ((ground_route, (100., max(12., water), 300.)), (33, flash)))
+    water = -100001.
+    g.put(p + 4076, 0)
+    g.put(0x188A0D4, 0)
+    g.put(0x21270E0, old_terrain)
     # X counter. The contact is active before the shockwave appears.
     assert guard(8, 1, False) == 1
     tick(20, held=32, pressed=32)
@@ -1666,6 +1761,15 @@ def verify_battle(g, p, remote, resources):
     assert whiff()
     tick(46)
     assert value() == 60 and not whiff()
+    g.put(0x188A0D4, manager)
+    g.put(0x21270E0, terrain)
+    f(1268, 0.)  # The replay sets clip frames directly, so finish the two-frame blend.
+    x, y, z = struct.unpack("<3f", g.cpu.mem_read(p + 64, 12))
+    motion_layers(50, ((32, (x, y, z)),))
+    motion_layers(54, ((29, (x, 12., z)),))
+    g.put(0x188A0D4, 0)
+    g.put(0x21270E0, old_terrain)
+    g.cpu.hook_del(g.traps.pop(0x18192C))
     g.cpu.hook_del(g.traps.pop(0x2831E0))
     verify_dash_climb(g, p, tick, phase)
     verify_dash_drop(g, p, tick, action, neutral)
@@ -1692,9 +1796,140 @@ def verify_battle(g, p, remote, resources):
     assert (g.half(p + 9478), g.half(p + 9482)) == (1, 0)
     g.cpu.mem_write(eq + 1236, b"\0")
     verify_jump_slash(g, p, tick, neutral)
+
+    # A resolved R+X+A chord can carry GU's raw guard edge and its standalone
+    # X command. Test both R arriving first and all three arriving together.
+    for state, press_at, execute, target in (
+        (None, 0, 0, 48), (0, 22, 72, 49), (0, 72, 72, 49), (200, 30, 30, 70)
+    ):
+        for shoulder_first in ((False,) if state is None else (False, True)):
+            neutral()
+            h(5132, 0x4000)
+            h(5136, 120 if state == 200 else 0)
+            g.cpu.mem_write(p + 5188, bytes(8))
+            if state is not None:
+                g.run(CHANGE_ACTION, p, 16, 0x8000 + state, 0)
+                tick(0, native_pad=True)
+            if shoulder_first:
+                tick(press_at - 2, held=0x40, pressed=0x40, native_pad=True)
+            tick(press_at, held=0x160, pressed=0x120 if shoulder_first else 0x160, native_pad=True)
+            assert g.get(p + 5188) & 0x400
+            if execute > press_at:
+                assert g.half(p + 9482) == 0x8000 + state
+                tick(execute, held=0x160, native_pad=True)
+            assert (g.half(p + 9478), g.half(p + 9482)) == (16, 0x8000 + target)
+
     print(
         "GU controls: early/held releases, guard rejection, monster-only credit, counters, dash contact and interruption passed"
     )
+
+
+def verify_uppercut_followups(g, p, tick, neutral):
+    x, a, chord = 0x20, 0x100, 0x120
+    for release, opening, closing in ((54, 68, 146), (58, 76, 154)):
+        for presses, expected in (
+            (((0, chord),), 42),
+            (((0, x), (2, chord)), 42),
+            (((0, a), (2, chord)), 42),
+            (((-6, chord), (-4, chord), (-2, 0), (0, chord)), 42),
+            (((-6, chord), (-4, x), (-2, 0), (0, chord)), 42),
+            (((-6, chord), (-4, chord), (0, chord)), release),
+            (((closing - opening - 2, chord),), 42),
+            (((closing - opening, chord),), release),
+            (((8 - opening, x), (10 - opening, x), (12 - opening, x),
+              (16 - opening, x), (0, x)), 21),
+        ):
+            neutral()
+            g.put(p + 5188, 0)
+            g.put(p + 5192, 0)
+            tick(0, held=chord, pressed=chord, native_pad=True)
+            if release == 58:
+                for elapsed in range(0, 202, 2):
+                    tick(54 + elapsed % 68, held=chord, native_pad=True)
+                tick(54 + elapsed % 68, native_pad=True)
+            else:
+                tick(54, native_pad=True)
+            assert g.half(p + 9482) == 0x8000 + release
+
+            previous = 0
+            for i, (offset, held) in enumerate(presses):
+                tick(opening + offset, held=held, pressed=held & ~previous, native_pad=True)
+                previous = held
+                state = expected if i + 1 == len(presses) else release
+                assert g.half(p + 9482) == 0x8000 + state, (release, presses, offset, g.half(p + 9482))
+            if expected == 42:
+                assert g.half(p + 1204) & 255 == 58  # FZ motion 1458 starts the forward chop.
+
+
+def verify_repeat_uppercut(g, p, tick, neutral):
+    x, a, chord = 0x20, 0x100, 0x120
+    previous = 0
+
+    def pad(frame, held):
+        nonlocal previous
+        g.cpu.mem_write(p + 5110, struct.pack("<H", previous & ~held))
+        tick(frame, held=held, pressed=held & ~previous, native_pad=True)
+        previous = held
+
+    for lead, presses, execute, expected in (
+        (0, ((60, chord),), 72, 49),
+        (0, ((60, x), (61, chord)), 72, 49),
+        (0, ((60, a), (61, chord)), 72, 49),
+        (0, ((72, x), (73, chord)), 73, 49),
+        (a, ((60, chord),), 72, 49),
+        (0, ((60, x), (61, x), (62, x)), 72, 22),
+    ):
+        neutral()
+        previous = 0
+        g.cpu.mem_write(p + 5188, bytes(8))
+        pad(0, chord)
+        for elapsed in range(0, 202, 2):
+            pad(54 + elapsed % 68, chord)
+        pad(54 + elapsed % 68, 0)
+        assert g.half(p + 9482) == 0x8000 + 58
+        for frame in (76, 77, 78):
+            pad(frame, a)
+        assert g.half(p + 9482) == 0x8000 + 6
+        pad(200, lead)
+        assert g.half(p + 1204) & 255 == 6  # Sweep has reached its 1406 step.
+        for frame, held in presses:
+            pad(frame, held)
+            if frame < execute:
+                assert g.half(p + 9482) == 0x8000 + 6, (presses, frame)
+        if presses[-1][0] < execute:
+            pad(execute, previous)
+        assert g.half(p + 9482) == 0x8000 + expected, (lead, presses, g.half(p + 9482))
+        if expected == 49:
+            pad(200, chord)
+            assert g.half(p + 1204) & 255 == 37  # FZ 1437, the four-tier charge loop.
+            for elapsed in range(0, 202, 2):
+                pad(54 + elapsed % 68, chord)
+            pad(54 + elapsed % 68, 0)
+            assert g.half(p + 9482) == 0x8000 + 58
+    g.cpu.mem_write(p + 5110, bytes(2))
+
+
+def verify_chord_release(g, p, tick, neutral):
+    # X+A before the sweep's frame 12 window cannot queue a follow-up.
+    # Releasing either half does not start another attack without a new press.
+    x, a, chord = 0x20, 0x100, 0x120
+    for held, repress, expected in ((x, False, 0), (a, False, 0), (x, True, 22)):
+        neutral()
+        g.cpu.mem_write(p + 5188, bytes(8))
+        g.run(CHANGE_ACTION, p, 16, 0x8000, 0)
+        tick(0, native_pad=True)
+        tick(4, held=chord, pressed=chord, native_pad=True)
+        g.cpu.mem_write(p + 5110, struct.pack("<H", chord & ~held))
+        tick(6, held=held, native_pad=True)
+        g.cpu.mem_write(p + 5110, bytes(2))
+        if repress:
+            g.cpu.mem_write(p + 5110, struct.pack("<H", held))
+            tick(10, native_pad=True)
+            g.cpu.mem_write(p + 5110, bytes(2))
+        tick(12, held=held, pressed=held if repress else 0, native_pad=True)
+        for frame in (14, 16, 72):
+            tick(frame, held=held, native_pad=True)
+        assert g.half(p + 9482) == 0x8000 + expected, (held, repress)
 
 
 def double_flick(g, p, tick, start):
@@ -1953,9 +2188,7 @@ def verify():
     g = boot(elf, on)
     verify_great_sword(g)
     g = boot(elf, on, ("sword", "registry"))
-    assert g.run(service(g)[1], 0) == 0
-    actor, _, _ = hunters(g)
-    assert g.run(g.hooks[ENCODE], actor, 5001) == 0x501
+    assert g.run(service(g)[1], 0) == 1
     g = boot(elf, on, ("sword",))
     assert not g.hooks and g.files == {CONFIG: on}
     g = boot(elf, on, ("registry",))
@@ -2001,7 +2234,7 @@ def verify():
     assert g.run(g.hooks[ENCODE], actor, 5101) == 0x565
     assert g.run(g.hooks[DECODE], actor, 0x801) == 8001
     print(
-        "Forge INI create/read/fallback; independent style IDs, init-only registration, late or missing provider fallback: passed"
+        "Forge INI create/read/fallback; independent style IDs, init-only registration, late provider registration and missing provider fallback: passed"
     )
     print(
         "GU local male/female great sword: occupied banks, motion roundtrip, weapon switch and native equipment preservation: passed"

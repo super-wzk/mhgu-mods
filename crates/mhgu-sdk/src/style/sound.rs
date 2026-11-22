@@ -1,73 +1,24 @@
 //! Positional hunter sound requests on GU's audio queue.
-use core::{
-    ffi::CStr,
-    sync::atomic::{AtomicU32, Ordering},
-};
+use super::resource::CachedResource;
+use core::ffi::CStr;
 
 pub struct Bank {
-    path: &'static CStr,
-    resource: AtomicU32,
+    resource: CachedResource,
 }
 
 impl Bank {
     pub const fn new(path: &'static CStr) -> Self {
         Self {
-            path,
-            resource: AtomicU32::new(0),
+            resource: CachedResource::new(0x2125bec, path),
         }
     }
 
-    /// Cache the native sound request and its resources without playing a cue.
+    /// Queue the native sound bank without playing a cue.
     ///
     /// # Safety
     /// Call on the game thread after the resource manager has initialized.
     pub unsafe fn preload(&self) {
-        unsafe { self.load() };
-    }
-
-    unsafe fn load(&self) -> Option<u32> {
-        unsafe {
-            let cached = self.resource.load(Ordering::Acquire);
-            if cached != 0 {
-                return Some(cached);
-            }
-            let manager = (crate::memory::entry(0x2126a64) as *const u32).read();
-            if manager == 0 {
-                return None;
-            }
-            let vtable = (manager as *const *const u32).read();
-            let load: unsafe extern "C" fn(u32, usize, *const core::ffi::c_char, u32) -> u32 =
-                core::mem::transmute(vtable.add(12).read());
-            let resource = load(
-                manager,
-                crate::memory::entry(0x2125bec),
-                self.path.as_ptr(),
-                1,
-            );
-            if resource == 0 {
-                return None;
-            }
-            let release: unsafe extern "C" fn(u32) =
-                core::mem::transmute(crate::memory::entry(0x887660));
-            if ((resource + 80) as *const u32).read() & 1 == 0 {
-                release(resource);
-                return None;
-            }
-            Some(
-                match self.resource.compare_exchange(
-                    0,
-                    resource,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => resource,
-                    Err(winner) => {
-                        release(resource);
-                        winner
-                    }
-                },
-            )
-        }
+        unsafe { self.resource.preload() };
     }
 
     /// Queue a request using the hunter as the positional audio owner.
@@ -94,7 +45,7 @@ impl Bank {
             if engine == 0 {
                 return;
             }
-            let Some(resource) = self.load() else {
+            let Some(resource) = self.resource.get() else {
                 return;
             };
             let cue = 4096 + u32::from(id);

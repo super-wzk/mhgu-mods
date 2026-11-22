@@ -323,6 +323,52 @@ def replay(g, repo, actor, remote, tick, inputs, set_action, reg):
     verify_peer_damage(g, remote, reg, receive, load, stub, eq)
 
 
+def verify_sword_rotation_keys(g, root, assets, routes, effects):
+    from verify_assets import Machine, MEM, arm
+
+    fz = Machine(root.parents[1] / "mhfz/eboot.bin.elf", True)
+    result, random = g.alloc(16), g.alloc(16)
+    g.cpu.mem_write(random, struct.pack("<4f", .5, .5, .5, .5))
+    for bank in range(4016, 4020):
+        data = (assets / f"{bank}.bank").read_bytes()
+        tables = []
+        offset = 28
+        for i, width in enumerate((112, 24, 16, 16, 56, 140)):
+            count, = struct.unpack_from("<H", data, 2 + i*2)
+            tables.append([data[p:p+width] for p in range(offset, offset+count*width, width)])
+            offset += count*width
+        emitters, vectors, _, _, definitions, _ = tables
+        for selector in (0, 31):
+            first, count = routes[bank, selector]
+            pairs = [(e, d) for e in emitters if struct.unpack_from("<H", e, 80)[0] == selector
+                     for d in definitions if e[76:78] == d[4:6]]
+            assert len(pairs) == count
+            for layer, (emitter, definition) in enumerate(pairs, first):
+                curve, = struct.unpack_from("<H", definition, 38)
+                if not curve:
+                    continue
+                keys = [v for v in vectors if v[18] == curve]
+                base = struct.unpack_from("<3f", emitter, 24)
+                rate, = struct.unpack_from("<f", emitter, 92)
+                last, = struct.unpack_from("<I", keys[-1], 12)
+                fz.c.mem_write(MEM, b"".join(keys))
+                block = (effects / f"e{layer}.efl").read_bytes()[48:]
+                model = struct.unpack_from("<I", block, 4)[0] >> 8
+                rotation = model + struct.unpack_from("<H", block, model+304)[0]
+                p = g.alloc(len(block))
+                g.cpu.mem_write(p, block)
+                delay, = struct.unpack_from("<H", emitter, 78)
+                for age in (1, 2, 3, 5, 6, 10):
+                    fz.c.reg_write(arm.UC_ARM_REG_S0, struct.unpack("<I", struct.pack("<f", rate))[0])
+                    fz.call(0x81F4784A, MEM, len(keys), last, age & ~1)
+                    xyz = [struct.unpack("<f", struct.pack("<I", fz.c.reg_read(reg)))[0]
+                           for reg in (arm.UC_ARM_REG_S0, arm.UC_ARM_REG_S1, arm.UC_ARM_REG_S2)]
+                    expected = [a + math.radians(b) for a, b in zip(base, xyz)]
+                    g.run(0xAFB2BC, result, p + rotation, delay + age, random, 0)
+                    actual = struct.unpack("<3f", g.cpu.mem_read(result, 12))
+                    assert math.dist(actual, expected) < .001, (bank, selector, layer, age, actual, expected)
+
+
 def verify_swing_fx(g, actor, eq, receive, load, stub, shape, sync_light):
     from unicorn import arm_const
     from pathlib import Path
@@ -340,6 +386,7 @@ def verify_swing_fx(g, actor, eq, receive, load, stub, shape, sync_light):
             assert count and first + count < 65536
             sizes[phi, sel] = range(first, first + count)
     effects = root / "dist/switch-axe-extreme/romfs/nativeNX/effect/frontier_sa"
+    verify_sword_rotation_keys(g, root, assets, routes, effects)
     for layers in (sizes[phi, sel] for phi in range(6) for sel in (0, 13, 31)):
         for layer in layers:
             efl = (effects / f"e{layer}.efl").read_bytes()

@@ -261,7 +261,7 @@ def replay(weapon, style, plugin, recoil, recoil_clip):
     # authored buffer and execution windows.
     if dual:
         windows = ((13, 32, False), (14, 32, True), (40, 40, False))
-        attack_input, command, followup = inputs, 30, 17
+        attack_input, command, followup = inputs + 16, 0, 17
     else:
         windows = ((1, 18, False), (2, 18, True), (30, 30, False))
         attack_input, command, followup = inputs + 16, 12, 16
@@ -402,6 +402,20 @@ def polish_followups(g, actor, begin, tick, transition):
         g.cpu.mem_write(actor + 5188, bytes(16))
         begin(state)
 
+    # FZ states 7 and 19 can execute X or X+A as soon as frame 60.
+    # GU reports the raw X press two ticks before its resolved weapon command.
+    for state in (7, 19):
+        for first in (0x20, a):
+            enter(state)
+            assert pad(59) == state
+            assert pad(60, first) == state
+            assert pad(61, chord) == 21
+        enter(state)
+        assert pad(59) == state
+        assert pad(60, 0x20) == state
+        assert pad(61, 0x20) == state
+        assert pad(62, 0x20) == 0
+
     for activation, activation_frame, result in ((18, 2, 14), (65, 2, 20), (68, 48, 20), (69, 86, 72)):
         begin(activation)
         tick(activation_frame)
@@ -436,10 +450,12 @@ def polish_followups(g, actor, begin, tick, transition):
 
     shoulder_layout = g.get(0x1897F78) + 17518
     old_layout = bytes(g.cpu.mem_read(shoulder_layout, 1))
-    for activation, delta, result, layout, shoulder, shoulder_first in (
-        (18, 0, 15, 0, 0, False), (69, 0x2000, 21, 0, 0, False),
-        (69, -0x2000, 21, 0, 0, False), (18, 0, 15, 0, 0x40, False),
-        (18, 0, 15, 0, 0x40, True), (18, 0, 15, 1, 0x800, False), (18, 0, 15, 1, 0x800, True),
+    for activation, delta, result, layout, shoulder, lead in (
+        (18, 0, 15, 0, 0, 0), (69, 0x2000, 21, 0, 0, 0),
+        (69, -0x2000, 21, 0, 0, 0), (18, 0, 15, 0, 0x40, 0),
+        (18, 0, 15, 0, 0x40, 1), (18, 0, 15, 0, 0x40, 4),
+        (18, 0, 15, 1, 0x800, 0), (18, 0, 15, 1, 0x800, 1),
+        (18, 0, 15, 1, 0x800, 4),
     ):
         g.cpu.mem_write(shoulder_layout, bytes([layout]))
         begin(activation)
@@ -448,16 +464,16 @@ def polish_followups(g, actor, begin, tick, transition):
         g.put(actor + 4076, 0x1234)
         aim = 0x5234 if delta >= 0 else 0xd234
         assert pad(0) == 24
-        if shoulder_first:
-            assert pad(38, shoulder, stick=64) == 24
+        for frame in range(40 - lead, 40):
+            assert pad(frame, shoulder, stick=64) == 24
         assert pad(40, chord | shoulder, stick=64) == 24
-        assert bool(g.get(actor + 5156) & (1 << 11)) == (shoulder == 0)
+        assert bool(g.get(actor + 5156) & (1 << 11)) == (shoulder == 0 or lead == 4)
         transition(False)
         assert pad(50, shoulder) == 24
         assert g.half(actor + 4076) == 0x1234
         transition(True)
         actual = pad(51, shoulder)
-        assert actual == result, (activation, delta, layout, shoulder_first, actual, result)
+        assert actual == result, (activation, delta, layout, lead, actual, result)
         assert g.half(actor + 4076) == (0x1234 + delta) & 0xffff, (activation, delta)
     g.cpu.mem_write(shoulder_layout, old_layout)
     begin(18)
@@ -474,7 +490,10 @@ def aerial_followup(g, actor, begin, tick, set_action):
     for layout, shoulder in ((0, 0x40), (1, 0x800)):
         g.cpu.mem_write(layout_offset, bytes([layout]))
         chord = 0x120 | shoulder
-        for presses, dest in (((0x120,), 78), ((chord,), 78), ((shoulder, chord), 78), ((0x20,) * 3, 91)):
+        for presses, dest in (
+            ((0x120,), 78), ((0x20, 0x120), 78), ((0x100, 0x120), 78),
+            ((chord,), 78), ((shoulder, chord), 78), ((0x20,) * 3, 91),
+        ):
             begin(69)
             tick(86)  # Enter Extreme Demon.
             set_action(4, 14)
@@ -483,11 +502,17 @@ def aerial_followup(g, actor, begin, tick, set_action):
             g.cpu.mem_write(actor + 5188, bytes(8))
             previous = 0
             for held in presses:
+                first_x = previous == 0 and held == 0x20
                 g.cpu.mem_write(actor + 5108, struct.pack("<3H", held, previous & ~held, held & ~previous))
                 previous = held
                 g.cpu.mem_write(actor + 5140, bytes(32))
                 g.run(0x27CA28, actor)
                 g.run(0x11BAEF0, actor)
+                if first_x:
+                    # A native jump attack request arriving on the unresolved
+                    # X edge must leave the hunter available for the chord.
+                    g.run(CHANGE_ACTION, actor, 16, 31, 0)
+                    assert g.half(actor + 9478) == 4 and g.half(actor + 9482) == 14
             route = g.run(DB_DRAW_ROUTE, actor, 5)
             group, slot, flags = struct.unpack("<3H", g.cpu.mem_read(route, 6))
             g.run(CHANGE_ACTION, actor, group, slot, flags)
@@ -546,6 +571,24 @@ def demon_effects(g, actor, inputs, vtable, begin, tick):
     routes = list(struct.iter_unpack("<HH", (root / "target/assets/effects/routes.bin").read_bytes()))
     pel = root / "dist/dual-blades-extreme/romfs/nativeNX/effect/frontier_db/particles.pel"
     assert struct.unpack_from("<I", pel.read_bytes(), 12)[0] == sum(n for _, n in routes)
+    # Full-flame ARGB in mhfdat's w06 parameters (+172 glow, +176 trail).
+    # Read the shipped EFL through GU's colour sampler, including peer strips.
+    color_output = g.alloc(16)
+    for route, prefix_set, expected in (
+        (8, "e", (255, 180, 48, 100)), (35, "e", (255, 180, 48, 100)),
+        (11, "eabcd", (255, 180, 94, 200)), (14, "eabcd", (255, 180, 94, 200)),
+    ):
+        selector, count = routes[route]
+        assert count == 1
+        for prefix in prefix_set:
+            blocks = (pel.parent / f"{prefix}{selector}.efl").read_bytes()[48:]
+            model = struct.unpack_from("<I", blocks, 4)[0] >> 8
+            assert blocks[model + 3] == 0, (route, prefix, "source-alpha additive")
+            keys = model + struct.unpack_from("<H", blocks, model + 66)[0]
+            data = g.alloc(len(blocks))
+            g.cpu.mem_write(data, blocks)
+            g.run(0xAF938C, color_output, data + keys, 3, 128)
+            assert tuple(g.cpu.mem_read(color_output, 4)) == expected, (route, prefix)
     manager, scene, handle, parent = [g.alloc(n) for n in (128, 16, 8, 32)]
     g.put(0x188A0D4, manager)
     g.put(0x2126F48, scene)
@@ -599,7 +642,10 @@ def demon_effects(g, actor, inputs, vtable, begin, tick):
             assert len(proofs(trail_route + trail)) == 1, spawned
 
     g.put(inputs, 1 << 27)  # Keep R held through the phase gates.
+    begin(18)  # Clear the phase left by the previous scene.
+    spawned.clear()
     begin(65)
+    palette(0, 0)
     spawned.clear()
     assert tick(32) == 65
     palette(1, 1)
@@ -612,7 +658,7 @@ def demon_effects(g, actor, inputs, vtable, begin, tick):
     tick(50)
     assert not spawned
     tick(63)
-    palette(0, 1)
+    palette(0, 1)  # Extreme Demon before full flame: red glow, orange strip.
     spawned.clear()
     tick(83)
     assert not spawned

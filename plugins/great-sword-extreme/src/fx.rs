@@ -28,7 +28,7 @@ const MOTION_ROWS: &[[u8; 18]] = include_bytes!("../target/assets/effects/motion
 static PARTICLES: Bank = Bank::new(c"effect\\frontier_gs\\particles", ROUTES);
 
 pub(super) unsafe fn preload() {
-    unsafe { PARTICLES.resource() };
+    unsafe { PARTICLES.preload() };
 }
 
 static CHARGE_UNITS: TrackedUnits<20> = TrackedUnits::new();
@@ -141,6 +141,8 @@ unsafe fn motion_effect(p: u32, e: MotionEvent) {
                     (14, false) => 29,
                     (4, true) => 30,
                     (14, true) => 31,
+                    (15, false) => 34,
+                    (15, true) => 35,
                     _ => return,
                 };
                 PARTICLES.emit(route, anchor);
@@ -156,6 +158,8 @@ unsafe fn motion_effect(p: u32, e: MotionEvent) {
             (4035, 3) => 27,
             (4022, 6) => 21,
             (4022, 10) => 19,
+            (4022, 15) => 32,
+            (4022, 17) => 33,
             _ => return,
         };
         let joint = match e.node {
