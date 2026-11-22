@@ -6,7 +6,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, tier: u8, unlocked: bool) 
     let monster_guard = matches!(state, 90 | 92);
     match clip {
         1052 => {
-            if v.crossed(12.0) {
+            if v.swing_window.contains(&12.) {
                 v.swing(v.phial.bank, 31, [0.0, 130.0, 100.0], [0.0, 15.0], 1.1);
                 if state == 166 {
                     v.pose(v.phial.bank, 28, 0, [0.0; 3], Lifetime::Natural);
@@ -14,7 +14,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, tier: u8, unlocked: bool) 
             }
         }
         1053 => {
-            if v.crossed(12.0) {
+            if v.swing_window.contains(&12.) {
                 v.swing(v.phial.bank, 31, [0.0, 130.0, 50.0], [0.0, 345.0], 1.1);
                 if state == 135 {
                     v.pose(v.phial.bank, 29, 0, [0.0; 3], Lifetime::Natural);
@@ -22,7 +22,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, tier: u8, unlocked: bool) 
             }
         }
         1054 => {
-            if v.crossed(12.0) {
+            if v.swing_window.contains(&12.) {
                 v.swing(v.phial.bank, 31, [0.0, 130.0, 100.0], [0.0, 345.0], 1.1);
                 if state == 161 {
                     v.pose(v.phial.bank, 29, 0, [0.0; 3], Lifetime::Natural);
@@ -42,16 +42,16 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, tier: u8, unlocked: bool) 
             }
         }
         1057 => {
-            if v.crossed(24.0) {
+            if v.swing_window.contains(&24.) {
                 v.swing(v.phial.bank, 31, [0.0, 100.0, 100.0], [0.0, 267.0], 1.1);
             }
-            if v.crossed(74.0) {
+            if v.swing_window.contains(&74.) {
                 v.swing(v.phial.bank, 31, [0.0, 110.0, 0.0], [0.0, 262.0], 1.3);
                 v.pose(v.phial.bank, 30, 0, [0.0, 0.0, 0.0], Lifetime::Natural);
             }
         }
         1058 => {
-            if v.crossed(12.0) {
+            if v.swing_window.contains(&12.) {
                 v.swing(v.phial.bank, 31, [0.0, 120.0, -50.0], [0.0, 230.0], 1.1);
             }
             if v.crossed(16.0) {
@@ -60,7 +60,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, tier: u8, unlocked: bool) 
             }
         }
         1059 => {
-            if v.crossed(12.0) {
+            if v.swing_window.contains(&12.) {
                 v.rotated_pose(
                     v.phial.bank,
                     16,
@@ -76,7 +76,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, tier: u8, unlocked: bool) 
             }
         }
         1060 => {
-            if v.crossed(12.0) {
+            if v.swing_window.contains(&12.) {
                 v.rotated_pose(
                     v.phial.bank,
                     16,
@@ -92,7 +92,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, tier: u8, unlocked: bool) 
             }
         }
         1061 => {
-            if v.crossed(12.0) {
+            if v.swing_window.contains(&12.) {
                 v.swing(v.phial.bank, 31, [-20.0, 130.0, 50.0], [0.0, 15.0], 1.1);
                 if state == 134 {
                     v.pose(v.phial.bank, 28, 0, [0.0; 3], Lifetime::Natural);
@@ -100,7 +100,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, tier: u8, unlocked: bool) 
             }
         }
         1062 => {
-            if v.crossed(12.0) {
+            if v.swing_window.contains(&12.) {
                 v.swing(v.phial.bank, 31, [-20.0, 130.0, 100.0], [0.0, 15.0], 1.1);
                 if state == 160 {
                     v.pose(v.phial.bank, 28, 0, [0.0; 3], Lifetime::Natural);
@@ -153,13 +153,13 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, tier: u8, unlocked: bool) 
             }
         }
         1420 => {
-            if v.crossed(40.0) && unlocked {
+            if v.swing_window.contains(&40.) && unlocked {
                 v.swing(v.phial.bank, 0, [0.0, 130.0, 50.0], [0.0, 197.0], 1.0);
                 v.sound(0, 27);
             }
         }
         1421 => {
-            if v.crossed(48.0) && unlocked {
+            if v.swing_window.contains(&48.) && unlocked {
                 v.swing(v.phial.bank, 0, [-20.0, 150.0, 0.0], [0.0, 20.0], 1.0);
                 v.sound(0, 27);
             }
@@ -290,13 +290,13 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, tier: u8, unlocked: bool) 
             }
         }
         1444 => {
-            if v.crossed(8.0) && unlocked {
+            if v.swing_window.contains(&8.) && unlocked {
                 v.swing(v.phial.bank, 0, [0.0, 130.0, 80.0], [0.0, 197.0], 1.0);
                 v.sound(0, 27);
             }
         }
         1445 | 1446 => {
-            if v.crossed(10.0) && unlocked {
+            if v.swing_window.contains(&10.) && unlocked {
                 v.swing(v.phial.bank, 0, [0.0, 130.0, 80.0], [0.0, 197.0], 1.0);
                 v.sound(0, 27);
             }
@@ -311,7 +311,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, tier: u8, unlocked: bool) 
             }
         }
         1454 => {
-            if v.crossed(44.0) {
+            if v.swing_window.contains(&44.) {
                 v.swing(v.phial.bank, 0, [0.0, 140.0, 100.0], [0.0, 315.0], 1.0);
                 v.ground(14, [0.0, 0.0, 50.0]);
             }
@@ -324,7 +324,7 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, tier: u8, unlocked: bool) 
                     Lifetime::Natural,
                 );
             }
-            if v.crossed(88.0) {
+            if v.swing_window.contains(&88.) {
                 v.swing(v.phial.bank, 0, [0.0, 140.0, 100.0], [0.0, 45.0], 1.0);
                 v.ground(14, [0.0, 0.0, 50.0]);
             }
@@ -380,21 +380,21 @@ pub(super) fn play(v: &Visuals, clip: u16, state: u8, tier: u8, unlocked: bool) 
             }
         }
         1456 => {
-            if v.crossed(24.0) {
+            if v.swing_window.contains(&24.) {
                 v.swing(v.phial.bank, 0, [0.0, 100.0, 150.0], [0.0, 90.0], 1.0);
                 v.ground(15, [0.0, 0.0, 50.0]);
-            }
-            if v.crossed(24.0) && tier == 3 {
-                v.pose(v.phial.bank, 10, 0, [0.0, 100.0, 150.0], Lifetime::Natural);
+                if tier == 3 {
+                    v.pose(v.phial.bank, 10, 0, [0.0, 100.0, 150.0], Lifetime::Natural);
+                }
             }
             if v.crossed(30.0) && tier >= 2 {
                 v.pose(v.phial.bank, 19, 0, [0.0, 100.0, 200.0], Lifetime::Natural);
             }
-            if v.crossed(70.0) {
+            if v.swing_window.contains(&70.) {
                 v.swing(v.phial.bank, 0, [0.0, 100.0, 150.0], [0.0, 6.0], 1.0);
-            }
-            if v.crossed(70.0) && tier == 3 {
-                v.pose(v.phial.bank, 9, 0, [0.0, 100.0, 150.0], Lifetime::Natural);
+                if tier == 3 {
+                    v.pose(v.phial.bank, 9, 0, [0.0, 100.0, 150.0], Lifetime::Natural);
+                }
             }
             if v.crossed(72.0) && tier >= 2 {
                 v.pose(

@@ -41,6 +41,11 @@ impl MotionClock {
         clip: u16,
         sample: MotionFrame,
     ) -> impl Iterator<Item = MotionEvent> + 'a {
+        let window = self.window(clip, sample);
+        motion_events(rows, clip, window.start, window.end)
+    }
+
+    pub fn window(&mut self, clip: u16, sample: MotionFrame) -> core::ops::Range<f32> {
         if self.clip != clip || sample.frame < self.frame {
             self.seek(clip, sample.frame);
         }
@@ -52,7 +57,7 @@ impl MotionClock {
         } else {
             from
         };
-        motion_events(rows, clip, from, to)
+        from..to
     }
 }
 

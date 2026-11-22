@@ -3,7 +3,7 @@ import math
 import struct
 import subprocess
 from unicorn import arm_const as arm
-from verify_style import BLOCK, DISPATCH, WEAPON_DISPATCH, api_for
+from verify_style import BLOCK, COMMAND_UPDATE, DISPATCH, WEAPON_DISPATCH, api_for
 from verify_branches import Frontier
 
 
@@ -152,6 +152,20 @@ def replay(g, root, actor, form, weapon, set_action):
     assert pad(114) == 74
     assert pad(4, 0x20) == 74
     assert pad(30, 0x120, stick=100) == 153
+
+    for backward in (False, True):
+        refill_light()
+        aim = facing
+        enter(70, sword=True)
+        assert tap(0x100, 76, stick=0) == 70
+        assert pad(82) == 169
+        assert pad(2) == 169
+        if backward:
+            aim = (facing + 0x8000) & 0xffff
+            assert tap(0x100, 22) == 63
+        else:
+            assert tap(0x100, 22, stick=0) == 169
+            assert pad(58) == 60
 
     for sword, opener, window, base in ((False, 0, 70, 106), (True, 5, 48, 152)):
         for yaw, expected in sectors:
@@ -324,26 +338,30 @@ def replay(g, root, actor, form, weapon, set_action):
             # Compare both turns using GU's camera-relative aim and actual X mapping.
             for yaw, strength, follow_stick in (
                 (-0x4000, 100, 100), (0x4000, 50, 50), (0x1fff, 100, 100),
-                (-0x8000, 100, 100), (0x4000, 100, 49),
+                (-0x8000, 100, 100), (0x4000, 100, 49), (-0x4000, 100, 0),
             ):
                 enter(slide, sword=sword)
                 assert pad(18, 0x20) == slide
                 assert pad(38, 0x20) == hold, (slide, state(), g.get(hud) & 0xffff)
+                aim = (facing + yaw) & 0xffff
+                assert pad(20, 0x20, stick=strength) == hold
+                assert g.half(actor + 4076) == facing
                 aim = (facing - yaw) & 0xffff
                 assert pad(40, 0, stick=strength) == rush
                 heading = reference.turn(slide, rush, yaw, facing)
                 assert (g.half(actor + 4076), g.half(actor + 5280)) == (heading, heading)
                 assert pad(12, stick=strength) == rush
                 assert tap(0x20, 22, stick=strength) == rush  # X is buffered from frame 22.
+                g.run(COMMAND_UPDATE, actor)
                 assert pad(33, stick=strength) == rush
                 assert g.half(actor + 4076) == heading
                 aim = (heading + yaw) & 0xffff
-                # A valid direction at execution overrides the queued one. If the
-                # stick returns to GU's dead zone, retain the earlier world heading.
-                relative = -yaw if follow_stick >= 50 else (heading - (facing - yaw))
+                # FZ checks the live stick when the buffered X executes.
+                relative = -yaw if follow_stick >= 50 else 0
                 expected = reference.turn(hold, follow, relative, heading)
                 assert pad(34, stick=follow_stick) == follow
-                assert (g.half(actor + 4076), g.half(actor + 5280)) == (expected, expected)
+                observed = g.half(actor + 4076), g.half(actor + 5280)
+                assert observed == (expected, expected), (slide, follow_stick, observed, expected)
 
         camera_manager = g.get(0x2126504)
         original_camera = g.get(camera_manager + 84)

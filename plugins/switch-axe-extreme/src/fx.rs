@@ -154,6 +154,7 @@ pub unsafe fn update(
             let life = match (clip, event.kind) {
                 (1055 | 1479, 5) => Lifetime::Sprint,
                 (1480, 6 | 7) => Lifetime::Brake,
+                (motion::SPRINT_SHEATHE, 7) => Lifetime::SprintSheathe,
                 _ => Lifetime::Natural,
             };
             spawn(route, anchor, slot, life);
@@ -174,6 +175,17 @@ pub unsafe fn discharge_flash(actor: u32, slot: u8) {
                 Lifetime::Clip1456,
             );
         }
+    }
+}
+
+// FZ family 107 creates these world-space effects from the burst center.
+// 81164796 calls 81214D62 for row 1 and 81214DD8 for row 2.
+pub(super) unsafe fn phial_burst(actor: u32, row: u16, center: [f32; 3]) {
+    let (accent, cue) = if row == 1 { (3, 79) } else { (4, 78) };
+    unsafe {
+        let phial = Phial::equipped(actor);
+        emit(4013, phial.accent(accent), Anchor::World(center, 0));
+        crate::sound::phial_burst(actor, cue, center);
     }
 }
 
@@ -291,6 +303,7 @@ enum Lifetime {
     BladeGlow,
     Sprint,
     Brake,
+    SprintSheathe,
     Clip1423,
     Clip1455,
     Clip1456,
@@ -308,6 +321,7 @@ impl Lifetime {
             Self::Natural | Self::Hunter | Self::BladeGlow => true,
             Self::Sprint => matches!(clip, 1055 | 1479),
             Self::Brake => clip == 1480,
+            Self::SprintSheathe => clip == motion::SPRINT_SHEATHE,
             Self::Cartridge => cartridge_window(clip, frame),
             Self::Clip1423 => clip == 1423,
             Self::Clip1455 => clip == 1455,
@@ -382,6 +396,10 @@ pub unsafe fn clear(slot: u8) {
     unsafe { retire(slot, |_| false) };
 }
 
+pub unsafe fn retire_for_sprint_sheathe(slot: u8) {
+    unsafe { retire(slot, |life| life == Lifetime::SprintSheathe) };
+}
+
 fn spawn(route: usize, anchor: Anchor, slot: u8, life: Lifetime) {
     unsafe {
         if life == Lifetime::Natural {
@@ -400,6 +418,7 @@ struct Visuals {
     previous: f32,
     sample: MotionFrame,
     phial: Phial,
+    swing_window: core::ops::Range<f32>,
 }
 
 impl Visuals {
@@ -534,6 +553,7 @@ pub fn scene_frame(dt: f32) {
 #[derive(Default)]
 pub struct WeaponFx {
     last_tick: Option<u16>,
+    swing_clock: MotionClock,
     previous_tier: u8,
     charge_stage: u8,
     sound_delay: f32,
@@ -543,6 +563,7 @@ pub struct WeaponFx {
 
 impl WeaponFx {
     pub unsafe fn enter(&mut self, actor: u32, slot: u8, state: u8, clip: u16, frame: f32) {
+        self.swing_clock.seek(clip, frame);
         // The two short-lived FZ objects 8102AE94/8102AF3E watch the release
         // destination. Keep them alive while standing/walking variants alternate.
         if let Some(hold) = self.release {
@@ -594,12 +615,15 @@ impl WeaponFx {
             86 => 3,
             _ => gauges.discharge_tier() as u8 + 1,
         };
+        // 817330BA checks the current pose and its next playhead. Sampling
+        // last-to-current emits the slash from the following pose on a moving hunter.
         let v = Visuals {
             actor,
             slot,
             previous,
             sample,
             phial: unsafe { Phial::equipped(actor) },
+            swing_window: self.swing_clock.window(clip, sample),
         };
         let frame = sample.frame;
         let normal = sample.blend <= 0.;

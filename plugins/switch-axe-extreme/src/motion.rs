@@ -4,6 +4,9 @@ use mhgu_sdk::style::{PASS, action};
 
 // GU 11A91E0 reads this field when choosing the equipped weapon's pose.
 pub(super) const SWORD_POSE: u32 = 13096;
+pub(super) const SPRINT_SHEATHE: u16 = 1499;
+pub(super) const SHEATHE_ACTION: (u16, u16) = (1, 2);
+const GU_SHEATHE_MOTION: u32 = 5003;
 
 static BANKS: MotionBanks = MotionBanks::new([
     [
@@ -21,8 +24,13 @@ static BANKS: MotionBanks = MotionBanks::new([
 pub(super) unsafe fn native_clip(actor: u32) -> Option<u16> {
     let packed = unsafe { crate::read(actor, 1204) };
     // A native action may take over before GU unbinds the private attack clip.
-    unsafe { BANKS.decode(actor, packed) }
-        .filter(|clip| *clip == 1009 || LOCOMOTION.iter().any(|&(_, source)| source == *clip))
+    unsafe { BANKS.decode(actor, packed) }.filter(|&clip| {
+        if clip == SPRINT_SHEATHE {
+            unsafe { action::current(actor) == SHEATHE_ACTION }
+        } else {
+            clip == 1009 || LOCOMOTION.iter().any(|&(_, source)| source == clip)
+        }
+    })
 }
 
 const PRIVATE: u32 = 0x1_0000;
@@ -102,11 +110,24 @@ fn private_motion_id(source: u16) -> u32 {
     32000 + u32::from(source - 1000)
 }
 
-const LOCOMOTION: &[(u32, u16)] = &[(5001, 1001), (5002, 1002), (5003, 1003), (5004, 1004)];
+const LOCOMOTION: &[(u32, u16)] = &[
+    (5001, 1001),
+    (5002, 1002),
+    (GU_SHEATHE_MOTION, 1003),
+    (5004, 1004),
+];
 
 pub unsafe extern "C" fn encode(actor: u32, request: u32) -> u32 {
     let source = if (PRIVATE..PRIVATE * 2).contains(&request) {
         request as u16
+    } else if request == GU_SHEATHE_MOTION && unsafe { action::current(actor) } == SHEATHE_ACTION {
+        let (group, slot) = unsafe { action::previous(actor) };
+        // FZ common action 202 uses w12's dedicated sprint sheathe clip.
+        if action::custom_id(group, slot).is_some_and(program::is_sprint) {
+            SPRINT_SHEATHE
+        } else {
+            1003
+        }
     } else {
         let Some(&(_, source)) = LOCOMOTION.iter().find(|&&(id, _)| id == request) else {
             return PASS;
@@ -123,6 +144,9 @@ pub unsafe extern "C" fn decode(actor: u32, packed: u32) -> u32 {
     else {
         return PASS;
     };
+    if source == SPRINT_SHEATHE {
+        return GU_SHEATHE_MOTION;
+    }
     LOCOMOTION
         .iter()
         .find(|&&(_, clip)| clip == source)

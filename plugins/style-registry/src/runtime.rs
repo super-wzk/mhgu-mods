@@ -331,7 +331,13 @@ unsafe fn playback_style(actor: u32) -> Option<&'static Style> {
     unsafe {
         local_style(actor).or_else(|| {
             let style = peer_entry(actor)?.style;
-            let (group, slot) = action::current(actor);
+            let current = action::current(actor);
+            let (group, slot) = if current == (1, 2) {
+                // Common sheathe can bind a custom follow-up to the preceding action.
+                action::previous(actor)
+            } else {
+                current
+            };
             let id = action::custom_id(group, slot)?;
             style.actions.contains(id).then_some(style)
         })

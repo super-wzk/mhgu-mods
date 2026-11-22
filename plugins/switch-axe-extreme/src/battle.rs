@@ -56,6 +56,10 @@ const FORWARD_ROLL: (u16, u16) = (1, 6);
 const SPRINT_STEER_DELAY: f32 = 52.;
 const SPRINT_TURN_THRESHOLD: u16 = 910;
 
+fn is_light_unlock_opener(state: u8) -> bool {
+    matches!(state, 93 | 94 | 146)
+}
+
 #[derive(Clone, Copy)]
 struct Burst {
     actor: u32,
@@ -85,7 +89,7 @@ unsafe extern "C" fn expand(actor: u32, hit: u32) -> u32 {
     }
 }
 
-unsafe fn strike(actor: u32, burst: bool, id: u16, frame: f32, late: f32) {
+unsafe fn strike(actor: u32, burst: bool, id: u16, frame: f32, late: f32, in_area: bool) {
     let Some(row) = program::strike(burst, id) else {
         return;
     };
@@ -107,6 +111,9 @@ unsafe fn strike(actor: u32, burst: bool, id: u16, frame: f32, late: f32) {
         if burst && let Some((offset, radius)) = program::burst_geometry(id) {
             let index = peer::index_of(actor).map_or(0, |i| i + 1);
             let (center, _) = style::particle::world_offset(actor, offset);
+            if in_area && matches!(id, 1 | 2) {
+                fx::phial_burst(actor, id, center);
+            }
             EXPLOSIONS.with(|slots| {
                 slots[index] = Some(Burst {
                     actor,
@@ -306,16 +313,8 @@ impl Battle {
             self.branch_aim = None;
             self.roll_followup = None;
             // The sender can only enter the light-sword unlock with a full meter.
-            if self.peer && matches!(id, 93 | 94 | 146) {
+            if self.peer && is_light_unlock_opener(id) {
                 self.gauges.light = program::param(18);
-            }
-            if id == 110
-                && (matches!(previous, Some(93 | 94 | 146)) || self.peer && previous.is_none())
-            {
-                if self.peer && previous.is_none() {
-                    self.gauges.light = program::param(18);
-                }
-                self.gauges.unlocked = true;
             }
             if matches!(id, 111 | 139 | 162) {
                 self.charge = 0.;
@@ -392,7 +391,7 @@ impl Battle {
                 return;
             };
             self.packed = packed;
-            if matches!(c.state, 123 | 124 | 128 | 129) {
+            if program::is_fade_slash_charge(c.state) {
                 // FZ 812132C4 calls 8181848C for the four fade-slash charges.
                 let rate = match action::ChargeSkill::equipped(actor) {
                     action::ChargeSkill::Focus => 1.25,
@@ -413,10 +412,21 @@ impl Battle {
             c.time.blend = f32::from(step.blend) / 2.;
             let (model_motion, sword) = program::equipment_motion(step.clip, self.gauges.sword);
             self.model_motion = model_motion;
-            // The axe sprint unfolds its blade in clip 1479. Keep the
-            // sprint's starting form through native interruptions and resumes.
+            // FZ 812113BE restores the axe if an unlock opener ends before state
+            // 110. Its animated sword pose can still unfold during the opener.
+            // The axe sprint also unfolds temporarily and retains its starting form.
             if !program::is_sprint(c.state) {
-                self.gauges.sword = sword;
+                self.gauges.sword = sword && !is_light_unlock_opener(c.state);
+            }
+            let unlock = c.state == 110
+                && (self.previous_action.is_some_and(is_light_unlock_opener)
+                    || self.peer && self.previous_action.is_none());
+            if unlock {
+                if self.peer && self.previous_action.is_none() {
+                    self.gauges.light = program::param(18);
+                }
+                self.gauges.sword = true;
+                self.gauges.unlocked = true;
             }
             write(
                 actor,
@@ -434,12 +444,16 @@ impl Battle {
             if !in_area {
                 self.clear_visuals();
             }
-            self.events(actor);
-            self.publish_phial();
+            self.events(actor, in_area);
+            if unlock && !self.peer {
+                self.publish_gauges();
+            } else {
+                self.publish_phial();
+            }
         }
     }
 
-    unsafe fn events(&mut self, actor: u32) {
+    unsafe fn events(&mut self, actor: u32, in_area: bool) {
         let Some(c) = &mut self.cursor else { return };
         // A resumed sprint starts beyond the opener. Retain poise and charge
         // the running cost from the first wrap, with no catch-up cost or camera cue.
@@ -477,7 +491,7 @@ impl Battle {
                             native!(0x28321c, actor, 0, 16, 0);
                         }
                     }
-                    4 | 5 => strike(actor, kind == 5, value, c.time.frame, late),
+                    4 | 5 => strike(actor, kind == 5, value, c.time.frame, late, in_area),
                     6 => write(actor, 10288, duration),
                     7 => self.poise = true,
                     8 | 10 => write(actor, 11072, duration),
@@ -611,7 +625,7 @@ impl Battle {
                 self.particles.seek(clip, sample.frame);
             }
             // Apply a wrap's authored phase toggle before its restarted head.
-            self.events(actor);
+            self.events(actor, in_area);
             self.publish_phial();
             let dt = read::<f32>(actor, 28).max(0.);
             if !in_area {
@@ -716,10 +730,15 @@ impl Battle {
                 return true;
             }
             let next = c.branch(bits, eligible);
-            // Keep a valid GU stick heading while a side-turning branch is queued.
+            // FZ 81213F18 reads the live stick on release and on the next
+            // attack. A buffered X must not carry a turn through neutral.
+            let live_charge_aim = program::is_fade_slash_charge(state)
+                || self
+                    .previous_action
+                    .is_some_and(program::is_fade_slash_charge);
             let pending_turn = c
                 .pending_action()
-                .filter(|&id| program::accepts_side_turn(id));
+                .filter(|&id| !live_charge_aim && program::accepts_side_turn(id));
             self.branch_aim = match pending_turn {
                 Some(id) => direction
                     .map(|yaw| (id, read::<u16>(actor, 4076).wrapping_sub(yaw as u16)))
@@ -815,6 +834,25 @@ impl Battle {
     ) {
         unsafe {
             let (group, slot) = action::current(actor);
+            if clip == Some(motion::SPRINT_SHEATHE) {
+                fx::retire_for_sprint_sheathe(self.slot);
+                self.visual = fx::WeaponFx::default();
+                // The w12 model table assigns motion 5 to clip 1499.
+                write(
+                    actor,
+                    motion::SWORD_POSE,
+                    u32::from(program::sword_pose(5, sample.frame)),
+                );
+                sound::update(&mut self.audio, actor, clip, sample.frame, None);
+                fx::update(
+                    &mut self.particles,
+                    self.slot,
+                    actor,
+                    motion::SPRINT_SHEATHE,
+                    sample,
+                );
+                return;
+            }
             let sheathing =
                 matches!((group, slot), (1, 2 | 3)) || matches!(clip, Some(1003 | 1009));
             if sheathing {
@@ -914,9 +952,13 @@ impl Battle {
                 // Honor GU's common sheathe command during sprint and braking.
                 if (program::is_sprint(state) || matches!(state, AXE_BRAKE | SWORD_BRAKE))
                     && input.command(SHEATHE)
-                    && action::transition_to(actor, 1, 2)
+                    && action::transition_to(
+                        actor,
+                        motion::SHEATHE_ACTION.0,
+                        motion::SHEATHE_ACTION.1,
+                    )
                 {
-                    fx::clear(self.slot);
+                    self.clear_visuals();
                     self.cursor = None;
                     return true;
                 }
@@ -966,16 +1008,18 @@ impl Battle {
             let sample = MotionFrame::sample(actor);
             let clip = motion::native_clip(actor);
             self.native_visual(actor, clip, sample, drawn, dt);
-            sound::update(&mut self.audio, actor, clip, sample.frame, None);
-            if let Some(clip) = clip {
-                if self.model_motion == program::SWORD_IDLE_MOTION
-                    && matches!(clip, 1003 | 1009)
-                    && read::<f32>(actor, 1276) < 8.
-                    && sample.frame >= 8.
-                {
-                    sound::sheathe(actor);
+            if clip != Some(motion::SPRINT_SHEATHE) {
+                sound::update(&mut self.audio, actor, clip, sample.frame, None);
+                if let Some(clip) = clip {
+                    if self.model_motion == program::SWORD_IDLE_MOTION
+                        && matches!(clip, 1003 | 1009)
+                        && read::<f32>(actor, 1276) < 8.
+                        && sample.frame >= 8.
+                    {
+                        sound::sheathe(actor);
+                    }
+                    fx::update(&mut self.particles, self.slot, actor, clip, sample);
                 }
-                fx::update(&mut self.particles, self.slot, actor, clip, sample);
             }
             let ground = movement::ground_idle(current);
             let sheathed_move = !drawn && movement::sheathed_movement(current);

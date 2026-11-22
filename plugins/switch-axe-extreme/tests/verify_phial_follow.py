@@ -2,8 +2,89 @@
 import math
 import struct
 
+from unicorn import arm_const as arm
 from verify_native_fx import model_renderer
 from verify_style import Game
+
+
+def swing_arcs(root, arcs):
+    nx = root / "dist/switch-axe-extreme/romfs/nativeNX"
+    effects = nx / "effect/frontier_sa"
+    g = Game((root.parents[1] / "mhgu/main.elf").read_bytes())
+    load, camera, draw = model_renderer(g, nx)
+    g.put(0x188A0D4, g.alloc(128))  # Immediate world-pose initialization.
+    g.put(0x2126504, g.alloc(1800))
+    g.stub(0x9B90F8, lambda *_: 0)
+
+    def math_call(fn, registers):
+        args = [struct.unpack("<f", struct.pack("<I", g.cpu.reg_read(reg)))[0]
+                for reg in registers]
+        g.cpu.reg_write(arm.UC_ARM_REG_S0, struct.unpack("<I", struct.pack("<f", fn(*args)))[0])
+
+    g.stub(0x13EFD70, lambda *_: math_call(math.atan2, (arm.UC_ARM_REG_S0, arm.UC_ARM_REG_S1)))
+    g.stub(0x13F0190, lambda *_: math_call(math.asin, (arm.UC_ARM_REG_S0,)))
+
+    # The leading m265 layer travels forward; its plane tilts by the authored
+    # roll before the hunter yaw. Load the shipped PEL as well as the EFL.
+    pel = (effects / "particles.pel").read_bytes()
+    layers = {arc[0] for arc in arcs}
+    records = {}
+    at = 16
+    for _ in range(struct.unpack_from("<I", pel, 12)[0]):
+        at += pel[at] + 1
+        at += pel[at] + 1
+        row = pel[at:at + 160]
+        at += 160
+        layer, = struct.unpack_from("<H", row, 48)
+        if layer in layers:
+            records[layer] = row
+    resources = {layer: load((effects / f"e{layer}.efl").read_bytes()) for layer in layers}
+    g.cpu.mem_write(camera, struct.pack("<16f", 1,0,0,0, 0,1,0,0, 0,0,1,0, 230,180,630,1))
+
+    for layer, submitted, origin, facing, roll in arcs:
+        owner, proof, record, bank, entries, desc = (
+            g.alloc(n) for n in (416, 256, 160, 144, 4, 32)
+        )
+        g.run(0x328900, owner)
+        g.put(owner + 52, bank)
+        g.put(owner + 12, 1)
+        g.put(bank + 104, 1)
+        g.put(bank + 116, entries)
+        g.put(entries, desc)
+        g.cpu.mem_write(proof + 48, submitted)
+        g.cpu.mem_write(record, records[layer])
+        g.run(0x32A548, owner, proof, record)
+        unit = g.alloc(896)
+        g.run(0x3273F0, unit, owner, proof)
+        g.run(0x32AA44, owner, unit, resources[layer], proof)
+        assert g.run(0x9BDA64, unit) == 1
+        g.run(0x327588, unit)
+        assert g.half(unit + 56) == 4
+        assert math.dist(struct.unpack("<3f", g.cpu.mem_read(unit + 64, 12)), origin) < .01
+
+        g.put(unit + 272, 1)
+        generator = g.get(unit + 496)
+        assert g.string(g.get(generator + 52) + 80).endswith(r"\m265")
+        for _ in range(6):
+            g.run(0x327948, unit)
+            g.cpu.mem_write(unit + 256, struct.pack("<f", 1.))
+            g.cpu.mem_write(unit + 352, bytes(g.cpu.mem_read(unit + 64, 12)))
+            g.run(0x9B839C, unit)
+            g.run(0x9B9668, unit)
+            g.run(0xA5A48C, generator)
+            g.run(0x9B975C, unit)
+            g.run(0xA94C10, generator)
+
+        packet, = draw(generator)
+        travel = tuple(a - b for a, b in zip(packet.position, origin))
+        length = math.hypot(*travel)
+        assert length > 0 and abs(travel[1]) < .01, (facing, roll, travel)
+        yaw = math.radians(facing)
+        assert math.dist(travel, (math.sin(yaw) * length, 0, math.cos(yaw) * length)) < .02
+        x, y = math.cos(math.radians(roll + 180)), math.sin(math.radians(roll + 180))
+        normal = tuple(v / math.hypot(*packet.normal) for v in packet.normal)
+        assert math.dist(normal, (math.cos(yaw) * x, y, -math.sin(yaw) * x)) < .012
+    print(f"GU swing arcs: {len(arcs)} X/A cases passed native spawn and model draw checks.")
 
 
 def moving_blade(root, glow_proofs, jet_proofs):

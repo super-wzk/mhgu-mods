@@ -592,13 +592,14 @@ def replay(g, actor, descriptor, set_action, allow_transition):
     emitted, cues, probes = [], [], []
     water = [-100001.0]
     floor_available = True
+    probe_floor = 12.
 
     def floor(_, owner, point, end):
         probes.append(struct.unpack("<3f", g.cpu.mem_read(point, 12)))
         if not floor_available:
             return 0
         sp = g.cpu.reg_read(arm.UC_ARM_REG_SP)
-        put_float(g.get(sp + 4), 12)
+        put_float(g.get(sp + 4), probe_floor)
         put_float(g.get(sp + 8) + 20, water[0])
         return 1
 
@@ -625,8 +626,6 @@ def replay(g, actor, descriptor, set_action, allow_transition):
             assert all((sel in emitted) == dry for sel in range(first, first + count))
         assert (8 in cues) == dry and (9 in cues) == dry, cues
         assert (380.0, 12.0, 960.0) in probes
-    # Whiff all three cut-gauge tiers. Record GU world proofs, independent
-    # of the monster contact path; simulate a frozen sample at every FX edge.
     effects = []
 
     def capture(_, unit, *__):
@@ -637,6 +636,19 @@ def replay(g, actor, descriptor, set_action, allow_transition):
         return 1
 
     stub(0x3267D0, capture)
+    # GU's terrain under the trailing blade can be lower than the hunter.
+    probe_floor = -60.
+    water[0] = -100001.
+    begin(71)
+    g.cpu.mem_write(actor + 64, struct.pack("<3f", 300., 12., 400.))
+    effects.clear()
+    for frame in range(2, 65, 2):
+        tick(frame, common=1 << 27)
+    first, count = routes[15]
+    heights = [pos[1] for sel, pos, _ in effects if first <= sel < first + count]
+    assert heights and set(heights) == {12.}, heights
+    probe_floor = 12.
+    # Whiff all three cut-gauge tiers with a rotated and translated blade.
     stub(0xC1628, lambda *_: bone)
     g.put(actor + 1172, bone)
     g.put(actor + 1176, bone)
@@ -761,6 +773,12 @@ def replay(g, actor, descriptor, set_action, allow_transition):
         units.append((selector, unit))
         return 1
     stub(0x3267D0, capture_unit)
+    begin(71)
+    units.clear()
+    tick(2, common=1 << 27)
+    opening = [unit for selector, unit in units if selector in layers(32)]
+    assert len(opening) == len(layers(32))
+    assert all(g.get(unit + 132) == 0xA9 and g.half(unit + 194) == 2 for unit in opening)
     for surface, ground_route in ((-100001., 59), (20., 61)):
         water[0] = surface
         begin(71)
@@ -809,13 +827,14 @@ def replay(g, actor, descriptor, set_action, allow_transition):
     print("GU dash slash: dry/wet cleanup on sprint restart and weak slash damage interruption passed")
 
     # The parent-relative thrust overlay is retired when damage interrupts it.
-    for state, frame, route in ((49, 16, 1), (52, 36, 2)):
+    for state, frame, route in ((49, 16, 1), (52, 36, 2), (81, 36, 2)):
         begin(state)
         units.clear()
         tick(frame)
         thrust = [unit for selector, unit in units if selector in layers(route)]
         assert len(thrust) == len(layers(route))
-        assert all(g.get(unit + 132) == 0x29 and g.half(unit + 194) == 8 for unit in thrust)
+        flags, joint = (0xA9, 12) if state == 81 else (0x29, 8)
+        assert all(g.get(unit + 132) == flags and g.half(unit + 194) == joint for unit in thrust)
         set_action(64, 1)
         g.run(controller, actor, inputs)
         assert all(g.cpu.mem_read(unit + 48, 1) == b"\x02" for unit in thrust)

@@ -76,9 +76,9 @@ fn sample(keys: &[(u32, V3)], t: u32) -> V3 {
     prev.1
 }
 
-// 81F4C332 samples the short definition's inner rotation before 81F4DD32
-// advances its bank age by two. GU draws the intervening 60 Hz frame too.
-fn short_rotation_samples(keys: &[(u32, V3)], rate: f32, life: u16, looping: bool) -> Keys {
+// 81F4784A samples a short definition's vector at the current 30 Hz tick.
+// GU draws the intervening 60 Hz frame too.
+fn short_vector_samples(keys: &[(u32, V3)], rate: f32, life: u16, looping: bool) -> Keys {
     let mut samples = Vec::new();
     let period = (keys.last().unwrap().0 as f32 * rate) as u32;
     for frame in 0..=u32::from(life) {
@@ -711,7 +711,7 @@ impl Compiler {
                         let looping = vectors.chunks_exact(24)
                             .find(|key| u16::from(key[18]) == rotation_id)
                             .is_some_and(|key| key[16] & 1 != 0);
-                        short_rotation_samples(&keys, time_scale, life, looping)
+                        short_vector_samples(&keys, time_scale, life, looping)
                     } else {
                         vector_curve(rotation_id, [0.; 3], time_scale)
                     };
@@ -823,7 +823,16 @@ impl Compiler {
                             .into_iter()
                             .map(|(t, v)| (t, core::array::from_fn(|i| v[i] * base_scale[i])))
                             .collect();
-                        (vector_curve(movement_id, [0.; 3], time_scale), scale)
+                        let movement = if matches!(bank, 4016..=4019) && movement_id != 0 {
+                            let keys = vector_curve(movement_id, [0.; 3], 1.);
+                            let looping = vectors.chunks_exact(24)
+                                .find(|key| u16::from(key[18]) == movement_id)
+                                .is_some_and(|key| key[16] & 1 != 0);
+                            short_vector_samples(&keys, time_scale, life, looping)
+                        } else {
+                            vector_curve(movement_id, [0.; 3], time_scale)
+                        };
+                        (movement, scale)
                     };
                     // 81E98634 moves the parent of the vacuum ring. A GU world
                     // emitter samples its anchor once, so add the parent's travel.
@@ -835,7 +844,7 @@ impl Compiler {
                         }).collect()
                     } else {movement};
                     let mut position = vec(row, 0);
-                    if short_ground
+                    if short_ground || (!wide && matches!(bank, 4016..=4019))
                         || (!wide && self.namespace == "frontier_ls" && matches!(bank, 4007 | 4036))
                     {
                         // 113CF31B samples the absolute offset. GU travel

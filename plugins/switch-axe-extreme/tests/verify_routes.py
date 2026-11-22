@@ -194,6 +194,62 @@ def replay(repo, root):
             layers = (g.half(model + 1204), g.half(model + 1524))
             assert layers == (weapon_clip, 256 + weapon_clip), (s, reaction, layers)
             assert state() == reaction and g.half(actor + 1204) == 0x85
+
+    # FZ 812113BE restores the axe when 93/94/146 is interrupted and
+    # commits both the sword form and unlock when it enters state 110.
+    def interrupt_unlock():
+        set_action(64, 6)
+        half(actor + 1204, 0x85)
+        number(actor + 1280, 2)
+        g.run(g.hooks[DISPATCH], actor)
+        g.run(0x308B3C, model, actor)
+        assert state() == (64, 6)
+        return g.half(model + 1204)
+
+    for opener in (93, 94, 146):
+        g.run(tick, 0, 0)
+        for _ in range(2):
+            enter(90)
+            frame(8)
+        enter(opener)
+        if opener != 94:
+            g.cpu.mem_write(actor + 1206, b"\x04")
+            frame(180)
+            g.cpu.mem_write(actor + 1206, b"\0")
+            assert g.half(actor + 1204) == 1476
+        frame(120)
+        assert state() == (16, 0x8000 + opener) and g.get(actor + 13096) == 1
+        assert interrupt_unlock() == 1, opener  # visible sword retracts on hit
+
+        set_action(1, 0)
+        g.put(inp + 16, 1 << 14)  # X uses the retained axe form
+        frame(0)
+        g.put(inp + 16, 0)
+        assert state() == (16, 0x8000)
+
+        set_action(1, 0)
+        g.put(inp, 1 << 8)  # Special can retry with the retained full gauge
+        frame(0)
+        g.put(inp, 0)
+        assert state() == (16, 0x8000 + 94)
+
+    frame(124)
+    assert state() == (16, 0x8000 + 110)
+    assert interrupt_unlock() == 20  # the completed unlock survives the hit
+
+    set_action(1, 0)
+    g.put(inp, 1 << 8)
+    frame(0)
+    assert state() == (16, 0x8000 + 31)
+    g.put(inp, 0)
+    frame(180)
+    set_action(1, 0)
+    g.put(inp, 1 << 8)
+    frame(0)
+    g.put(inp, 0)
+    assert state() == (16, 0x8000 + 30)  # full but already unlocked
+    print("FZ/GU light-sword unlock: damage during each opener restores axe; completed unlock survives damage.")
+
     g.put(actor + 9120, model)
     stub(0x53A058, lambda p, *_: 32441 if g.half(p + 1204) == 1441 else 2133)
     weapon_dir = Path(os.environ["MHGU_ROMFS"]) / "nativeNX/arc/weapon/w08"

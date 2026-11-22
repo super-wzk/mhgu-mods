@@ -192,14 +192,24 @@ impl Stab {
         Self { slot }
     }
 
-    pub(super) unsafe fn pulse(&self, actor: u32, strong: bool, index: usize) {
+    pub(super) unsafe fn pulse(&self, actor: u32, strong: bool, counter: bool, index: usize) {
         if let Some(parent) = unsafe { particle::parent(actor) } {
             let z = crate::program::STAB_REACH * if strong { 0.75 } else { 1. };
             unsafe {
                 STAB_UNITS[self.slot.0].emit_layers(
                     &PARTICLES,
                     if strong { 2 } else { 1 },
-                    sword_attachment(parent, z),
+                    if counter {
+                        // Clip 1452 switches wrists at frame 24. Turn the
+                        // 4007:2 layers (including their local Z offsets) with the blade.
+                        Anchor::JointPose {
+                            parent,
+                            joint: 12,
+                            offset: Some([0., 0., z]),
+                        }
+                    } else {
+                        sword_attachment(parent, z)
+                    },
                     u32::MAX,
                     index * STAB_LAYERS,
                 );
@@ -287,7 +297,7 @@ pub(super) unsafe fn mark(
     }
 }
 
-// FZ 81F967E0 type 7 queries the floor under node 0 before emitting dry dust.
+// FZ 81F967E0 type 7 uses the grounded hunter's floor height for the sparks.
 // Returns true when the footfall cue has been submitted for this dry step.
 pub(super) unsafe fn dash_ground(actor: u32, charged: bool, sound_due: bool) -> bool {
     unsafe {
@@ -296,18 +306,17 @@ pub(super) unsafe fn dash_ground(actor: u32, charged: bool, sound_due: bool) -> 
         let [x, _, z]: [f32; 3] = read(actor, 224);
         let yaw = read(actor, 4076);
         let (sin, cos) = Angle::from_units(yaw).sin_cos();
-        let mut pos = [
+        let pos = [
             x - 120. * cos - 40. * sin,
             read(actor, 68),
             z + 120. * sin - 40. * cos,
         ];
-        let Some((floor, water)) = particle::ground_heights(actor, pos) else {
+        let Some((_, water)) = particle::ground_heights(actor, pos) else {
             return false;
         };
-        if water.is_some_and(|surface| surface >= floor - 18.) {
+        if water.is_some_and(|surface| surface >= pos[1] - 18.) {
             return false;
         }
-        pos[1] = floor;
         PARTICLES.emit(if charged { 16 } else { 15 }, Anchor::World(pos, yaw));
         if sound_due {
             crate::sound::blade_at(actor, if charged { 9 } else { 8 }, pos);
@@ -318,18 +327,6 @@ pub(super) unsafe fn dash_ground(actor: u32, charged: bool, sound_due: bool) -> 
 
 pub(super) unsafe fn bone(actor: u32, id: u32) -> Option<[f32; 16]> {
     unsafe { particle::joint_matrix(actor, id).map(|matrix| read(matrix, 0)) }
-}
-pub(super) unsafe fn counter_tip(actor: u32) {
-    unsafe {
-        if let Some(m) = bone(actor, 12) {
-            let reach = 0.75 * crate::program::STAB_REACH;
-            world(
-                actor,
-                core::array::from_fn(|i| m[12 + i] + m[8 + i] * reach),
-                2,
-            );
-        }
-    }
 }
 
 unsafe fn forward_anchor(actor: u32, height: f32, distance: f32) -> Anchor {
@@ -422,9 +419,9 @@ unsafe fn motion_event(
             if let Some(parent) = particle::parent(actor) {
                 PARTICLES.emit(
                     15 + usize::from(selector),
-                    Anchor::Joint {
+                    Anchor::JointPose {
                         parent,
-                        joint: 2,
+                        joint: joint_id.map_or(-1, |id| id as i16),
                         offset: Some(offset),
                     },
                 );

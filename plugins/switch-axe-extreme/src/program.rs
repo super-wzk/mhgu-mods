@@ -220,6 +220,10 @@ pub fn charge_clip(clip: u16) -> bool {
     matches!(clip, 1488 | 1489 | 1063 | 1064)
 }
 
+pub fn is_fade_slash_charge(state: u8) -> bool {
+    matches!(state, 123 | 124 | 128 | 129)
+}
+
 // FZ 812132C4 uses param 33 for the light-sword sharpness cutoff.
 pub const AXE_RECOIL: u8 = 34;
 pub const LIGHT_SWORD_RECOIL: u8 = 35;

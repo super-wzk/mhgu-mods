@@ -265,9 +265,10 @@ def replay(g, repo, actor, remote, tick, inputs, set_action, reg):
     # The local slot equips another weapon; the receiving style comes from the peer.
     g.cpu.mem_write(g.get(actor + 5060) + 1236, b"\x00")
 
-    def receive(p, action):
+    def receive(p, action, *, yaw=0):
         half(sender + 9478, 16)
         half(sender + 9482, 0x8000 + action)
+        half(sender + 5280, yaw)
         g.run(0x1FED90, packet, sender, 0)
         assert g.half(packet + 56) == 0x8000 + action
         g.run(0x1FF308, packet, p)
@@ -287,6 +288,15 @@ def replay(g, repo, actor, remote, tick, inputs, set_action, reg):
         start, = struct.unpack("<f", g.cpu.mem_read(remote + 1280, 4))
         assert (g.half(remote + 1204), start) == (clip, 90.)
         assert g.get(remote + 13096) == 1
+    # The native action packet must retain the preceding custom sprint slot
+    # on the receiving hunter so the common sheathe can choose clip 1499.
+    half(sender + 9478, 1)
+    half(sender + 9482, 2)
+    g.run(0x1FED90, packet, sender, 0)
+    g.run(g.hooks[0x1FF308], packet, remote)
+    assert tuple(g.half(remote + off) for off in (9478, 9480, 9482, 9484)) == (
+        1, 16, 2, 0x8000 + 178,
+    )
     count = len(strikes)
     receive(remote, 0)
     assert g.half(remote + 1204) == 1401 and g.half(remote + 9482) == 0x8000
@@ -411,10 +421,12 @@ def verify_swing_fx(g, actor, eq, receive, load, stub, shape, sync_light):
     # The network fixture stubs actor virtuals; restore the equipped-property query.
     g.cpu.hook_del(g.traps.pop(0x27C708))
     spawned = []
+    proofs = {}
 
     def spawn(_, instance, *__):
         selector = g.get(g.cpu.reg_read(arm_const.UC_ARM_REG_SP))
         proof = instance + 128
+        proofs[selector] = bytes(g.cpu.mem_read(proof, 200))
         spawned.append(
             (
                 selector,
@@ -473,7 +485,7 @@ def verify_swing_fx(g, actor, eq, receive, load, stub, shape, sync_light):
                         take,
                     )
                     _, flags, pos, angles, scale = take[0]
-                    assert flags == 0x4000000A
+                    assert flags == 0x4000001A
                     if sel == 13:
                         expected = (
                             ((220, 370, 50), (-310, 320, 50)),
@@ -491,25 +503,52 @@ def verify_swing_fx(g, actor, eq, receive, load, stub, shape, sync_light):
                     assert_swing(angles, pitch, 0, roll)
                     assert all(abs(v - factor) < 0.00001 for v in scale)
 
-    for facing in (0, 90):
+    root_position = (230, 46, -370)
+    g.cpu.mem_write(actor + 64, struct.pack("<3f", *root_position))
+    arcs = []
+    for facing in (0, 45, 90):
+        yaw = math.radians(facing)
+        sine, cosine = math.sin(yaw), math.cos(yaw)
         g.cpu.mem_write(eq + 854, b"\0\0")
-        for state, hits in (
-            (78, ((45, 315), (89, 45))),
-            (5, ((41, 197),)),
-            (6, ((49, 20),)),
+        for state, selector, hits in (
+            (5, 0, ((40, 197, (0, 130, 50), 1),)),
+            (6, 0, ((48, 20, (-20, 150, 0), 1),)),
+            (78, 0, ((44, 315, (0, 140, 100), 1), (88, 45, (0, 140, 100), 1))),
+            (85, 0, ((24, 90, (0, 100, 150), 1), (70, 6, (0, 100, 150), 1))),
+            (149, 31, ((24, 267, (0, 100, 100), 1.1), (74, 262, (0, 110, 0), 1.3))),
         ):
             sync_light(state)
             g.cpu.mem_write(actor + 4076, struct.pack("<H", facing * 65536 // 360))
-            for n, roll in hits:
+            layers = sizes[0, selector]
+            for n, roll, (x, y, z), factor in hits:
+                spawned.clear()
+                g.cpu.mem_write(actor + 1276, struct.pack("<f", n))
+                frame(n - 1)
+                assert not any(s[0] in layers for s in spawned), (state, n, "early")
+
+                spawned.clear()
+                g.cpu.mem_write(actor + 1276, struct.pack("<f", n + 1))
+                frame(n)
+                take = [s for s in spawned if s[0] in layers]
+                assert [s[0] for s in take] == list(layers), (state, n, take)
+                _, flags, position, angles, scale = take[0]
+                dx, dz = cosine * x + sine * z, cosine * z - sine * x
+                expected = tuple(a + b for a, b in zip(root_position, (dx, y, dz)))
+                assert flags == 0x4000001A and math.dist(position, expected) < .01
+                assert_swing(angles, 0, facing, roll)
+                assert all(abs(v - factor) < .00001 for v in scale)
+                arcs.append((layers.start, proofs[layers.start], expected, facing, roll))
+
                 spawned.clear()
                 frame(n)
-                take = [s for s in spawned if s[0] in sizes[0, 0]]
-                assert [s[0] for s in take] == list(sizes[0, 0]), (state, n, take)
-                assert_swing(take[0][3], 0, facing, roll)
+                assert not any(s[0] in layers for s in spawned), (state, n, "duplicate")
+    g.cpu.mem_write(actor + 64, bytes(12))
     g.cpu.mem_write(actor + 4076, b"\0\0")
+    from verify_phial_follow import swing_arcs
     from verify_phial import replay as verify_phials
+    swing_arcs(root, arcs)
 
-    verify_phials(g, root, actor, eq, receive, routes, stub, sync_light)
+    verify_phials(g, root, actor, eq, receive, routes, stub, sync_light, shape)
     mesh = (
         root / "dist/switch-axe-extreme/romfs/nativeNX/effect/frontier_sa/m265.mrl"
     ).read_bytes()
@@ -533,7 +572,7 @@ def verify_swing_fx(g, actor, eq, receive, load, stub, shape, sync_light):
         ]
         assert slots == [1 + i], slots
     print(
-        "GU particles: light A-A and X-X at two headings, both charged swing phases,"
+        "GU particles: light A-A and X-X at three headings, both charged swing phases,"
         " six equipped phial values and the two-material mesh passed."
     )
 

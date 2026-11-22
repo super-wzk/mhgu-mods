@@ -56,7 +56,7 @@
 | 形态、拔刀与蓄力 | 持刀特殊攻击键在光剑满槽时解锁，解锁后可变形。收刀 X+A 走光剑拔刀或满槽解锁。收刀站定且摇杆回中时新按 R 可拔斧蓄力，推杆按 R 保留奔跑。光剑槽耗尽后等待允许切招的地面动作再播放 1441 变斧，武器收刃轨道使用 64～76 帧。单独耗尽斩击槽时，仍有光剑槽的光剑可继续使用。见[武器轨道](../plugins/switch-axe-extreme/src/motion.rs)和[按键回放](../plugins/switch-axe-extreme/tests/verify_stance.py)。 |
 | 袈裟斩、放出与吸收 | 光剑待机 X+A 在任意方向接放出突刺。允许袈裟斩的连段按左、右、后分支和剩余槽量判定，普通突刺第 70～113 帧也可取消接袈裟斩。袈裟斩接吸收从第 38 帧收新的 ZR 按下，之后按怪物接触类型、前置状态、槽量和有效方向派生。强化放出按 0–1、2–3、4 次及以上有效命中分三档，重新起手清计数。见[动作与派生](../plugins/switch-axe-extreme/src/battle.rs)和[原版派生回放](../plugins/switch-axe-extreme/tests/verify_branches.py)。 |
 | 冲刺、连挥与回避 | 斧冲刺用斩击槽，光剑冲刺用光剑槽。斧冲刺可暂时展开武器模型，越阶后按原冲刺形态从循环段续跑，不重复起跑耗槽。两形态在冲刺或刹车可按 GU 收刀键。斧连挥扣耐力，光剑乱斩扣光剑槽，两者抑制 GU 自然回耐，收招后恢复。见[连挥与方向回放](../plugins/switch-axe-extreme/tests/verify_chains.py)和[地形与狩技路由回放](../plugins/switch-axe-extreme/tests/verify_routes.py)。 |
-| 光剑弹刀、瓶光与收刀 | 已命中硬部位且斩味等级低于 2 时，普通光剑刀身可弹刀。放出等使用 FZ 豁免表。GU 六种装备瓶映射成四种 FZ 瓶光，持续光层跟随武器节点移动并旋转。收刀、受击或换区按各自的所属动作回收持续层。片段 1003／1009 的 34 层收刀闪光仍停用，保留收刀动画、音效和地面效果。见[瓶光跟随回放](../plugins/switch-axe-extreme/tests/verify_phial_follow.py)和[斩斧说明](../plugins/switch-axe-extreme/README.md)。 |
+| 光剑弹刀、瓶光与收刀 | 已命中硬部位且斩味等级低于 2 时，普通光剑刀身可弹刀。放出等使用 FZ 豁免表。GU 六种装备瓶映射成四种 FZ 瓶光，持续光层跟随武器节点移动并旋转。收刀、受击或换区按各自的所属动作回收持续层。冲刺收刀使用片段 1499 的动画、音效和粒子。普通收刀片段 1003／1009 的 34 层闪光仍停用，保留收刀动画、音效和地面效果。见[瓶光跟随回放](../plugins/switch-axe-extreme/tests/verify_phial_follow.py)和[斩斧说明](../plugins/switch-axe-extreme/README.md)。 |
 
 前滚第 30 帧起接受攻击预输入，第 50 帧起执行。光剑 X 接纵斩，A 接二连斩，再按 A 可接四连斩后两刀。两条连段的放出突刺和方向加 X+A 袈裟斩要在各自窗口验证。前滚第 10 帧起可预输入双推冲刺，第 50 帧起还可接吸收，斧形态可按住 R 接蓄力。见[地面输入回放](../plugins/switch-axe-extreme/tests/verify_stance.py)。
 

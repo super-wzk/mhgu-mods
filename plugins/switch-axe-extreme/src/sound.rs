@@ -33,3 +33,10 @@ pub unsafe fn sheathe(actor: u32) {
 pub(super) unsafe fn effect(actor: u32, bank: usize, cue: u8) {
     unsafe { BANKS[bank].play(actor, cue) };
 }
+
+pub(super) unsafe fn phial_burst(actor: u32, cue: u8, center: [f32; 3]) {
+    unsafe {
+        BANKS[0].play_at(actor, 1, center);
+        BANKS[1].play_at(actor, cue, center);
+    }
+}

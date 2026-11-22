@@ -720,13 +720,9 @@ impl Battle {
                 if !(last < at && at <= frame) {
                     continue;
                 }
-                if state == 81 {
-                    fx::counter_tip(actor);
-                } else {
-                    self.stab_fx
-                        .get_or_insert_with(|| fx::Stab::new(self.slot))
-                        .pulse(actor, state >= 51, index);
-                }
+                self.stab_fx
+                    .get_or_insert_with(|| fx::Stab::new(self.slot))
+                    .pulse(actor, state >= 51, state == 81, index);
             }
         }
     }

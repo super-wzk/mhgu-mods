@@ -1,5 +1,6 @@
 """Compare the FZ weapon update with GU effect-unit submissions and releases."""
 
+import math
 import struct
 from unicorn import UC_HOOK_CODE, arm_const as arm
 from verify_assets import Machine, MEM
@@ -65,7 +66,7 @@ def original_pulses(elf):
     return expected
 
 
-def replay(g, root, actor, eq, receive, routes, stub, sync_light):
+def replay(g, root, actor, eq, receive, routes, stub, sync_light, hit_shape):
     expected = original_pulses(root.parents[1] / "mhfz/eboot.bin.elf")
     parent, model, lookup = [g.alloc(n) for n in (32, 256, 256)]
     g.put(actor + 1172, model)
@@ -210,7 +211,7 @@ def replay(g, root, actor, eq, receive, routes, stub, sync_light):
     for state, tier in ((75, 1), (85, 2), (86, 3)):
         receive(actor, state)
         spawned.clear()
-        frame(25)
+        frame(24)
         assert bool(selected(4016, 10)) == (tier == 3)
         release(spawned)
         spawned.clear()
@@ -293,14 +294,18 @@ def replay(g, root, actor, eq, receive, routes, stub, sync_light):
     for bank in ("m_0", "m_4"):
         lmt[bank] = g.alloc(128)
         g.put(lmt[bank] + 80, 1)
-    stub(load, lambda _, kind, path, __: (
-        lmt[g.string(path).rsplit("\\", 1)[-1]] if kind == 0x2125210 else 0
-    ))
+    sound_banks = {name: g.alloc(128) for name in ("blade", "common", "weapon")}
+    for bank in sound_banks.values():
+        g.put(bank + 80, 1)
+    stub(load, lambda _, kind, path, __: {
+        0x2125210: lmt, 0x2125BEC: sound_banks,
+        0x1857810: {"hit_107_0": hit_shape},
+    }.get(kind, {}).get(g.string(path).rsplit("\\", 1)[-1], 0))
     stub(0xB49E54, lambda *_: 1)
     stub(0x957400, lambda p, r, bank, *_: g.put(p + 3844 + 4 * bank, r))
 
     def native_frame(n):
-        g.cpu.mem_write(actor + 1280, struct.pack("<f", n))
+        g.cpu.mem_write(actor + 1276, struct.pack("<2f", n + 1, n))
         g.run(g.hooks[0x282DA8], local)
 
     for previous, clip, cue in ((78, 1003, 8), (179, 1009, 6)):
@@ -325,11 +330,116 @@ def replay(g, root, actor, eq, receive, routes, stub, sync_light):
         stopped.clear()
         g.cpu.mem_write(actor + 9478, struct.pack("<H2xH", 1, 2))
         g.cpu.mem_write(actor + 1204, struct.pack("<H", packed))
-        g.cpu.mem_write(actor + 1276, struct.pack("<f", cue - 1))
         spawned.clear()
         native_frame(cue + 1)
         assert {r[1] for r in glow} <= set(stopped)
         assert not (selected(4015, 4) or selected(4014, 2) or selected(4016, 8)), spawned
+
+    # GU accepts a common sheathe after the networked sprint. Its normal 5003
+    # request must bind w12 slot 99 and decode back to GU's sheathe identity.
+    g.put(0x1896F5C, g.alloc(16))
+    cues = []
+    stub(0xB68280, lambda *_: 1)
+    stub(0x4EEAA4, lambda _, kind, bank, cue: cues.append((bank, cue - 4096)) or 1)
+
+    requests = []
+    stub(0x281998, lambda _, request, *__: requests.append(request) or 1)
+    for fn in (0x282FD8, 0x283238, 0x2E9B7C, 0x27C7EC, 0x2AC990):
+        stub(fn, lambda *_: 0)
+    for offset in (1132, 1836):
+        stub(g.get(g.get(actor) + offset), lambda *_: 0)
+    ended = []
+    stub(0x950BCC, lambda *_: 1)
+    stub(0x2B6E94, lambda hunter, *_: ended.append(hunter) or 0)
+    for sprint in (103, 148, 178, 179):
+        sync_light(sprint)
+        g.cpu.mem_write(actor + 9478, struct.pack("<4H", 1, 16, 2, 0x8000 + sprint))
+        g.cpu.mem_write(actor + 5, b"\0")
+        requests.clear()
+        g.run(0x2CDB38, actor, 0, 0)
+        assert requests == [5003]
+        packed = g.run(g.hooks[0x27C6A0], actor, requests[0])
+        assert packed & 0xff == 99 and 8 <= packed >> 8 < 16, (sprint, packed)
+        assert g.run(g.hooks[0x27C6D4], actor, packed) == 5003
+        g.cpu.mem_write(actor + 1204, struct.pack("<H", packed))
+        g.cpu.mem_write(actor + 1268, bytes(4))
+        cues.clear()
+        spawned.clear()
+        native_frame(9)
+        assert g.get(actor + 13096) == 1 and not spawned
+        native_frame(12)
+        assert g.get(actor + 13096) == 0
+        flash, glow = selected(4014, 2), selected(4015, 13)
+        assert len(flash) == routes[4014, 2][1] and len(glow) == routes[4015, 13][1]
+        assert all(r[2:] == (0, socket, (-10., 0., 0.)) for r in flash)
+        assert all(r[2:] == (0, socket, (-10., 0., 20.)) for r in glow)
+        native_frame(12)
+        assert len(selected(4015, 13)) == len(glow)
+        native_frame(14)
+        assert len(selected(4015, 13)) == 2 * len(glow)
+        assert cues == [(sound_banks["weapon"], 3), (sound_banks["blade"], 2)]
+
+        native_frame(16)
+        assert cues[-1] == (sound_banks["common"], 67)
+
+        stopped.clear()
+        live = flash + selected(4015, 13)
+        g.cpu.mem_write(actor + 9478, struct.pack("<H2xH", 64, 6))
+        spawned.clear()
+        native_frame(18)  # interrupted with the old clip still bound
+        assert not spawned and {r[1] for r in live} <= set(stopped)
+
+    # GU still owns motion completion and the transition back to locomotion.
+    g.cpu.mem_write(actor + 9478, struct.pack("<4H", 1, 16, 2, 0x8000 + 179))
+    g.run(0x2CDB38, actor, 0, 0)
+    assert ended == [actor]
+
+    # FZ family 107 rows 1/2 spawn their own blast and positional cues at the
+    # same point as the collision sphere, even when no monster was hit.
+    positions = []
+
+    def queue_burst(_, kind, bank, cue):
+        sp = g.cpu.reg_read(arm.UC_ARM_REG_SP)
+        positions.append(struct.unpack("<3f", g.cpu.mem_read(g.get(sp + 4), 12)))
+        cues.append((bank, cue - 4096))
+        return 1
+
+    stub(0x4EEAA4, queue_burst)
+    tick_size(0)
+    area = bytes(g.cpu.mem_read(actor + 4180, 1))
+    g.cpu.mem_write(actor + 64, struct.pack("<3f", 100., 20., 200.))
+    accents = ((15, 19), (11, 18), (3, 16), (11, 18), (7, 17), (3, 16))
+    for phi, (normal, backward) in enumerate(accents):
+        g.cpu.mem_write(eq + 854, struct.pack("<h", phi))
+        for state, accent, cue, yaw, center in (
+            (60, normal, 79, 0, (70., 200., 350.)),
+            (63, backward, 78, 0x4000, (250., 200., 230.)),
+        ):
+            spawned.clear()
+            cues.clear()
+            positions.clear()
+            receive(actor, state, yaw=yaw)
+            frame(0)
+            bursts = selected(4013, accent)
+            assert len(bursts) == routes[4013, accent][1], (state, phi, bursts)
+            for _, unit, *_ in bursts:
+                position = struct.unpack("<3f", g.cpu.mem_read(unit + 128 + 176, 12))
+                assert math.dist(position, center) < .001, (state, phi, position, center)
+            assert cues == [(sound_banks["blade"], 1), (sound_banks["common"], cue)]
+            assert all(math.dist(p, center) < .001 for p in positions), positions
+            release(spawned)
+    g.cpu.mem_write(actor + 4180, bytes([area[0] ^ 1]))
+    spawned.clear()
+    cues.clear()
+    receive(actor, 60)
+    frame(0)
+    assert not spawned and not cues
+    g.cpu.mem_write(actor + 4180, area)
+    frame(0)
+    assert not spawned and not cues
+    g.put(0x1896F5C, 0)
+    print("GU phial bursts: both A release states, six equipment values, world centers, sound and area isolation passed.")
+    print("GU sprint sheathe: clip 1499, joint bursts, authored sound, peer playback, interruption and native exit passed.")
 
     # Start the highest discharge in the same room, then interrupt it with
     # damage while the old motion is still bound and its old clock is frozen.

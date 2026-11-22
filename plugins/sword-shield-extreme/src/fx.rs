@@ -1,5 +1,6 @@
 use crate::read;
 use mhfz_sdk::effects::{MotionClock, world_pose_angles};
+use mhgu_sdk::geometry::Bearing;
 use mhgu_sdk::style::{
     action::MotionFrame,
     particle::{self, Anchor, Bank},
@@ -64,14 +65,24 @@ pub unsafe fn update(clock: &mut MotionClock, actor: u32, clip: u16, sample: Mot
                 if let (Some(parent), Some(route)) =
                     (particle::parent(model), route(e.bank, e.selector))
                 {
-                    BANK.emit(
-                        route,
+                    let offset = Some(e.offset);
+                    let anchor = if e.kind == 3 && e.mode == 3 {
+                        // FZ 81FD3B8E follows the hunter's yaw, independently
+                        // of the joint used to position the emitter.
+                        Anchor::JointYaw {
+                            parent,
+                            joint,
+                            offset,
+                            yaw: read(actor, 4076),
+                        }
+                    } else {
                         Anchor::Joint {
                             parent,
                             joint,
-                            offset: Some(e.offset),
-                        },
-                    );
+                            offset,
+                        }
+                    };
+                    BANK.emit(route, anchor);
                 }
                 continue;
             }
@@ -83,13 +94,25 @@ pub unsafe fn update(clock: &mut MotionClock, actor: u32, clip: u16, sample: Mot
                 };
                 let pose: [f32; 16] = read(matrix, 0);
                 pos = particle::transform_offset(&pose, e.offset);
-                if matches!(e.mode, 0 | 2) {
+                if e.kind == 4 && e.mode == 2 {
+                    // 817BD21C flattens the joint to its heading first.
+                    // 817BCBE8 reverses the forward axis of that flat pose.
+                    let horizontal = if pose[0].abs() + pose[2].abs() > 1e-6 {
+                        (-pose[2], pose[0])
+                    } else {
+                        (pose[8], pose[10])
+                    };
+                    let heading = Bearing::between_xz((0., 0.), horizontal).yaw;
+                    rot[1] = heading.offset(0x8000).units();
+                } else if matches!(e.mode, 0 | 2) {
                     rot = world_pose_angles(&pose);
                 }
             }
             let mut wet = false;
-            if matches!(e.kind, 1 | 5) {
+            if matches!(e.kind, 1 | 4 | 5) {
                 if let Some((floor, water)) = particle::ground_heights(actor, pos) {
+                    // Kind 4 projects to the floor without switching banks.
+                    let water = water.filter(|_| e.kind != 4);
                     wet = water.is_some();
                     pos[1] = water.unwrap_or(floor);
                 } else if e.kind == 1 {
@@ -98,6 +121,9 @@ pub unsafe fn update(clock: &mut MotionClock, actor: u32, clip: u16, sample: Mot
             }
             if e.mode == 4 {
                 rot[1] = yaw.wrapping_add(0x4000);
+            } else if e.mode == 2 && e.node == 0 && matches!(e.kind, 5 | 6) {
+                // Both 817BD21C and 817BD590 use 817BCBE8 for root mode 2.
+                rot[1] = yaw.wrapping_add(0x8000);
             }
             let id = if e.kind == 1 {
                 if wet {

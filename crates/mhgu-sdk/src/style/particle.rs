@@ -157,6 +157,7 @@ impl<const N: usize> TrackedUnits<N> {
 pub enum Anchor {
     World([f32; 3], u16),
     RotatedWorld([f32; 3], [u16; 3]),
+    /// World pose with Ry * Rx * Rz rotation and uniform scale.
     ScaledWorld {
         position: [f32; 3],
         angles: [u16; 3],
@@ -172,6 +173,13 @@ pub enum Anchor {
         parent: u32,
         joint: i16,
         offset: Option<[f32; 3]>,
+    },
+    /// Follow the live joint position with the supplied world yaw.
+    JointYaw {
+        parent: u32,
+        joint: i16,
+        offset: Option<[f32; 3]>,
+        yaw: u16,
     },
 }
 
@@ -346,8 +354,10 @@ impl Bank {
                         scale,
                     } => {
                         world(position, angles);
-                        // 31C3A8 property 30 multiplies the unit scales at +48.
-                        proof.set(Field::at(4), 0x4000_000au32);
+                        // Override the PEL Euler order for 32AA44 and 327608.
+                        // Property 30 makes 31C3A8 multiply the scales.
+                        proof.set(Field::at(4), 0xau32 | (1 << 4) | (1 << 30));
+                        proof.set(Field::at(71), 4u8);
                         proof.set(Field::at(48), [scale; 3]);
                     }
                     Anchor::Joint {
@@ -359,15 +369,29 @@ impl Bank {
                         parent,
                         joint,
                         offset,
+                    }
+                    | Anchor::JointYaw {
+                        parent,
+                        joint,
+                        offset,
+                        ..
                     } => {
                         if let Some(offset) = offset {
                             proof.set(Field::at(16), offset);
                         }
                         let mut properties = 0x28u32 | u32::from(offset.is_some());
-                        if matches!(anchor, Anchor::JointPose { .. }) {
-                            // GU 31CC6C keeps explicitly supplied PEL property 7.
-                            properties |= 1 << 7;
-                            proof.set(Field::at(72), 0u8);
+                        match anchor {
+                            Anchor::JointPose { .. } => {
+                                // GU 31CC6C keeps explicitly supplied PEL property 7.
+                                properties |= 1 << 7;
+                                proof.set(Field::at(72), 0u8);
+                            }
+                            Anchor::JointYaw { yaw, .. } => {
+                                properties |= (1 << 1) | (1 << 7);
+                                proof.set(Field::at(32), [0., f32::from(yaw) * 360. / 65536., 0.]);
+                                proof.set(Field::at(72), 2u8);
+                            }
+                            _ => {}
                         }
                         proof.set(Field::at(4), properties);
                         proof.set(Field::at(12), 2u32);
