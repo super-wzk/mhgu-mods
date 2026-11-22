@@ -37,6 +37,8 @@ FX_RELEASE = 0x32A104
 DRAW_ROUTE = 0x115FCF4
 DB_DRAW_ROUTE = 0x11BA2A0
 LS_DRAW_ROUTE = 0x1198BB4
+SNS_DRAW_ROUTE = 0x1169020
+COLLISION_PASS = 0x16ABAC
 SA_DRAW_ROUTE = 0x119FCF4
 QUEST_CAMERA = 0x898AC0
 EQUIPMENT_GRIP = 0x308834
@@ -130,7 +132,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
     g = Game(elf)
     # The fixture starts after class registration. Populate the real weapon
     # DTI parent links so GU's virtual type query can distinguish the lobby.
-    for vtable in (0x1749A88, 0x174CF64, 0x174D838, 0x174F2B4):
+    for vtable in (0x1749A88, 0x174A354, 0x174CF64, 0x174D838, 0x174F2B4):
         g.put(g.run(g.get(vtable + 20)) + 16, 0x1886BB8)
     g.stub(0x13EFDAC, lambda p, size, *_: g.cpu.mem_write(p, bytes(size)))
     g.inline_hooks = g.inline_hooks | {
@@ -148,7 +150,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         DRAW_ROUTE,
         DB_DRAW_ROUTE,
         LS_DRAW_ROUTE,
-        SA_DRAW_ROUTE, QUEST_CAMERA,
+        SA_DRAW_ROUTE, SNS_DRAW_ROUTE, COLLISION_PASS, QUEST_CAMERA,
         FX_RELEASE,
         SHARPNESS,
         HIT_EXPAND,
@@ -227,17 +229,18 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             GS_CHANGE_ACTION,
             DRAW_ROUTE,
             DB_DRAW_ROUTE,
-            LS_DRAW_ROUTE, SA_DRAW_ROUTE, QUEST_CAMERA,
+            LS_DRAW_ROUTE, SA_DRAW_ROUTE, SNS_DRAW_ROUTE, COLLISION_PASS, QUEST_CAMERA,
             BLOCK,
             SHARPNESS,
             GUARD_REACTION,
             DRAW_MODEL,
+            SUBMIT_MODEL,
         }
         if "registry" in order
         else set()
     )
     if order == ("registry", "sword"):
-        expected.update((EQUIPMENT_GRIP, MODEL_DEPTH, SUBMIT_MODEL))
+        expected.update((EQUIPMENT_GRIP, MODEL_DEPTH))
     actual = set(g.hooks)
     assert actual == expected, (
         [hex(addr) for addr in sorted(expected - actual)],

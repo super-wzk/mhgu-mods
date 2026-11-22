@@ -6,7 +6,7 @@
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 mod attack;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
-pub use attack::Attack;
+pub use attack::{Attack, stun};
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 mod motion_bank;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]

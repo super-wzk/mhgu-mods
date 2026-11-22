@@ -7,7 +7,7 @@
 | [crates/mhgu-sdk](../crates/mhgu-sdk/README.md) | GU 1.4 引擎绑定，包括原生输入和转向、动作、碰撞、资源与注册接口。 |
 | [crates/mhfz-sdk](../crates/mhfz-sdk/README.md) | 极型武器共用的 Frontier 动作程序、动作库预加载、技能帧数补正、弹刀、镜头震动和表现时序。 |
 | [plugins/style-registry](../plugins/style-registry/README.md) | 扩展装备箱的原版风格页，按武器保存选择，转接 GU 动作、狩技、碰撞、粒子绘制与附加肩键相关的聊天入口。 |
-| [极之型大剑](../plugins/great-sword-extreme/README.md)、[极之型双剑](../plugins/dual-blades-extreme/README.md)、[极之型太刀](../plugins/long-sword-extreme/README.md)、[极之型斩斧 F](../plugins/switch-axe-extreme/README.md) | 各武器的动作编号、派生优先级、精准防御规则、槽、专属狩技及表现资源。 |
+| [极之型大剑](../plugins/great-sword-extreme/README.md)、[极之型双剑](../plugins/dual-blades-extreme/README.md)、[极之型太刀](../plugins/long-sword-extreme/README.md)、[极之型斩斧 F](../plugins/switch-axe-extreme/README.md)、[极之型单手剑](../plugins/sword-shield-extreme/README.md) | 各武器的动作编号、派生优先级、精准防御规则、槽、专属狩技及表现资源。 |
 | [plugins/monster-registry](../plugins/monster-registry/README.md) / [plugins/monster-espinas](../plugins/monster-espinas/README.md) | 独立物种、任务和怪物行为的接入实例。 |
 | [tools](../tools/) | 宿主资源转换 CLI。`mhf-resource` 读 FZ 格式，`mhgu-resource` 读写 GU 格式，`src/hunter.rs` 等负责具体移植映射。 |
 
@@ -34,6 +34,7 @@ python3 plugins/great-sword-extreme/package.py "$MHFZ_DAT"
 python3 plugins/dual-blades-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 python3 plugins/long-sword-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 python3 plugins/switch-axe-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
+python3 plugins/sword-shield-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 ```
 
 武器打包脚本先把源数据转换到插件的 `target/assets/`，再构建 NRO 并组装 `dist/<插件名>/romfs/nativeNX`。动作程序和部分事件表由 `include_bytes!` 编入 NRO，LMT、命中、粒子、音效和贴图等原生资源随模组目录安装。
@@ -70,15 +71,16 @@ python3 plugins/switch-axe-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 | --- | --- |
 | 单个速度、距离或计时参数 | 构建受影响的插件。需要安装时对照安装文件与本次产物。手感由任务内观察确认。 |
 | 装备箱选择、肩键与 GU 命令优先级 | [装备箱与保存](../plugins/great-sword-extreme/tests/verify_menu.py)、[聊天快捷键与肩键交换](../plugins/style-registry/tests/verify_chat_shortcut.py)、[大剑输入及动作生命周期](../plugins/great-sword-extreme/tests/verify_style.py)。 |
-| 攻击、防御、狩技和武器专属派生 | [大剑与双剑弹刀、刃打和双手刀光](../plugins/style-registry/tests/verify_deflection.py)、[专属狩技](../plugins/style-registry/tests/verify_weapon_arts.py)、[太刀](../plugins/long-sword-extreme/tests/verify_port.py)与[斩斧](../plugins/switch-axe-extreme/tests/verify_port.py)的动作回放。 |
+| 攻击、防御、狩技和武器专属派生 | [大剑与双剑弹刀、刃打和双手刀光](../plugins/style-registry/tests/verify_deflection.py)、[专属狩技](../plugins/style-registry/tests/verify_weapon_arts.py)、[太刀](../plugins/long-sword-extreme/tests/verify_port.py)、[斩斧](../plugins/switch-axe-extreme/tests/verify_port.py)与[单手剑](../plugins/sword-shield-extreme/tests/verify_port.py)的动作回放。 |
 | 动作、音效、特效与材质 | 对照输出槽位、事件帧、挂点或材质字段。参考[资源检查](../plugins/great-sword-extreme/tests/verify_assets.py)、[原生粒子](../plugins/great-sword-extreme/tests/verify_native_fx.py)和[材质绘制](../plugins/great-sword-extreme/tests/verify_native_material.py)。 |
-| 预加载、换区和角色交接 | [斩斧入口回放](../plugins/switch-axe-extreme/tests/verify_port.py)包含四武器任务初始化预加载、斩斧收刀与队员换区用例。[集会所回放](../plugins/switch-axe-extreme/tests/verify_lobby.py)核对任务角色和集会所角色交接。 |
+| 预加载、换区和角色交接 | [共用武器验收](../plugins/style-registry/tests/verify_weapon_styles.py)覆盖各武器的注册、任务预读和成品粒子路径。[斩斧集会所回放](../plugins/switch-axe-extreme/tests/verify_lobby.py)核对任务角色和集会所角色交接。 |
 | 联机动作与伤害归属 | [大剑与双剑](../plugins/style-registry/tests/verify_gs_db_multiplayer.py)、[太刀](../plugins/long-sword-extreme/tests/verify_multiplayer.py)和[斩斧](../plugins/switch-axe-extreme/tests/verify_port.py)覆盖 GU 原生动作包和队员命中。实机另查双方的动作、特效和结算。 |
 
-从仓库根目录使用可导入 `unicorn` 的 Python 运行离线脚本。准备相应的本地 ELF，并保留打包生成的 `target/assets` 和 `dist`。涉及 GU 原版武器 ARC 的脚本还需要导出 `MHGU_ROMFS`。斩斧入口回放会加载四把武器检查预加载，因此运行前需生成注册器及四把武器的 `dist`。
+从仓库根目录使用可导入 `unicorn` 的 Python 运行离线脚本。准备相应的本地 ELF，并保留打包生成的 `target/assets` 和 `dist`。涉及 GU 原版武器 ARC 的脚本还需要导出 `MHGU_ROMFS`。共用武器验收需要已构建的注册器和所有武器风格的 `dist`。
 
 ```sh
 python3 plugins/style-registry/tests/verify_chat_shortcut.py
+python3 plugins/style-registry/tests/verify_weapon_styles.py
 python3 plugins/switch-axe-extreme/tests/verify_lobby.py
 python3 plugins/switch-axe-extreme/tests/verify_port.py
 ```

@@ -239,7 +239,7 @@ pub(super) unsafe fn collision_pass(slot: Slot, manager: u32) {
         }
         if let Some(follow_up) = STATES[slot.0].active.get() {
             if follow_up.mark.owner == actor && hit.enabled() && follow_up.position_shape(actor) {
-                collision::enqueue(manager, hit);
+                hit.enqueue(manager);
             } else {
                 hit.disable();
                 STATES[slot.0].active.set(None);

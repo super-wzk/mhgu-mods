@@ -23,6 +23,14 @@ unsafe fn weapon_row(actor: u32, index: u32) -> u32 {
 }
 
 pub(super) unsafe extern "C" fn submit(actor: u32, attack: *const Attack) -> u32 {
+    unsafe { submit_row(actor, attack, None) }
+}
+
+unsafe extern "C" fn submit_stun(actor:u32, attack:*const Attack, stun:u8)->u32 {
+    unsafe { submit_row(actor, attack, Some(stun)) }
+}
+
+unsafe fn submit_row(actor:u32, attack:*const Attack, stun:Option<u8>)->u32 {
     unsafe {
         let Some(attack) = attack.as_ref() else {
             return 0;
@@ -55,6 +63,10 @@ pub(super) unsafe extern "C" fn submit(actor: u32, attack: *const Attack) -> u32
         // Feed power to the constructor before GU applies weapon modifiers.
         data.row[0] = 1 << 16;
         data.row[1] = (data.row[1] & 0xffff0000) | u32::from(attack.power);
+        if let Some(stun) = stun {
+            // 168960 copies the signed HDP byte 34 into the base KO field.
+            data.row[8] = (data.row[8] & !(255 << 16)) | (u32::from(stun.min(127)) << 16);
+        }
         if attack.flags & Attack::NO_ATTACKER_HITSTOP != 0 {
             // GU 168960 copies HDP byte 37 to contact +108. 16DB68
             // uses it for both the attacker's slow and full-stop timers.
@@ -118,5 +130,8 @@ pub(super) unsafe extern "C" fn submit(actor: u32, attack: *const Attack) -> u32
 }
 
 pub(super) fn install(base: u32) {
+    use mhgu_sdk::style::action::stun;
+    static SERVICE: stun::Service = stun::Service(submit_stun);
+    unsafe { stun::publish(&SERVICE) };
     forge::install_hook!(base, weapon_row);
 }

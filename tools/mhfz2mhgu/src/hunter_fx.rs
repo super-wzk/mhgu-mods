@@ -19,10 +19,12 @@ use std::{
 };
 
 const BANKS: &[(u16, &[u16])] = &[(4006, &[0, 1, 2, 3, 4, 5, 6]), (4022, &[5, 21])];
+const SNS_STRIPS: &[u16] = &[501, 504, 505, 506, 507];
 const CHARGE_AURA_MESH: u16 = 66;
 
 #[derive(Clone, Copy)]
 enum WeaponEffect {
+    SwordShield,
     SwitchAxe,
     GreatSword,
     DualBlades,
@@ -96,6 +98,10 @@ pub fn long_sword(dat: &Path, out: &Path, gu_weapon: &Path) -> Result<()> {
     convert(dat, out, gu_weapon, WeaponEffect::LongSword)
 }
 
+pub fn sword_shield(dat: &Path, out: &Path, gu_weapon: &Path) -> Result<()> {
+    convert(dat, out, gu_weapon, WeaponEffect::SwordShield)
+}
+
 pub fn switch_axe(dat: &Path, out: &Path, gu_weapon: &Path) -> Result<()> {
     convert(dat, out, gu_weapon, WeaponEffect::SwitchAxe)
 }
@@ -108,6 +114,10 @@ const SWITCH_AXE_PHIAL: &[u16] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
 
 fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect) -> Result<()> {
     let (namespace, effects): (_, &[(u16, &[u16])]) = match weapon_effect {
+        WeaponEffect::SwordShield => ("frontier_sns", &[
+            (3013, &[10]), (4020, &[0, 4, 5, 9, 11, 12, 13, 17, 18]),
+            (4035, &[2, 3, 7]), (4036, &[2, 7]),
+        ]),
         WeaponEffect::GreatSword => ("frontier_gs", BANKS),
         WeaponEffect::SwitchAxe => ("frontier_sa", &[
             (4013, &[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27]),
@@ -155,9 +165,17 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
     let weapon = arc::entries(&gu)?;
     let mut playback = native::Compiler::new(&weapon, particle_proof(&weapon)?, namespace)?;
     fs::create_dir_all(out)?;
+    let mhfdat = pac::decode(read(&dat.join("mhfdat.bin"))?)?;
     for &(id, selectors) in effects {
         let data = load_bank(id)?;
-        playback.bank(&data, id, selectors)?;
+        if id == 3013 && matches!(weapon_effect, WeaponEffect::SwordShield) {
+            let directory = u32::from_le_bytes(mhfdat.get(1836..1840).context("missing parameter directory")?.try_into()?) as usize;
+            let at = directory + 61 * 32;
+            let speed = f32::from_le_bytes(mhfdat.get(at..at+4).context("missing vacuum speed")?.try_into()?);
+            playback.moving_bank(&data,id,selectors,speed)?;
+        } else {
+            playback.bank(&data, id, selectors)?;
+        }
         if id == 4022 {
             playback.charge()?;
             playback.charged_slash()?;
@@ -173,9 +191,15 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
         }
         save(&out.join(format!("{id}.bank")), data)?;
     }
-    let mhfdat = pac::decode(read(&dat.join("mhfdat.bin"))?)?;
     let dual_blades = matches!(weapon_effect, WeaponEffect::DualBlades);
     let weapon_id = match weapon_effect {
+        WeaponEffect::SwordShield => {
+            playback.footfalls()?;
+            for &id in SNS_STRIPS {
+                playback.blade_strip(id)?;
+            }
+            4
+        }
         WeaponEffect::SwitchAxe => {
             let mut keys = Vec::new();
             for &(bank, selectors) in effects {
@@ -238,13 +262,19 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
         .context("missing GU effect material")?
         .unpack()?;
     let mut bindings = String::from("mesh\tmaterial\ttexture_slot\tatlas\n");
-    if dual_blades || matches!(weapon_effect, WeaponEffect::LongSword) {
-        let span = blade_trails(&bundle, &mrl, &mut assets, namespace, dual_blades)?;
+    let main_strip: &[u16] = match weapon_effect {
+        WeaponEffect::SwordShield => SNS_STRIPS,
+        WeaponEffect::DualBlades => &[501, 504, 505],
+        WeaponEffect::LongSword => &[501, 504, 505, 506, 507, 508, 509, 510, 511, 512],
+        _ => &[],
+    };
+    if !main_strip.is_empty() {
+        let span = blade_trails(&bundle, &mrl, &mut assets, namespace, dual_blades, main_strip)?;
         if !dual_blades {
             save(&out.join("trail_span.bin"), span.to_le_bytes().to_vec())?;
         }
-        for strip in 501..=if dual_blades { 505 } else { 512 } {
-            playback.meshes.remove(&strip);
+        for &id in main_strip.iter().chain(if dual_blades { &[502, 503][..] } else { &[] }) {
+            playback.meshes.remove(&usize::from(id));
         }
     }
     for &id in &playback.meshes {
@@ -389,6 +419,7 @@ fn motion_fx(data: &[u8], weapon_id: usize) -> Result<Vec<u8>> {
                 (_, _, 8) => false, // 817BD8FE immediately returns.
                 (0, 1465 | 1476, 5..=7) => (bank, selector) != (4022, 8), // Alpha stays zero.
                 (6, 1444..=1447, 0 | 3 | 5 | 7) | (6, 1448, 2 | 5) | (6, 1450, 0) => true,
+                (4, _, 1 | 3..=7) => true,
                 (12, _, 1 | 5..=7) => true,
                 (7, _, _) => match (kind, bank, selector, row[8], row[9]) {
                     (0, 5, _, 0, 0)
@@ -425,6 +456,7 @@ fn blade_trails(
     assets: &mut Vec<Asset>,
     namespace: &str,
     dual_blades: bool,
+    main_strip: &[u16],
 ) -> Result<f32> {
     let pair = pac::member(bundle, 8)?;
     let bytes = pac::member(&pair, 0)?;
@@ -432,11 +464,6 @@ fn blade_trails(
     let images = pac::member(bundle, 9)?;
     // The two demon trails bind separate runtime buffers backed by the same strip.
     let mut span = 0.;
-    let main_strip: &[u16] = if dual_blades {
-        &[501, 504, 505]
-    } else {
-        &[501, 504, 505, 506, 507, 508, 509, 510, 511, 512]
-    };
     for (object, ids) in [(1, main_strip), (2, &[502, 503][..])] {
         if object == 2 && !dual_blades {
             continue;

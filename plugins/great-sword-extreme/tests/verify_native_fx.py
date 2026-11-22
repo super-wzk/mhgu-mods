@@ -55,7 +55,7 @@ def resources(g):
     print("GU native EFL curves: charge alpha, colour, pulse and all four tier flashes passed")
 
 
-def binding_stack(g):
+def binding_stack(g, samples=((4, b"effect\\frontier_gs\\m2"), (5, b"effect\\frontier_db\\m2"))):
     draw = 0xA956D8
     ctx, gen, params = g.alloc(0x308E8), g.alloc(192), g.alloc(320)
     g.cpu.mem_write(gen + 70, b"\x05")
@@ -74,16 +74,15 @@ def binding_stack(g):
         return 9
 
     g.stub(g.originals[draw], packet)
-    for depth, namespace in [(4, "frontier_gs"), (5, "frontier_db")]:
-        g.cpu.mem_write(params + 80, f"effect\\{namespace}\\m2\0".encode())
+    for depth, model in samples:
+        g.cpu.mem_write(params + 80, model + b"\0")
         g.put(ctx + 0x308E4, depth)
         active = bytes(g.cpu.mem_read(ctx + 0xAC + size, depth * size))
         cursor = g.get(ctx + 64)
         assert g.run(draw, gen, ctx, 256) == 9
         assert g.get(ctx + 0x308E4) == depth and g.get(ctx + 64) == cursor + 4
-        assert bytes(g.cpu.mem_read(ctx + 0xAC, size)) == bindings
+        assert bytes(g.cpu.mem_read(ctx + 0xAC, size)) == bindings, (depth, model)
         assert bytes(g.cpu.mem_read(ctx + 0xAC + size, depth * size)) == active
-    print("GU draw at binding stack depths 4 and 5 preserves live and outer bindings")
 
 
 class ModelDraw(NamedTuple):
@@ -360,24 +359,29 @@ def draw(g):
     print("GU native X+A command and draw routes: idle, walking, sprinting and isolation passed")
 
 
-def soft_particles(g):
-    load, _, draw = model_renderer(g, NX, depth_scene=True)
-    layer = effect_routes()[8][1]
-    data = (NX / f"effect/frontier_gs/e{layer}.efl").read_bytes()
+def emit_model_layer(g, load, data, frames):
     unit = g.alloc(528)
     g.run(0x9B8DF8, unit)
     g.put(unit + 244, load(data))
     assert g.run(0x9BDA64, unit) == 1
     gen = g.get(unit + 496)
     g.put(unit + 272, 1)
-    params = g.get(gen + 52)
-    assert g.cpu.mem_read(params + 136, 3) == b"FZF"
-    assert abs(struct.unpack("<f", g.cpu.mem_read(params + 140, 4))[0] - .03) < 1e-7
-    for _ in range(25):
+    for _ in range(frames):
         g.run(0x9B9668, unit)
         g.run(0xA5A48C, gen)
         g.run(0x9B975C, unit)
         g.run(0xA94C10, gen)
+    return gen
+
+
+def soft_particles(g):
+    load, _, draw = model_renderer(g, NX, depth_scene=True)
+    layer = effect_routes()[8][1]
+    data = (NX / f"effect/frontier_gs/e{layer}.efl").read_bytes()
+    gen = emit_model_layer(g, load, data, 25)
+    params = g.get(gen + 52)
+    assert g.cpu.mem_read(params + 136, 3) == b"FZF"
+    assert abs(struct.unpack("<f", g.cpu.mem_read(params + 140, 4))[0] - .03) < 1e-7
 
     # Unicorn runs NEON VNEG.F32, but MHGURecomp aborts on the SIMD encoding.
     # Mask off the D, M and Q bits so all register assignments are checked.
@@ -440,6 +444,7 @@ if __name__ == "__main__":
     elf = (REPO / "mhgu/main.elf").read_bytes()
     resources(Game(elf))
     binding_stack(boot(elf, None))
+    print("GU draw at binding stack depths 4 and 5 preserves live and outer bindings")
     emission(boot(elf, b"[Weapons]\n0=1\n"))
     soft_particles(boot(elf, None))
     draw(boot(elf, b"[Weapons]\n0=1\n"))

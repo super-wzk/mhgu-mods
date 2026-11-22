@@ -6,6 +6,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parents[1]
 sys.path.insert(0, str(ROOT.parent / "great-sword-extreme/tests"))
+sys.path.insert(0, str(ROOT.parent / "style-registry/tests"))
 from verify_style import BLOCK, CHANGE_ACTION, api_for, boot, hunters, load_registered_style, service, setup_controller
 
 def main():
@@ -157,8 +158,8 @@ def main():
     routes(REPO, ROOT)
     from verify_stance import replay as stance
     stance(REPO, ROOT)
-    from verify_draw_preload import replay as draw_preload
-    draw_preload(REPO)
+    from verify_weapon_styles import replay as weapon_styles
+    weapon_styles(REPO)
     print("GU NRO: weapon selection, axe strike, buffered combo, guard window, absorption, light-sword stance and sword attack passed.")
 
 if __name__=="__main__":

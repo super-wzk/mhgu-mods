@@ -32,6 +32,7 @@ struct Entry {
     action_state: AtomicPtr<remote::ActionState>,
     physical: AtomicPtr<mhgu_sdk::style::physical::Rule>,
     world_contact: AtomicU32,
+    collision_pass: AtomicU32,
     blade_contact: AtomicU32,
     particle_release: AtomicU32,
     prepare: AtomicU32,
@@ -83,6 +84,7 @@ unsafe extern "C" fn register(
             action_state: AtomicPtr::new(ptr::null_mut()),
             physical: AtomicPtr::new(ptr::null_mut()),
             world_contact: AtomicU32::new(0),
+            collision_pass: AtomicU32::new(0),
             blade_contact: AtomicU32::new(0),
             particle_release: AtomicU32::new(0),
             prepare: AtomicU32::new(0),
@@ -661,6 +663,7 @@ fn start() {
     unsafe { physical::install(base) };
     commands::install(base);
     effect::install(base);
+    mhfz_sdk::effects::model::install();
     guard::install(base);
     weapon::install(base);
     menu::install(base);

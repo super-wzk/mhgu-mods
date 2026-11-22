@@ -148,7 +148,7 @@ pub(super) unsafe fn collision_pass(slot: Slot, manager: u32) {
             contact.set_window(f32::from(row.start), remaining);
         }
         if let Some(contact) = state.contact().filter(|c| c.enabled()) {
-            collision::enqueue(manager, contact);
+            contact.enqueue(manager);
         } else {
             state.stop();
         }

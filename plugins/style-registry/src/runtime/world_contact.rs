@@ -36,7 +36,29 @@ unsafe fn expand(hit: u32) -> u32 {
     }
 }
 
+unsafe extern "C" fn bind_pass(id: u32, pass: world_contact::CollisionPass) {
+    if let Some(entry) = super::registered_entry(id) {
+        entry.collision_pass.store(pass as u32, Ordering::Release);
+    }
+}
+
+#[forge::hook(offset = 0x16abac)]
+unsafe fn collision_pass(manager: u32) -> u32 {
+    for entry in crate::runtime::registered_entries() {
+        let callback = entry.collision_pass.load(Ordering::Acquire);
+        if callback != 0 {
+            let pass: world_contact::CollisionPass = unsafe { core::mem::transmute(callback) };
+            unsafe { pass(manager) };
+        }
+    }
+    original!(manager)
+}
+
 pub(super) fn install(base: u32) {
+    static PASS: world_contact::PassService = world_contact::PassService(bind_pass);
+    if unsafe { world_contact::publish_pass(&PASS) } {
+        forge::install_hook!(base, collision_pass);
+    }
     if unsafe { world_contact::publish(&SERVICE) } {
         forge::install_hook!(base, expand);
     }

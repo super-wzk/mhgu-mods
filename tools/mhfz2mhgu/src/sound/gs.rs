@@ -60,7 +60,9 @@ pub(super) fn timeline(dat: &Path, weapon: usize) -> Result<(Vec<u8>, [BTreeSet<
     // The fourth charge cue is triggered by gameplay, not the motion table.
     // Contact and deflection are played by GU's own melee resolver.
     let mut cues = [BTreeSet::new(), BTreeSet::new(), BTreeSet::new()];
-    if weapon == 12 {
+    if weapon == 4 {
+        cues[0].insert(22);
+    } else if weapon == 12 {
         cues[0].extend([1, 2, 12, 13, 20, 21, 22, 23, 24, 25, 26, 27, 28]);
         cues[1].extend([78, 79]);
     } else if weapon == 7 {
@@ -78,6 +80,7 @@ pub(super) fn timeline(dat: &Path, weapon: usize) -> Result<(Vec<u8>, [BTreeSet<
         0 => include_str!("gs_native.txt"),
         6 => include_str!("db_native.txt"),
         7 => include_str!("ls_native.txt"),
+        4 => include_str!("sns_native.txt"),
         12 => "",
         _ => anyhow::bail!("unsupported weapon sound timeline {weapon}"),
     };

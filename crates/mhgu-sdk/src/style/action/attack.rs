@@ -59,3 +59,31 @@ impl Attack {
         }
     }
 }
+
+/// Optional entry for attacks whose base KO buildup differs from the equipped HDP.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub mod stun {
+    use super::Attack;
+    use crate::service;
+    const NAME: &core::ffi::CStr = c"mhgu::StyleStunAttackV1";
+    const MAGIC: u32 = u32::from_le_bytes(*b"STA1");
+
+    #[doc(hidden)]
+    #[repr(C)]
+    pub struct Service(pub unsafe extern "C" fn(u32, *const Attack, u8) -> u32);
+
+    /// # Safety
+    /// Called once by the provider during Forge initialization.
+    #[doc(hidden)]
+    pub unsafe fn publish(api: &'static Service) -> bool {
+        unsafe { service::publish(NAME, MAGIC, api) }
+    }
+
+    /// # Safety
+    /// Same actor, shape and thread requirements as `Attack::submit`.
+    pub unsafe fn submit(actor: u32, attack: &Attack, buildup: u8) -> bool {
+        service::on_game_thread()
+            && unsafe { service::find::<Service>(NAME, MAGIC) }
+                .is_some_and(|api| unsafe { (api.0)(actor, attack, buildup) != 0 })
+    }
+}

@@ -134,7 +134,7 @@ pub(super) unsafe fn submit(slot: Slot, manager: u32) {
         }
         w.travel = 50. * (1. + (w.age / 2.) as u32 as f32);
         for c in w.contacts.iter() {
-            collision::enqueue(manager, c);
+            c.enqueue(manager);
         }
         w.age += dt;
     }

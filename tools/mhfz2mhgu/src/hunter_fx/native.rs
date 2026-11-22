@@ -610,6 +610,10 @@ impl Compiler {
         self.routes.extend((self.count - start).to_le_bytes());
     }
     pub fn bank(&mut self, data: &[u8], bank: u16, selectors: &[u16]) -> Result<()> {
+        self.moving_bank(data, bank, selectors, 0.)
+    }
+
+    pub fn moving_bank(&mut self, data: &[u8], bank: u16, selectors: &[u16], forward_per_tick: f32) -> Result<()> {
         ensure!(half(data, 0)? >= 4, "unsupported Frontier effect bank");
         let mut tail = data.get(28..).context("short effect bank")?;
         let mut tables = [&[][..]; 6];
@@ -754,6 +758,15 @@ impl Compiler {
                             .collect();
                         (vector_curve(movement_id, [0.; 3], time_scale), scale)
                     };
+                    // 81E98634 moves the parent of the vacuum ring. A GU world
+                    // emitter samples its anchor once, so add the parent's travel.
+                    let movement = if forward_per_tick != 0. {
+                        (0..=u32::from(life)).map(|frame| {
+                            let mut offset = sample(&movement, frame);
+                            offset[2] += forward_per_tick * (frame / 2) as f32;
+                            (frame, offset)
+                        }).collect()
+                    } else {movement};
                     let mut position = vec(row, 0);
                     if short_ground
                         || (!wide && self.namespace == "frontier_ls" && matches!(bank, 4007 | 4036))

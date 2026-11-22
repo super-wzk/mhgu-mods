@@ -21,7 +21,14 @@ def replay(weapon, style, plugin, vt):
     g.put(0x2126A64, manager)
     g.put(manager, table)
     g.put(table + 48, loader)
-    g.stub(loader, lambda _, kind, *__: bank if kind == 0x2125210 else 0)
+    attack_bank = g.alloc(112)
+    g.put(attack_bank + 80, 1)
+    g.put(actor + 3844 + 14 * 4, attack_bank)
+    def load(_, kind, path, flags):
+        if kind == 0x2125210:
+            return attack_bank if g.string(path).endswith("_4") else bank
+        return 0
+    g.stub(loader, load)
     g.put(bank + 80, 1)
     g.put(actor + 3844 + 15 * 4, bank)
     g.stub(0xB49E54, lambda *_: 1)
@@ -33,10 +40,19 @@ def replay(weapon, style, plugin, vt):
     exits = []
     g.stub(0x2B6E94, lambda *_: exits.append(True))  # Native shared return to locomotion.
 
-    lmt = next((dist / "player/mot").rglob("m_0.lmt")).read_bytes()
-    for slot, phase, clip in ((1, 1, 2), (2, 1, 3), (6, 2, 12), (6, 2, 13)):
-        packed = g.run(ENCODE, actor, 5000 + clip)
-        assert packed == 0xF00 + clip
+    cases = [(1, 1, 5002, 1002), (2, 1, 5003, 1003)]
+    rolls = (1420, 1421) if weapon == 1 else (1012, 1013)
+    cases.extend((6, 2, request, source) for request, source in zip((5012, 5013), rolls))
+    if weapon == 1:
+        cases.append((2, 1, 5003, 1450))  # native sheathe following sprint
+    for slot, phase, request, source in cases:
+        previous_slot = 0x8035 if source == 1450 else 0
+        g.cpu.mem_write(actor + 9480, struct.pack("<H2xH", 16, previous_slot))
+        packed = g.run(ENCODE, actor, request)
+        group = (source - 1000) // 100
+        clip = source % 100
+        assert packed == (0xE00 if group == 4 else 0xF00) + clip
+        lmt = next((dist / "player/mot").rglob(f"m_{group}.lmt")).read_bytes()
         offset, = struct.unpack_from("<I", lmt, 8 + 4 * clip)
         frames, loop = struct.unpack_from("<Ii", lmt, offset + 8)
         assert loop == -1
@@ -58,4 +74,5 @@ def replay(weapon, style, plugin, vt):
 
 if __name__ == "__main__":
     replay(0, 1, "great-sword-extreme", 0x1749A88)
+    replay(1, 5, "sword-shield-extreme", 0x174A354)
     replay(11, 2, "dual-blades-extreme", 0x174F2B4)

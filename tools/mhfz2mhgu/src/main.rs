@@ -76,6 +76,14 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Build the Extreme Sword and Shield action program and private GU resources.
+    SwordShield {
+        dat: PathBuf,
+        #[arg(long)]
+        gu_weapon: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Build the independent Frontier Switch Axe F motion, action, hit and sound resources.
     SwitchAxe {
         dat: PathBuf,
@@ -324,6 +332,19 @@ fn main() -> Result<()> {
             &output,
             hunter::motions(&dat, female, hunter::Weapon::GreatSword)?,
         ),
+        Command::SwordShield { dat, gu_weapon, output } => {
+            fs::create_dir_all(&output)?;
+            let kind = hunter::Weapon::SwordShield;
+            for (sex, female) in [("m", false), ("f", true)] {
+                save(&output.join(format!("{sex}.arc")), hunter::motions(&dat, female, kind)?)?;
+            }
+            save(&output.join("sword_shield.fsns"), hunter::actions(&dat, kind)?)?;
+            hunter::blade_shapes(&dat, &output, &[6, 7, 23, 28, 29], 1)?;
+            let (assets, timeline) = sound::sword_shield(&dat)?;
+            save(&output.join("frontier_sns_sound.flse"), timeline)?;
+            save(&output.join("sound.arc"), mhgu_resource::arc::encode(&assets)?)?;
+            hunter_fx::sword_shield(&dat, &output.join("effects"), &gu_weapon)
+        }
         Command::SwitchAxe { dat, gu_weapon, output } => {
             fs::create_dir_all(&output)?;
             save(&output.join("gauge.tex"),hunter_hud::switch_axe(&dat)?)?;
@@ -365,7 +386,7 @@ fn main() -> Result<()> {
             hunter::motions(&dat, female, hunter::Weapon::LongSword)?,
         ),
         Command::LongSwordActions { dat, output } => {
-            hunter::long_sword_shapes(&dat, output.parent().unwrap_or(Path::new(".")))?;
+            hunter::blade_shapes(&dat, output.parent().unwrap_or(Path::new(".")), &[0, 32, 33], 3)?;
             save(&output, hunter::actions(&dat, hunter::Weapon::LongSword)?)
         }
         Command::DualBladesMotions {

@@ -25,6 +25,8 @@ pub(super) unsafe fn finish_ground_motion(actor: u32, style: &Style, slot: u16, 
 fn weapon_art(weapon: u32, slot: u16) -> bool {
     match weapon {
         0 => great_sword_art(slot),
+        // w01_m art starters and continuations dispatched by 1169A7C.
+        1 => matches!(slot, 29..=32 | 40..=45 | 51..=54),
         // w07_m's four art starters and 11998B0's follow-up handlers.
         7 => matches!(slot, 51..=62 | 90),
         // w11_m's four art groups and the continuations in 11BB0F8.
@@ -159,6 +161,16 @@ unsafe fn great_sword_draw_route(actor: u32, kind: u32) -> u32 {
     native
 }
 
+#[forge::hook(offset = 0x1169020)]
+unsafe fn sword_shield_draw_route(actor: u32, kind: u32) -> u32 {
+    let native = original!(actor, kind);
+    if matches!(kind, 0 | 1 | 3) {
+        unsafe { draw_route(actor, native, 1) }
+    } else {
+        native
+    }
+}
+
 #[forge::hook(offset = 0x1198bb4)]
 unsafe fn long_sword_draw_route(actor: u32, kind: u32) -> u32 {
     let native = original!(actor, kind);
@@ -199,5 +211,6 @@ pub(super) fn install(base: u32) {
     forge::install_hook!(base, great_sword_draw_route);
     forge::install_hook!(base, dual_blades_draw_route);
     forge::install_hook!(base, long_sword_draw_route);
+    forge::install_hook!(base, sword_shield_draw_route);
     forge::install_hook!(base, switch_axe_draw_route);
 }

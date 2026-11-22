@@ -239,6 +239,10 @@ pub fn great_sword(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
     Ok((assets, timeline))
 }
 
+pub fn sword_shield(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
+    hunter_banks(dat, 4, "frontier_sns", "wd000snd.abn", b"wd000.snd\0")
+}
+
 pub fn dual_blades(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
     hunter_banks(dat, 6, "frontier_db", "wh000snd.abn", b"wh006.snd\0")
 }

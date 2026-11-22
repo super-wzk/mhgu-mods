@@ -50,44 +50,12 @@ pub(super) unsafe fn setup(
         // GU 16DB68 resolves hitstop from the copied HDP byte 37.
         hdp[9] = hdp[9] & !(255 << 8) | u32::from(hitstop) << 8;
         hdp[12] &= 0x00ff_ffff;
-        let hit = contact.as_raw();
-        // 168960 creates a new collision serial and retains the HTS.
-        native!(
-            0x168960,
-            hit,
-            0,
-            actor,
-            hdp.as_ptr() as u32,
-            shape,
-            0,
-            15,
-            1
-        );
-        // GU 16919C uses bits 0x100 and 0x200 for owner-action expiry and
-        // owner-motion time. FZ families 85 and 108 have their own lifetimes.
-        write(hit, 48, 0x0a00_0428u32);
-        // Apply the equipped weapon's element/status and sharpness modifiers.
-        native!(0x2b76cc, actor, hit, hdp.as_ptr() as u32, 7);
-        clear_native_spirit(hit);
-    }
-}
-pub(super) unsafe fn enqueue(manager: u32, contact: Contact<'_>) {
-    unsafe {
-        // The manager's list is intrusive. Guard against the same pass
-        // being requested twice before GU clears the list.
-        let hit = contact.as_raw();
-        let mut linked = read::<u32>(manager, 8224);
-        while linked != 0 && linked != hit {
-            linked = read(linked, 44);
-        }
-        if linked == 0 {
-            native!(0x1696e4, hit);
-        }
+        contact.prepare_world_attack(actor, &hdp, shape);
+        clear_native_spirit(contact.as_raw());
     }
 }
 
-#[forge::hook(offset = 0x16abac)]
-unsafe fn collision_pass(manager: u32) -> u32 {
+unsafe extern "C" fn collision_pass(manager: u32) {
     unsafe {
         for index in 0..crate::peer::COUNT {
             let slot = crate::peer::Slot(index);
@@ -97,9 +65,8 @@ unsafe fn collision_pass(manager: u32) -> u32 {
             crate::release::collision_pass(slot, manager);
         }
     }
-    original!(manager)
 }
 
 pub(super) fn install() {
-    forge::install_hook!(forge::mem::text_addr(), collision_pass);
+    unsafe { mhgu_sdk::style::world_contact::bind_pass(crate::STYLE_ID, collision_pass) };
 }

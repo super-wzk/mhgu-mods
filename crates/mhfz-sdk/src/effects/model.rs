@@ -18,13 +18,14 @@ unsafe fn read<T: Copy>(address: u32, offset: u32) -> T {
 unsafe extern "C" fn matches(params: u32) -> bool {
     params != 0
         && unsafe {
-            matches!(
-                &read::<[u8; 19]>(params, MODEL_PATH),
+            match &read::<[u8; 19]>(params, MODEL_PATH) {
                 b"effect\\frontier_gs\\"
-                    | b"effect\\frontier_db\\"
-                    | b"effect\\frontier_ls\\"
-                    | b"effect\\frontier_sa\\"
-            )
+                | b"effect\\frontier_db\\"
+                | b"effect\\frontier_ls\\"
+                | b"effect\\frontier_sa\\" => true,
+                b"effect\\frontier_sns" => read::<u8>(params, MODEL_PATH + 19) == b'\\',
+                _ => false,
+            }
         }
 }
 
@@ -236,7 +237,7 @@ unsafe extern "C" fn draw(
     }
 }
 
-/// Install the shared provider from a weapon plugin's Forge entry.
+/// Install the shared provider once, after the GU model-particle service.
 pub fn install() {
     static RENDERER: ModelRenderer = ModelRenderer { matches, draw };
     if !mhgu_sdk::service::on_game_thread() || !unsafe { crate::trail::install() } {

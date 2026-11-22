@@ -86,6 +86,7 @@ fn merge(rig: &Rig, layers: [Vec<Track>; 2], frames: usize) -> Result<Vec<Track>
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Weapon {
     GreatSword = 0,
+    SwordShield = 4,
     DualBlades = 6,
     LongSword = 7,
     SwitchAxe = 12,
@@ -95,6 +96,7 @@ pub fn motions(dat: &Path, female: bool, weapon: Weapon) -> Result<Vec<u8>> {
     let sex = if female { "f" } else { "m" };
     let (source, stem, slots) = match weapon {
         Weapon::GreatSword => ("w00", "frontier_gs", [100, 15, 80]),
+        Weapon::SwordShield => ("w04", "frontier_sns", [100, 15, 65]),
         Weapon::DualBlades => ("w06", "frontier_db", [100, 15, 60]),
         Weapon::LongSword => ("w07", "frontier_ls", [100, 15, 60]),
         Weapon::SwitchAxe => ("w12", "frontier_sa", [70, 25, 100]),
@@ -137,7 +139,9 @@ pub fn motions(dat: &Path, female: bool, weapon: Weapon) -> Result<Vec<u8>> {
             "mismatched hunter layers"
         );
         let stepping_slash = weapon == Weapon::LongSword && group == 4;
-        let mut w = Writer::new(slots + usize::from(stepping_slash))?;
+        let advancing_shield = weapon == Weapon::SwordShield && group == 4;
+        let extra = if advancing_shield { 4 } else { usize::from(stepping_slash) };
+        let mut w = Writer::new(slots + extra)?;
         for slot in 0..slots {
             let pair = (mot.motion(group, slot)?, mot.motion(group + 1, slot)?);
             let (lower, upper) = match pair {
@@ -191,6 +195,20 @@ pub fn motions(dat: &Path, female: bool, weapon: Weapon) -> Result<Vec<u8>> {
                 }
             }
             w.clip_with_loop(slot, frames, &tracks, loop_frame)?;
+            if advancing_shield && (54..=57).contains(&slot) {
+                // 811EB426..811EB49E: +4 local Z each 30 Hz tick before the clip gate.
+                // These source clips are also used by the stationary flurry.
+                let root = tracks.iter_mut().find(|t| t.usage == Usage::RootTranslation)
+                    .context("shield blow lacks a root track")?;
+                root.samples.resize(frames as usize, *root.samples.last().unwrap());
+                let gate = [16, 12, 14, 20][slot - 54];
+                for (frame, point) in root.samples.iter_mut().enumerate() {
+                    point.z += 2. * frame.min(gate) as f32;
+                }
+                let extra_slot = slots + slot - 54;
+                w.clip_with_loop(extra_slot, frames, &tracks, loop_frame)?;
+                sword_shield_equipment(&mut w, extra_slot, 1400 + slot)?;
+            }
             if stepping_slash && slot == 1 {
                 // 811F98BC adds 7.5 forward on ticks 40..56 in state 12 only.
                 // Private clip 1460 lets GU apply this movement against terrain.
@@ -210,6 +228,7 @@ pub fn motions(dat: &Path, female: bool, weapon: Weapon) -> Result<Vec<u8>> {
                 let motion = 1000 + 100 * group + slot;
                 match weapon {
                     Weapon::DualBlades => dual_blades_equipment(&mut w, slot, motion, frames)?,
+                    Weapon::SwordShield => sword_shield_equipment(&mut w, slot, motion)?,
                     Weapon::GreatSword => equipment(&mut w, slot, motion)?,
                     Weapon::SwitchAxe => switch_axe_equipment(&mut w, slot, motion)?,
                     Weapon::LongSword => long_sword_equipment(&mut w, slot, motion)?,
@@ -275,6 +294,17 @@ fn dual_blades_equipment(w: &mut Writer, slot: usize, motion: usize, frames: u32
     }
 }
 
+fn sword_shield_equipment(w: &mut Writer, slot: usize, motion: usize) -> Result<()> {
+    // GU w01 attaches the blade to the left wrist and leaves the buckler on the right.
+    let runs: &[(u32, u32)] = match motion {
+        1003 => &[(1, 32), (2, 0)],
+        1009 => &[(1, 30), (2, 0)],
+        1450 => &[(1, 68), (2, 0)],
+        _ => &[(1, 0)],
+    };
+    w.equipment_timeline(slot, &[3, 2], runs)
+}
+
 fn equipment(w: &mut Writer, slot: usize, motion: usize) -> Result<()> {
     // Frontier 819070E2, great-sword branch, at each integer motion frame.
     // Its grips 0/1/2 are GU events 1/3/2: right wrist, left wrist, back.
@@ -313,7 +343,7 @@ pub fn dual_blades_parameters(data: &[u8]) -> Result<&[u8]> {
 }
 
 /// GU HTS group zero, built from the standard-reach column of the FZ shape directory.
-pub fn long_sword_shapes(dat: &Path, output: &Path) -> Result<()> {
+pub fn blade_shapes(dat: &Path, output: &Path, selectors: &[usize], count: usize) -> Result<()> {
     let data = pac::decode(read(&dat.join("mhfdat.bin"))?)?;
     let word = |at| -> Result<usize> {
         Ok(u32::from_le_bytes(
@@ -323,8 +353,7 @@ pub fn long_sword_shapes(dat: &Path, output: &Path) -> Result<()> {
         ) as usize)
     };
     let directory = word(216)?;
-    // These are all the selectors used by w07 Extreme's reachable blade strikes.
-    for selector in [0, 32, 33] {
+    for &selector in selectors {
         let mut at = word(directory + 32 * selector)?;
         let mut rows = Vec::new();
         loop {
@@ -352,7 +381,7 @@ pub fn long_sword_shapes(dat: &Path, output: &Path) -> Result<()> {
             at += 40;
         }
         ensure!(
-            rows.len() == 3 * 48,
+            rows.len() == count * 48,
             "unexpected blade capsule count in group {selector}"
         );
         let mut hts = b"HTS\0".to_vec();
@@ -379,6 +408,7 @@ pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
     // First entry: 大剣. Entry 3 is ランス, not the great sword.
     let weapon = word(data, 0x614)? + kind as usize * 8;
     let (states, magic) = match kind {
+        Weapon::SwordShield => (53, b"FSNS"),
         Weapon::GreatSword => (74, b"FGSA"),
         Weapon::DualBlades => (89, b"FDBA"),
         Weapon::LongSword => (85, b"FLSA"),
@@ -485,6 +515,12 @@ pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
             data.get(params..params + 150)
                 .context("short w12 parameters")?,
         );
+        return Ok(out);
+    }
+    if kind == Weapon::SwordShield {
+        // Type 87/1 initializes from parameter rows 60/61 at 81E98634.
+        let offset = word(data, 1836)? + 60 * 32;
+        out.extend(data.get(offset..offset + 64).context("short vacuum wave parameters")?);
         return Ok(out);
     }
     if kind == Weapon::LongSword {

@@ -65,6 +65,41 @@ impl<'a> Contact<'a> {
         self.0.set(CONTACT_DURATION, duration);
     }
 
+    /// Initialize a player-owned world contact and apply the equipped weapon's modifiers.
+    /// GU 16919C uses the global clock when the owner-action/owner-motion flags are clear.
+    ///
+    /// # Safety
+    /// Run on the game thread with a live quest hunter, an HDP row, and a loaded HTS.
+    pub unsafe fn prepare_world_attack(self, actor: u32, row: &[u32; 14], shape: u32) {
+        unsafe {
+            let init: unsafe extern "C" fn(u32, u32, u32, *const u32, u32, u32, u32, u32) =
+                core::mem::transmute(entry(0x168960));
+            let adjust: unsafe extern "C" fn(u32, u32, *const u32, u32) =
+                core::mem::transmute(entry(0x2b76cc));
+            init(self.as_raw(), 0, actor, row.as_ptr(), shape, 0, 15, 1);
+            self.0.set(CONTACT_FLAGS, 0x0a00_0428);
+            adjust(actor, self.as_raw(), row.as_ptr(), 7);
+        }
+    }
+
+    /// Add this contact to GU's intrusive attack list once for the current pass.
+    ///
+    /// # Safety
+    /// The manager must be the live argument to GU 16ABAC on the game thread.
+    pub unsafe fn enqueue(self, manager: u32) {
+        unsafe {
+            let mut next = ((manager + 8224) as *const u32).read();
+            while next != 0 {
+                if next == self.as_raw() {
+                    return;
+                }
+                next = ((next + 44) as *const u32).read();
+            }
+            let add: unsafe extern "C" fn(u32) = core::mem::transmute(entry(0x1696e4));
+            add(self.as_raw());
+        }
+    }
+
     /// Submit a sphere at a fixed world position instead of expanding a bone-relative shape.
     ///
     /// # Safety
