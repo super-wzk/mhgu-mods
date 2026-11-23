@@ -7,7 +7,7 @@ from verify_style import BLOCK, COMMAND_UPDATE, DISPATCH, WEAPON_DISPATCH, api_f
 from verify_branches import Frontier
 
 
-def replay(g, root, actor, form, weapon, set_action):
+def replay(g, root, actor, form, weapon, set_action, defer_transition):
     elf = root / "target/armv7a-none-eabi/release/libswitch_axe_extreme.so"
     symbols = subprocess.check_output(["nm", str(elf)], text=True).splitlines()
     hud_symbol, = (line for line in symbols if line.split()[-1].split(".")[0].endswith("6battle3HUD"))
@@ -327,18 +327,55 @@ def replay(g, root, actor, form, weapon, set_action):
             (False, 108, 123, 141, 127, 130, 142), (True, 152, 128, 131, 134, 160, 29),
             (True, 153, 129, 132, 135, 161, 29), (True, 154, 128, 131, 134, 160, 29),
         ):
+            weak_rush = {128: 158, 129: 159}.get(hold)
+            for at, moving_state, still_state in (
+                (38, weak_rush, weak), (40, rush, charged), (120, rush, charged),
+            ):
+                commands = ((21, 22) if moving_state is not None else (21,)) if at < 120 else (0, 1)
+                for strength in (0, 49, 50, 127):
+                    for yaw in (-0x6001, -0x6000, -0x4000, -0x2000, -0x1fff,
+                                0x1fff, 0x2000, 0x4000, 0x6000, 0x6001):
+                        if sword and g.get(hud) & 0xffff < 100:
+                            refill_light()
+                        enter(slide, sword=sword)
+                        assert pad(18, 0x20) == slide
+                        assert pad(38, 0x20) == hold, (slide, state(), g.get(hud) & 0xffff)
+                        aim = (facing + yaw) & 0xffff
+                        assert pad(20, 0x20, stick=127) == hold
+                        aim = (facing - yaw) & 0xffff
+                        moving = strength >= 50
+                        command = reference.command(commands, yaw, stick=moving, button=0)
+                        expected = moving_state if command in (1, 22) else still_state
+                        # The w12 table excludes the two stationary charged axe releases.
+                        heading = facing if expected in (127, 133) else reference.turn(
+                            slide, expected, yaw if moving else 0, facing,
+                        )
+                        assert pad(at, 0x20 if at == 120 else 0, stick=strength) == expected, (
+                            slide, at, strength, yaw, state(), expected,
+                        )
+                        assert (g.half(actor + 4076), g.half(actor + 5280)) == (heading, heading), (
+                            slide, at, strength, yaw, heading,
+                        )
+
             if sword:
                 refill_light()
-            for at, stick, expected in ((38, 0, weak), (40, 0, charged), (40, 100, rush)):
-                enter(slide, sword=sword)
-                assert pad(18, 0x20) == slide
-                assert pad(38, 0x20) == hold
-                assert pad(at, 0, stick=stick) == expected, (slide, at, stick, state())
+            # If the native dispatcher defers the release, sample the
+            # execution tick's stick after it returns to the deadzone.
+            enter(slide, sword=sword)
+            assert pad(18, 0x20) == slide
+            assert pad(38, 0x20) == hold
+            aim = (facing + 0x4000) & 0xffff
+            defer_transition()
+            assert pad(40, stick=127) == hold
+            assert pad(42, stick=49) == rush
+            heading = g.half(actor + 4076), g.half(actor + 5280)
+            assert heading == (facing, facing), (slide, heading, facing)
 
             # Compare both turns using GU's camera-relative aim and actual X mapping.
-            for yaw, strength, follow_stick in (
-                (-0x4000, 100, 100), (0x4000, 50, 50), (0x1fff, 100, 100),
-                (-0x8000, 100, 100), (0x4000, 100, 49), (-0x4000, 100, 0),
+            for yaw, strength, queue_stick, follow_stick in (
+                (-0x4000, 100, 100, 100), (0x4000, 50, 50, 50), (0x1fff, 100, 100, 100),
+                (-0x8000, 100, 100, 100), (0x4000, 100, 100, 49), (-0x4000, 100, 100, 0),
+                (0x4000, 100, 0, 0),
             ):
                 enter(slide, sword=sword)
                 assert pad(18, 0x20) == slide
@@ -351,17 +388,56 @@ def replay(g, root, actor, form, weapon, set_action):
                 heading = reference.turn(slide, rush, yaw, facing)
                 assert (g.half(actor + 4076), g.half(actor + 5280)) == (heading, heading)
                 assert pad(12, stick=strength) == rush
-                assert tap(0x20, 22, stick=strength) == rush  # X is buffered from frame 22.
+                if follow_stick == 0:
+                    # Tap X and return to neutral before GU resolves the single key.
+                    assert pad(22, 0x20, stick=queue_stick) == rush
+                    assert g.get(actor + 5156) & (1 << 14) == 0
+                    assert pad(23) == rush
+                    assert g.get(actor + 5156) & (1 << 14)
+                else:
+                    assert tap(0x20, 22, stick=queue_stick) == rush
                 g.run(COMMAND_UPDATE, actor)
                 assert pad(33, stick=strength) == rush
                 assert g.half(actor + 4076) == heading
                 aim = (heading + yaw) & 0xffff
-                # FZ checks the live stick when the buffered X executes.
-                relative = -yaw if follow_stick >= 50 else 0
+                # A direction buffered with X survives neutral. A later
+                # direction only steers if it is still held on execution.
+                relative = 0
+                if follow_stick >= 50:
+                    relative = -yaw
+                elif queue_stick >= 50:
+                    relative = heading - (facing - yaw)
                 expected = reference.turn(hold, follow, relative, heading)
                 assert pad(34, stick=follow_stick) == follow
                 observed = g.half(actor + 4076), g.half(actor + 5280)
-                assert observed == (expected, expected), (slide, follow_stick, observed, expected)
+                assert observed == (expected, expected), (slide, queue_stick, follow_stick, observed, expected)
+
+        layout = g.get(0x1897F78) + 17518
+        for sword, slide, hold, uppercut in (
+            (False, 106, 123, 127), (False, 107, 124, 133),
+            (True, 152, 128, 134), (True, 153, 129, 135),
+        ):
+            if sword:
+                refill_light()
+            guard = 91 if sword else 89
+            aim = facing
+            for alternate, trigger in ((0, 0x800), (1, 0x40)):
+                g.cpu.mem_write(layout, bytes([alternate]))
+                for early_press in (False, True):
+                    enter(slide, sword=sword)
+                    assert pad(18, 0x20) == slide and pad(38, 0x20) == hold
+                    assert pad(40) == uppercut
+                    if early_press:
+                        assert pad(39, trigger) == uppercut
+                        assert pad(40, trigger) == uppercut
+                        assert pad(41) == uppercut
+                    else:
+                        defer_transition()
+                        assert pad(40, trigger) == uppercut
+                    assert pad(42, trigger if early_press else 0) == guard, (
+                        slide, alternate, early_press, state(),
+                    )
+        g.cpu.mem_write(layout, b"\0")
 
         camera_manager = g.get(0x2126504)
         original_camera = g.get(camera_manager + 84)
@@ -377,6 +453,26 @@ def replay(g, root, actor, form, weapon, set_action):
 
         g.stub(0x13EFD70, camera_atan2)
         try:
+            for sword, slide, hold, rush in ((False, 106, 123, 130), (True, 153, 129, 161)):
+                if sword:
+                    refill_light()
+                for yaw in (-0x4000, 0x4000):
+                    aim = facing
+                    enter(slide, sword=sword)
+                    assert pad(18, 0x20, stick=127) == slide
+                    assert pad(38, 0x20, stick=127) == hold
+                    g.cpu.mem_write(actor + 11990, b"\x01")
+                    g.put(actor + 12016, 0)
+                    assert pad(20, 0x20, stick=127) == hold
+                    g.cpu.mem_write(camera + 96, struct.pack("<3f", -yaw / 0x4000, 0, 0))
+                    g.put(camera_manager + 84, camera)
+                    assert pad(40, stick=127) == rush
+                    expected = reference.turn(slide, rush, yaw, facing)
+                    heading = g.half(actor + 4076), g.half(actor + 5280)
+                    assert heading == (expected, expected), (slide, yaw, heading, expected)
+                    g.put(camera_manager + 84, original_camera)
+                    g.cpu.mem_write(actor + 11990, b"\x00")
+
             for sword, rush, follow, old_yaw, new_yaw in (
                 (False, 130, 142, 0, 0x4000),
                 (True, 160, 29, 0x4000, 0),

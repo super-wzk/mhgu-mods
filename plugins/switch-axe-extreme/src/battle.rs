@@ -188,6 +188,7 @@ struct Battle {
     previous_action: Option<u8>,
     guard_slash: u32,
     branch_aim: Option<(u16, u16)>,
+    x_press_aim: Option<u16>,
     roll_followup: Option<u8>,
     packed: u16,
     model_motion: u8,
@@ -218,6 +219,7 @@ impl Battle {
             previous_action: None,
             guard_slash: 0,
             branch_aim: None,
+            x_press_aim: None,
             roll_followup: None,
             packed: 0,
             model_motion: program::AXE_IDLE_MOTION,
@@ -311,6 +313,7 @@ impl Battle {
             self.previous_action = previous;
             self.guard_slash = 0;
             self.branch_aim = None;
+            self.x_press_aim = None;
             self.roll_followup = None;
             // The sender can only enter the light-sword unlock with a full meter.
             if self.peer && is_light_unlock_opener(id) {
@@ -729,24 +732,40 @@ impl Battle {
                 self.cursor = None;
                 return true;
             }
+            let follows_fade_charge = self
+                .previous_action
+                .is_some_and(program::is_fade_slash_charge);
+            let stick_aim = direction.map(|yaw| read::<u16>(actor, 4076).wrapping_sub(yaw as u16));
+            let mut x_aim = None;
+            if follows_fade_charge {
+                // GU 27CA28 can wait for a chord before 11A03A8 reports X.
+                if read::<u16>(actor, 5112) & 0x20 != 0 {
+                    self.x_press_aim = stick_aim;
+                }
+                if bits & (1 << 2) != 0 {
+                    x_aim = self.x_press_aim.take();
+                } else if !pad::attack_combo_pending(actor) {
+                    self.x_press_aim = None;
+                }
+            }
+            let pending_before = c.pending_action();
             let next = c.branch(bits, eligible);
-            // FZ 81213F18 reads the live stick on release and on the next
-            // attack. A buffered X must not carry a turn through neutral.
-            let live_charge_aim = program::is_fade_slash_charge(state)
-                || self
-                    .previous_action
-                    .is_some_and(program::is_fade_slash_charge);
-            let pending_turn = c
-                .pending_action()
-                .filter(|&id| !live_charge_aim && program::accepts_side_turn(id));
-            self.branch_aim = match pending_turn {
-                Some(id) => direction
-                    .map(|yaw| (id, read::<u16>(actor, 4076).wrapping_sub(yaw as u16)))
-                    .or(self.branch_aim.filter(|&(target, _)| target == id)),
-                None => None,
-            };
-            let branch_yaw = self.branch_aim.map_or(yaw, |(_, aim)| {
-                read::<u16>(actor, 4076).wrapping_sub(aim) as i16
+            let pending_turn = c.pending_action().filter(|&id| {
+                !program::is_fade_slash_charge(state) && program::accepts_side_turn(id)
+            });
+            self.branch_aim = pending_turn.and_then(|id| {
+                // Only these X follow-ups can use the preceding filtered press.
+                let press_aim = x_aim.filter(|_| matches!(id, 29 | 41 | 138 | 142));
+                press_aim
+                    .or(stick_aim)
+                    .filter(|_| !follows_fade_charge || pending_before != Some(id))
+                    .map(|aim| (id, aim))
+                    .or(self.branch_aim.filter(|&(target, _)| target == id))
+            });
+            let branch_yaw = direction.unwrap_or_else(|| {
+                self.branch_aim.map_or(0, |(_, aim)| {
+                    read::<u16>(actor, 4076).wrapping_sub(aim) as i16
+                })
             });
             if let Some(id) = next
                 && self.accept_branch(actor, id, branch_yaw)

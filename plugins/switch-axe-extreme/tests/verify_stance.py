@@ -167,7 +167,17 @@ def replay(repo, root):
         g.cpu.mem_write(actor + 1280, struct.pack("<f", value))
         g.run(controller, actor, inputs)
 
+    defer_change = False
+
+    def defer_transition():
+        nonlocal defer_change
+        defer_change = True
+
     def change(_, group, slot, flags):
+        nonlocal defer_change
+        if defer_change:
+            defer_change = False
+            return 0
         set_action(group, slot)
         g.cpu.mem_write(actor + 9384, bytes(64))
         return 1
@@ -260,7 +270,7 @@ def replay(repo, root):
     roll_chains(g, actor, set_action, form)
 
     from verify_chains import replay as verify_chains
-    verify_chains(g, root, actor, form, weapon, set_action)
+    verify_chains(g, root, actor, form, weapon, set_action, defer_transition)
 
     layout = g.get(0x1897F78) + 17518
     g.cpu.mem_write(layout, b"\x01")
