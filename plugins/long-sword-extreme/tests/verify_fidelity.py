@@ -187,6 +187,52 @@ def replay(g, actor, descriptor, set_action, allow_transition):
     allow_transition(True)
     assert tick(22, -0x4000) == 77
     assert g.half(actor + 4076) == 0x4000
+    # The A counter thrust turns one 22.5 degree sector toward the stick when
+    # it executes; neutral, straight ahead and straight behind keep the facing.
+    for address, trig in ((0x13EFDE8, math.sin), (0x13EFDF4, math.cos)):
+        def imported_trig(*_, trig=trig):
+            reg = arm.UC_ARM_REG_S0
+            angle = struct.unpack("<f", struct.pack("<I", g.cpu.reg_read(reg)))[0]
+            g.cpu.reg_write(reg, struct.unpack("<I", struct.pack("<f", trig(angle)))[0])
+
+        stub(address, imported_trig)
+    g.cpu.mem_write(actor + 96, struct.pack("<3f", 1., 1., 1.))
+
+    def check_counter_pose(facing):
+        g.run(0x8A8384, actor)
+        g.run(0x890E20, actor)
+        angle = facing * math.tau / 65536
+        forward = struct.unpack("<3f", g.cpu.mem_read(actor + 208, 12))
+        assert math.dist(forward, (math.sin(angle), 0., math.cos(angle))) < 1e-5, forward
+
+    for source, yaw, strength, facing in (
+        (79, 0x4000, 120, 0xF000),
+        (80, -0x4000, 120, 0x1000),
+        (80, 0x8000, 120, 0),
+        (80, 0, 120, 0),
+        (80, 0x2000, 0, 0),
+        (80, 0x2000, 120, 0xF000),
+    ):
+        begin(source)
+        g.run(0x53A9FC, actor)
+        assert tick(10, 0x4000, weapon=4) == source
+        allow_transition(False)
+        assert tick(20, 0x4000) == source
+        assert g.half(actor + 4076) == 0
+        allow_transition(True)
+        assert tick(22, yaw, strength=strength) == 81
+        assert g.half(actor + 4076) == facing, (yaw, g.half(actor + 4076))
+        assert g.half(actor + 5280) == facing
+        # The new clip must already have its yaw before GU evaluates the pose.
+        check_counter_pose(facing)
+        # Simulate a native yaw write between ticks. The counter must retain
+        # its committed aim before the first blade effect at frame 36.
+        g.put(actor + 4076, 0)
+        g.put(actor + 5280, 0)
+        assert tick(36, -yaw) == 81
+        assert g.half(actor + 4076) == g.half(actor + 5280) == facing
+        g.run(0x53A9FC, actor)
+        check_counter_pose(facing)
     for yaw, facing in ((0x8000, 0), (0x4000, 0xF000), (-0x4000, 0x1000)):
         begin(0)
         # Buffer a neutral A first, then steer only on the execution frame.
@@ -464,23 +510,21 @@ def replay(g, actor, descriptor, set_action, allow_transition):
         g.cpu.hook_del(g.traps.pop(fn))
     g.stub(submit_attack, submit)
 
-    # A draw request can use the full gauge until the native sheath flag clears.
-    # Even a zero-time update with the flag clear must discard the whole gauge.
+    # Keep the full release tier after sheathed updates at zero and normal delta.
     drawn = [1]
     stub(0x2A2444, lambda *_: drawn[0])
-    for sheath_updates, expected in ((0, 84), (1, -0x8000)):
+    for sheath_delta in (0., 2.):
         begin(0)
         tick(56)
         for _ in range(32):
             g.run(g.hooks[0x119F574], actor, hit, target, 1)
         set_action(1, 0)
         drawn[0] = 0
-        put_float(actor + 28, 0)
-        for _ in range(sheath_updates):
-            tick(0)
+        put_float(actor + 28, sheath_delta)
+        tick(0)
         drawn[0] = 1
         state = tick(0, common=1 << 8)
-        assert state == expected, (sheath_updates, state)
+        assert state == 84, (sheath_delta, state)
 
     from verify_hud import replay as replay_hud
     replay_hud(g, actor, begin, tick, set_action, drawn, target, shape)

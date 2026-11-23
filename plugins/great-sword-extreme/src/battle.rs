@@ -1112,7 +1112,7 @@ pub(super) unsafe extern "C" fn guard_policy(
         result.write(guard::GuardResult {
             invulnerability: 8.,
             recoil: 0,
-            sharpness_power: 40,
+            sharpness_power: guard::GuardResult::NO_SHARPNESS_COST,
         });
         guard::Decision::Precise
     }

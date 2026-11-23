@@ -100,7 +100,7 @@ unsafe fn launch(slot: Slot, actor: u32, tier: usize, yaw: u16) {
                 shape.as_raw(),
                 [row.start, row.duration],
                 row.power,
-                row.source_hitstop,
+                mhfz_sdk::combat::attacker_hitstop(row.source_hitstop),
             );
         }
     }

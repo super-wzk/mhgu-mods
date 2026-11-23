@@ -2,7 +2,7 @@
 use crate::{battle, fx, native, program, read, sound, write};
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
-use mhfz_sdk::combat::HitWindow;
+use mhfz_sdk::combat::{HitWindow, attacker_hitstop};
 use mhgu_sdk::{
     combat::collision::{CachedHitShape, ContactPool},
     geometry::Angle,
@@ -74,10 +74,11 @@ pub unsafe fn strike(actor: u32, state: u8, id: u16, frame: f32, late: f32, defl
             shape: shape.as_raw(),
             no_sharpness_cost: u32::from(shield),
         };
+        let hitstop = attacker_hitstop(row.source_hitstop);
         if shield {
-            mhgu_sdk::style::action::stun::submit(actor, &attack, row.stun);
+            mhgu_sdk::style::action::stun::submit_with_hitstop(actor, &attack, row.stun, hitstop);
         } else {
-            attack.submit(actor);
+            attack.submit_with_hitstop(actor, hitstop);
         }
     }
 }

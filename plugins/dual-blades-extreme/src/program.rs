@@ -55,6 +55,7 @@ pub(super) struct Strike {
     pub duration: u16,
     pub power: u16,
     pub shape: u16,
+    pub source_hitstop: u8,
 }
 
 pub(super) fn strike(id: u16) -> Option<Strike> {
@@ -67,6 +68,7 @@ pub(super) fn strike(id: u16) -> Option<Strike> {
         duration: half(DATA, at + 2),
         power: half(DATA, at + 4),
         shape: half(DATA, at + 16),
+        source_hitstop: DATA[at + 29],
     })
 }
 

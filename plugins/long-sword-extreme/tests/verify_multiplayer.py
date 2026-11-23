@@ -71,7 +71,7 @@ def replay():
     )
     hdp = zlib.decompress(arc[off : off + size])
     assert hdp[16 + 56 + 38] == 26  # Stock w07 HDP row 1 awards native spirit.
-    blade_hitstop = hdp[16 + 56 + 37]
+    assert hdp[16 + 56 + 37] == 3  # Stock w07 HDP row 1 hitstop.
     raw, bank, vt = g.alloc(len(hdp)), g.alloc(112), g.alloc(80)
     g.cpu.mem_write(raw, hdp)
     g.put(bank, vt)
@@ -215,7 +215,7 @@ def replay():
             )
             assert struct.unpack("<2f", g.cpu.mem_read(hit + 92, 8)) == (0.0, 10.0)
             assert g.cpu.mem_read(hit + 87, 1) == b"\0", "Frontier blade inherited GU spirit gain"
-            verify_hitstop(hit, blade_hitstop)
+            verify_hitstop(hit, 1)  # FZ melee row 57 has one tick of hitstop.
             resolve_blade(p)
         for p in guests:
             serial = g.half(p + 12320 + 52)
@@ -273,7 +273,7 @@ def replay():
 
     # Independent hits must keep their own values even if the borrowed
     # template's hitstop differs from the installed w07 row.
-    byte(raw + 16 + 56 + 37, blade_hitstop + 1)
+    byte(raw + 16 + 56 + 37, 4)
     peers = [roster[1], roster[3]]
     for p in peers:
         receive(p, 77)
@@ -288,7 +288,7 @@ def replay():
     for hit in contacts:
         assert g.cpu.mem_read(hit + 87, 1) == b"\0"
         # Family 108 row 4 carries its own value instead of a blanket override.
-        verify_hitstop(hit, 3)
+        verify_hitstop(hit, 2)  # Convert three FZ ticks to six GU full-stop frames.
         z = 1000 * peers.index(g.get(hit + 12))
         offset = 8240 + 32 * g.get(hit + 28)
         assert struct.unpack("<B3x7f", g.cpu.mem_read(collision + offset, 32)) == (
@@ -378,7 +378,7 @@ def replay():
     print(
         "Concurrent peer instant slashes, departure and weapon-switch cleanup, two discharge waves per peer passed"
     )
-    print("GU native blade hitstop and individual path, wave and follow-up values passed")
+    print("GU blade and path hitstop from Frontier rows, zero wave and follow-up hitstop passed")
     print(
         "GU netPlAction send/receive, all guest slots, host without selected style, blade ownership, X miss/hit and HP settlement, three release hits passed"
     )

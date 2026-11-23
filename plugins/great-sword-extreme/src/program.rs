@@ -16,16 +16,27 @@ fn records(state: u8, field: usize, width: usize) -> &'static [u8] {
     let start = word(p + 4);
     &DATA[start..start + width * word(p)]
 }
-pub fn row(id: u16) -> Option<[u16; 3]> {
-    if id == RADIANCE {
-        let p = DATA.len() - 80;
-        return Some([half(DATA, p), half(DATA, p + 2), half(DATA, p + 4)]);
-    }
-    if usize::from(id) >= word(8) {
+pub struct Strike {
+    pub start: u16,
+    pub duration: u16,
+    pub power: u16,
+    pub source_hitstop: u8,
+}
+
+pub fn strike(id: u16) -> Option<Strike> {
+    let at = if id == RADIANCE {
+        DATA.len() - 80
+    } else if usize::from(id) < word(8) {
+        word(12) + 40 * usize::from(id)
+    } else {
         return None;
-    }
-    let p = word(12) + 40 * usize::from(id);
-    Some([half(DATA, p), half(DATA, p + 2), half(DATA, p + 4)])
+    };
+    Some(Strike {
+        start: half(DATA, at),
+        duration: half(DATA, at + 2),
+        power: half(DATA, at + 4),
+        source_hitstop: DATA[at + 29],
+    })
 }
 pub const RADIANCE: u16 = 0xff08;
 pub fn radiance_capsule() -> (f32, [[f32; 3]; 2]) {

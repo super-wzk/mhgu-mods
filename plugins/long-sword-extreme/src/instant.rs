@@ -143,7 +143,7 @@ pub(super) unsafe fn collision_pass(slot: Slot, manager: u32) {
                 shape.as_raw(),
                 [row.start, row.duration],
                 row.power,
-                row.source_hitstop,
+                mhfz_sdk::combat::attacker_hitstop(row.source_hitstop),
             );
             contact.set_window(f32::from(row.start), remaining);
         }

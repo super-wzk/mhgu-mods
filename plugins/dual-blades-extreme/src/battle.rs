@@ -948,7 +948,9 @@ unsafe fn submit_strike(actor: u32, state: u8, strike_id: u16, late: f32, swap_h
         shape: 0,
         no_sharpness_cost: 0,
     };
-    unsafe { attack.submit(actor) };
+    unsafe {
+        attack.submit_with_hitstop(actor, mhfz_sdk::combat::attacker_hitstop(row.source_hitstop));
+    }
 }
 
 struct LocalBattle(UnsafeCell<Option<Battle>>);

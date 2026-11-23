@@ -157,15 +157,17 @@ unsafe fn reaction(actor: u32, recoil: u32, impact: u32, damage: *mut i32) -> u3
 #[forge::hook(offset = 0x2ad288)]
 unsafe fn sharpness(actor: u32, amount: i32, fixed: u32) -> u32 {
     unsafe {
-        if amount < 0
-            && fixed == 0
-            && pending(actor)
-            && ((actor + 12820) as *const u16).read() & 0x20 == 0
-        {
-            let power: unsafe extern "C" fn(u32) -> u32 =
-                core::mem::transmute(forge::mem::text_addr() + 0x2f4a2c);
-            if power(actor) < SHARPNESS_POWER.load(Relaxed) {
+        if amount < 0 && fixed == 0 && pending(actor) {
+            let threshold = SHARPNESS_POWER.load(Relaxed);
+            if threshold == GuardResult::NO_SHARPNESS_COST {
                 return 0;
+            }
+            if ((actor + 12820) as *const u16).read() & 0x20 == 0 {
+                let power: unsafe extern "C" fn(u32) -> u32 =
+                    core::mem::transmute(forge::mem::text_addr() + 0x2f4a2c);
+                if power(actor) < threshold {
+                    return 0;
+                }
             }
         }
     }

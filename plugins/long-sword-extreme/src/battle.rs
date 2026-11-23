@@ -120,6 +120,7 @@ pub(super) struct Battle {
     discharge_lead: u16,
     discharge_frame: f32,
     discharge_yaw: u16,
+    counter_yaw: Option<u16>,
     thrust_released: bool,
     side_sample: i16,
     side_turn: i16,
@@ -293,6 +294,7 @@ impl Battle {
         GUARD_FRAME.store(0, Relaxed);
         self.deflected = false;
         self.thrust_released = false;
+        self.counter_yaw = None;
         self.side_turn = 0;
         self.evade_yaw = None;
         self.poise = false;
@@ -332,7 +334,7 @@ impl Battle {
             if !action::accept_custom_start(actor, state) {
                 return false;
             }
-            if let Some(yaw) = facing {
+            if state != 81 && let Some(yaw) = facing {
                 movement::set_facing(actor, yaw);
             }
             if (54..=65).contains(&state) {
@@ -346,6 +348,9 @@ impl Battle {
                 change_spirit(actor, -program::DASH_COST);
             }
             self.clear_action();
+            if state == 81 {
+                self.counter_yaw = facing;
+            }
             if state == 72 {
                 self.dash_slash = Some(fx::DashSlash::new(self.slot, charged_slash));
             }
@@ -388,6 +393,11 @@ impl Battle {
                 movement::set_facing(actor, aim(actor));
                 self.sprint_buffer = 0.;
                 self.spirit_hold = None;
+            }
+            if let Some(yaw) = self.counter_yaw {
+                movement::set_facing(actor, yaw);
+                // Refresh GU's model rotation before clip 1452 samples its start pose.
+                native!(0x53a9fc, actor);
             }
             self.play_step(actor);
             if (54..=65).contains(&state) {
@@ -621,7 +631,10 @@ impl Battle {
             };
             let offset = match id {
                 112 => (yaw as u16).wrapping_neg(),
-                87..=102 | 113 => (side(yaw) * -4096) as u16,
+                // 811D5188 turns one 1/16 turn toward the stick when a buffered
+                // branch executes. The counter thrust takes that single 22.5
+                // degree step, the same adjustment as the great sword's release.
+                81 | 87..=102 | 113 => (side(yaw) * -4096) as u16,
                 _ => 0,
             };
             let facing = (offset != 0).then(|| read::<u16>(actor, 4076).wrapping_add(offset));
@@ -867,6 +880,9 @@ impl Battle {
                 action::melee::clear_hitstop(actor);
                 return true;
             }
+            if let Some(yaw) = self.counter_yaw {
+                movement::set_facing(actor, yaw);
+            }
             let c = self.cursor.as_mut().unwrap();
             let sample = action::MotionFrame::sample(actor);
             let frame = sample.frame;
@@ -1072,7 +1088,7 @@ impl Battle {
             }
             let custom = action::custom_id(current.0, current.1);
             let drawn = native!(0x2a2444, actor) != 0;
-            if !drawn || read::<i16>(actor, 5078) <= 0 {
+            if read::<i16>(actor, 5078) <= 0 {
                 CUT.store(0, Relaxed);
                 CUT_FLASH.store(0, Relaxed);
             }
@@ -1277,7 +1293,7 @@ unsafe fn strike(slot: Slot, actor: u32, id: u16, frame: f32, late: f32) {
             shape: shape.as_raw(),
             no_sharpness_cost: 0,
         };
-        if attack.submit(actor) {
+        if attack.submit_with_hitstop(actor, mhfz_sdk::combat::attacker_hitstop(row.source_hitstop)) {
             collision::clear_native_spirit(actor + BLADE_CONTACT);
             if slot == LOCAL {
                 STRIKE.store(u32::from(id), Relaxed);

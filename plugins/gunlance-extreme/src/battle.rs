@@ -433,7 +433,10 @@ impl Battle {
                                 shape: 0,
                                 no_sharpness_cost: u32::from(heat_blade),
                             }
-                            .submit(actor);
+                            .submit_with_hitstop(
+                                actor,
+                                mhfz_sdk::combat::attacker_hitstop(row.source_hitstop),
+                            );
                         }
                     }
                     12 => {

@@ -140,6 +140,7 @@ pub struct Strike {
     pub start: u16,
     pub duration: u16,
     pub power: u16,
+    pub source_hitstop: u8,
 }
 
 pub fn strike(id: u16) -> Option<Strike> {
@@ -151,6 +152,7 @@ pub fn strike(id: u16) -> Option<Strike> {
         start: half(at),
         duration: half(at + 2),
         power: half(at + 4),
+        source_hitstop: DATA[at + 29],
     })
 }
 

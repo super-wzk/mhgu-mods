@@ -99,6 +99,7 @@ pub struct Strike {
     pub power: u16,
     pub shape: u16,
     pub stun: u8,
+    pub source_hitstop: u8,
 }
 pub fn strike(id: u16) -> Option<Strike> {
     if u32::from(id) >= word(8) {
@@ -111,6 +112,7 @@ pub fn strike(id: u16) -> Option<Strike> {
         power: half(at + 4),
         shape: half(at + 16),
         stun: DATA[at + 33],
+        source_hitstop: DATA[at + 29],
     })
 }
 const PARAM: usize = DATA.len() - 64;

@@ -157,6 +157,7 @@ pub struct Strike {
     pub duration: u16,
     pub power: u16,
     pub shape: usize,
+    pub source_hitstop: u8,
 }
 pub fn strike(burst: bool, id: u16) -> Option<Strike> {
     let (base, count) = if burst {
@@ -173,6 +174,7 @@ pub fn strike(burst: bool, id: u16) -> Option<Strike> {
         duration: half(row + 2),
         power: half(row + 4),
         shape: usize::from(half(row + 16)),
+        source_hitstop: DATA[row + 29],
     })
 }
 

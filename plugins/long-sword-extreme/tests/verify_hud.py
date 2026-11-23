@@ -344,10 +344,11 @@ def replay(g, actor, begin, tick, set_action, drawn, target, shape):
     assert len(set(stages)) > 4
     assert min(sampled_shades) == 32 and max(sampled_shades) == 255
     assert sampled_shades[0:13] == sampled_shades[20:33]
+    # The Extreme style keeps the cut gauge across sheathing.
     drawn[0] = 0
     tick(0)
     draw()
-    assert cell() == 0
+    assert cell() >= 60, cell()
     drawn[0] = 1
 
     # Lose ownership of the HUD, then rebind the same widget.

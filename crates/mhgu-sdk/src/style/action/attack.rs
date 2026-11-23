@@ -68,24 +68,31 @@ impl Attack {
         unsafe { super::super::registry::submit_attack(actor, self) }
     }
 
-    /// Submit a strike and scale its native attacker hitstop factor.
+    /// Submit a strike with an explicit GU attacker hitstop factor.
     ///
     /// # Safety
     /// The actor and shape must satisfy the requirements of `submit`.
-    /// The scale must be finite and nonnegative.
-    pub unsafe fn submit_with_hitstop_scale(&self, actor: u32, scale: f32) -> bool {
+    pub unsafe fn submit_with_hitstop(&self, actor: u32, factor: u8) -> bool {
         unsafe {
             if !self.submit(actor) {
                 return false;
             }
-            let hand = usize::from(self.flags & Self::SECONDARY != 0);
-            let hit = actor + super::melee::BLADE_CONTACT_OFFSETS[hand];
-            // GU 168960 has decoded HDP byte 37. Scale the resulting
-            // contact value so 16DB68 still chooses the native reaction.
-            let factor = (hit + 108) as *mut u8;
-            factor.write((f32::from(factor.read()) * scale + 0.5) as u8);
+            self.set_attacker_hitstop(actor, factor);
             true
         }
+    }
+
+    unsafe fn set_attacker_hitstop(&self, actor: u32, factor: u8) {
+        let hand = usize::from(self.flags & Self::SECONDARY != 0);
+        let hit = actor + super::melee::BLADE_CONTACT_OFFSETS[hand];
+        let factor = if self.flags & Self::NO_ATTACKER_HITSTOP != 0 {
+            0
+        } else {
+            factor
+        };
+        // GU 168960 has decoded HDP byte 37. Leave the template and all
+        // other contact properties intact so 16DB68 selects the reaction.
+        unsafe { ((hit + 108) as *mut u8).write(factor) };
     }
 }
 
@@ -114,5 +121,19 @@ pub mod stun {
         service::on_game_thread()
             && unsafe { service::find::<Service>(NAME, MAGIC) }
                 .is_some_and(|api| unsafe { (api.0)(actor, attack, buildup) != 0 })
+    }
+
+    /// Submit a strike with its custom KO buildup and GU attacker hitstop.
+    ///
+    /// # Safety
+    /// Same actor, shape and thread requirements as `Attack::submit`.
+    pub unsafe fn submit_with_hitstop(actor: u32, attack: &Attack, buildup: u8, factor: u8) -> bool {
+        unsafe {
+            if !submit(actor, attack, buildup) {
+                return false;
+            }
+            attack.set_attacker_hitstop(actor, factor);
+            true
+        }
     }
 }

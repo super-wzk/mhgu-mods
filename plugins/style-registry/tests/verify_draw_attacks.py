@@ -121,6 +121,9 @@ def ground_draws():
         # GU's sheathed-run slot 73 becomes the Frontier dash slash.
         (11, 2, "dual-blades", 0x174F2B4, None, 73, 82, (4,), 8, 1, []),
     )
+    # Converted SDT hitstop by state, including the paired shield/blade opener.
+    factors = {(1, 9): (0, 1), (8, 10): (2,), (8, 4): (1,), (9, 20): (1,),
+               (11, 16): (1, 1), (11, 82): (1,)}
     for weapon, style, name, vt, route, kind, state, frames, ko, hits, other in cases:
         s = DrawScene(weapon, style, name, vt)
         for drawn, skills in ((False, {91}), (False, {92}), (False, {91, 92}), (True, {91, 92})):
@@ -133,11 +136,33 @@ def ground_draws():
             else:
                 s.draw(route, kind)
             assert s.active() == 0x8000 + state, (name, hex(s.active()))
-            contacts = [hit for frame in frames for hit in s.frame(frame)]
+            contacts = []
+            hitstop = []
+            for frame in frames:
+                contacts.extend(s.frame(frame))
+                hitstop.extend(s.g.cpu.mem_read(hit + 108, 1)[0] for hit in s.hits)
             affinity = 100 if 91 in skills and not drawn else 0
             stun = ko if 92 in skills and not drawn else 0
             expected = other + [(affinity, stun)] * hits
             assert contacts == expected, (name, drawn, skills, contacts, expected)
+            assert tuple(hitstop) == factors[weapon, state], (name, state, hitstop)
+
+
+def aerial_hitstop():
+    s = DrawScene(11, 2, "dual-blades", 0x174F2B4)
+    s.idle(True)
+    s.change(16, 0x8000 + 78)
+    s.frame(0)
+    for frame, hand in ((24, 12320), (30, 12504), (38, 12320), (46, 12504), (54, 12320)):
+        s.frame(frame)
+        assert s.hits == [s.actor + hand], (frame, s.hits)
+        hit = s.hits[0]
+        # SDT rows 242/243 both carry two ticks. Native HDP 61/62 differ.
+        assert s.g.cpu.mem_read(hit + 108, 1) == b"\x01"
+        s.g.cpu.mem_write(hit + 6, b"\x04")
+        s.g.run(0x16DB68, 0, hit)
+        assert struct.unpack("<2f", s.g.cpu.mem_read(s.actor + 10156, 8)) == (3., 0.)
+        s.g.cpu.mem_write(s.actor + 10156, bytes(8))
 
 
 def axe_charge():
@@ -190,5 +215,6 @@ def axe_charge():
 
 if __name__ == "__main__":
     ground_draws()
+    aerial_hitstop()
     axe_charge()
     print("GU draw skills: blade affinity, conditional KO and Switch Axe charge releases passed")

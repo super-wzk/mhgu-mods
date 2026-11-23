@@ -1440,14 +1440,16 @@ def verify_battle(g, p, remote, resources):
     # Run the real GU sharpness consumer and equipment skill rules. Only the
     # scene's sharpness-colour table is supplied; no post-hit refund is used.
     g.stub(0x29CDFC, lambda *_: 0)
-    for power, flags, amount, loss in ((14, 0, -1, 0), (39, 0, -2, 0),
-                                       (40, 0, -10, 10), (20, 0x20, -2, 2)):
-        assert guard(8, 1, False, (power, flags, amount, loss)) == 1
+    for power, amount in ((14, -1), (39, -2), (40, -10), (255, -10)):
+        assert guard(8, 1, False, (power, 0, amount, 0)) == 1
+    skills.add(171)
+    assert guard(8, 1, False, (60, 0x20, -10, 0), hit_flags=0x20) == 1
+    skills.clear()
     skills.add(169)
     assert guard(8, 1, False, (49, 0, -2, 0)) == 1
     skills.clear()
     skills.add(85)
-    assert guard(8, 1, False, (40, 0, -10, 5)) == 1
+    assert guard(8, 1, False, (40, 0, -10, 0)) == 1
     skills.clear()
     assert guard(32, 1, False, (20, 0, -2, 2)) == 0
     assert guard(8, 1, False) == 1
@@ -1552,6 +1554,7 @@ def verify_battle(g, p, remote, resources):
     tick(86)
     hit = p + 12320
     assert value() == 200 and not whiff() and not units
+    assert g.cpu.mem_read(hit + 108, 1) == b"\x03"  # FZ melee row 247 has five ticks.
     assert hitstop_rates() == (0x3E4CCCCD, 0)  # Blade contact: 0.2x or stopped.
     shape = resources[r"player\hit\frontier_gs\guard_counter"]
     assert g.get(hit + 132) == shape and g.get(hit + 136) == 0

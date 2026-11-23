@@ -76,7 +76,6 @@ pub(super) struct Strike {
     pub duration: u16,
     pub power: u16,
     pub spirit: u8,
-    // Independent contacts read the exported value. Blade contacts use the GU template.
     pub source_hitstop: u8,
     pub shape: u16,
 }

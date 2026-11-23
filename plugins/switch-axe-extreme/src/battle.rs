@@ -141,12 +141,8 @@ unsafe fn strike(actor: u32, burst: bool, id: u16, frame: f32, late: f32, in_are
             shape: shape.as_raw(),
             no_sharpness_cost: u32::from(burst),
         };
-        let submitted = if !burst && matches!(id, 37..=39 | 49..=51) {
-            // FZ family 106 gives fade slashes hitstop 1 and the axe slash 3.
-            attack.submit_with_hitstop_scale(actor, 1. / 3.)
-        } else {
-            attack.submit(actor)
-        };
+        let submitted =
+            attack.submit_with_hitstop(actor, mhfz_sdk::combat::attacker_hitstop(row.source_hitstop));
         if submitted && !burst {
             let kind = u32::from(!sword_pose) | (u32::from(program::counts_for_discharge(id)) << 1);
             if OWNER.load(Relaxed) == actor {

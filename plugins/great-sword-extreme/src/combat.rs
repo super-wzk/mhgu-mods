@@ -1,6 +1,6 @@
 //! Register Frontier move events through GU's shared weapon collision volume.
 
-use mhfz_sdk::combat::HitWindow;
+use mhfz_sdk::combat::{HitWindow, attacker_hitstop};
 use mhgu_sdk::{
     combat::collision::{CachedHitShape, Contact, HitShape},
     style::action::Attack,
@@ -21,9 +21,9 @@ pub(super) unsafe fn preload() {
 /// FZ 81DBE87E subtracts the current motion frame from a nonzero SDT start
 /// frame. A zero start uses the event time instead.
 pub(super) unsafe fn emit(player: u32, source: u16, late: f32, deflectable: bool) -> Option<u32> {
-    let [start, length, power] = crate::program::row(source)?;
+    let row = crate::program::strike(source)?;
     let frame = unsafe { *((player + 1280) as *const f32) };
-    let HitWindow { delay, duration } = HitWindow::new(start, length, frame, late)?;
+    let HitWindow { delay, duration } = HitWindow::new(row.start, row.duration, frame, late)?;
     unsafe {
         if *((player + 12696) as *const u32) == 0 || *((player + 12700) as *const u32) == 0 {
             return None;
@@ -51,14 +51,14 @@ pub(super) unsafe fn emit(player: u32, source: u16, late: f32, deflectable: bool
         }
         let registered = Attack {
             template,
-            power,
+            power: row.power,
             delay,
             duration,
             flags,
             shape,
             no_sharpness_cost: u32::from(radiance),
         }
-        .submit(player);
+        .submit_with_hitstop(player, attacker_hitstop(row.source_hitstop));
         shape_override
             .filter(|_| registered)
             .map(|shape| shape.as_raw())

@@ -7,9 +7,14 @@ pub struct GuardResult {
     pub invulnerability: f32,
     /// Native recoil tier. Tier zero prevents chip damage.
     pub recoil: u32,
-    /// Minimum effective power for sharpness loss. Guard Up hits retain the
-    /// native cost regardless of power.
+    /// Minimum effective power for sharpness loss on ordinary hits, or
+    /// [`Self::NO_SHARPNESS_COST`] to waive the cost for every accepted hit.
     pub sharpness_power: u32,
+}
+
+impl GuardResult {
+    /// Waive sharpness loss on a precise block, including Guard Up hits.
+    pub const NO_SHARPNESS_COST: u32 = 0x8000_0000;
 }
 
 #[repr(u32)]
