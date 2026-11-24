@@ -277,7 +277,7 @@ def round_force(s, waves, load, shape):
             assert min(px for px, _ in starts) < x < max(px for px, _ in starts)
             assert min(pz for _, pz in starts) < z < max(pz for _, pz in starts)
 
-    def run(actor, tier, active, marked=True):
+    def run(actor, tier, oil, chaos, power, marked=True, expires=False):
         group, slot = commands[tier]
         s.action(group, slot)
         g.cpu.mem_write(actor + 9478, struct.pack("<H2xH", group, slot))
@@ -289,9 +289,12 @@ def round_force(s, waves, load, shape):
                 g.run(g.hooks[0x1FED90], packet, a, 0x40)
                 assert g.get(packet + 16) == 9 << 16
             g.run(g.hooks[0x1FF308], packet, peer)
-            g.put(peer + 10340, 8 if active else 0)
+            g.put(peer + 10336, 1 << (oil - 1) if oil else 0)
+            g.put(peer + 10340, 8 if chaos else 0)
         else:
-            g.put(a + 13100, 7)
+            g.put(a + 13096, oil)
+            g.put(a + 13104, float_bits(80))
+            g.put(a + 13100, 7 if chaos else 0)
             g.put(a + 13108, float_bits(80))
         waves.clear()
         visuals.clear()
@@ -301,29 +304,36 @@ def round_force(s, waves, load, shape):
         g.put(actor + 5328, float_bits(first - 1))
         g.run(0x1169A7C, actor)
         assert not waves
-        if actor == a and not active:
+        if expires:
             g.put(a + 13108, 0)  # expires between windup and first strike
         for i, frame in enumerate(events[15 + tier], start=1):
             g.put(actor + 5328, float_bits(frame))
             g.run(0x1169A7C, actor)
             g.run(0x1169A7C, actor)
             assert g.get(actor + 12716) == i
-            assert [power for _, power in waves] == ([16] if active and marked else [])
-        if active and marked:
+            assert [mv for _, mv in waves] == ([power] if power and marked else [])
+        if power and marked:
             check_ring(actor, tier, waves[0][0])
         else:
             assert not visuals
 
     for tier in range(3):
-        run(a, tier, True)
-        run(a, tier, False)
-    run(peer, 1, True)
-    run(peer, 1, True, marked=False)
-    run(peer, 2, False)
-    print("Round Force I/II/III: one wave at the first native hit, expiry and peer style marker passed")
+        run(a, tier, 4, True, 16)
+        run(a, tier, 4, False, 8)
+        run(a, tier, 0, True, 0, expires=True)
+    run(a, 1, 4, True, 8, expires=True)
+    run(a, 1, 3, True, 8)
+    run(peer, 1, 4, True, 16)
+    run(peer, 1, 4, False, 8)
+    run(peer, 1, 3, True, 8)
+    run(peer, 1, 4, True, 16, marked=False)
+    run(peer, 2, 3, False, 0)
+    print("Round Force I/II/III: first hit, oil stacking, expiry and peer style marker passed")
 
 
 def replay():
+    from unicorn import arm_const
+
     s = Scene(1, 5, "sword-shield", 0x174A354)
     g, a = s.g, s.actor
     hits, waves = [], []
@@ -388,40 +398,61 @@ def replay():
         s.tick()
         return g.half(a + 9482)
 
-    def start(oil, remaining):
+    def start(oil, remaining, item=0, item_remaining=80):
         g.run(s.controller, 0, 0)
         s.action(1, 0)
         g.put(a + 13100, oil)
         g.put(a + 13108, float_bits(remaining))
+        g.put(a + 13096, item)
+        g.put(a + 13104, float_bits(item_remaining))
         hits.clear()
         waves.clear()
         return tick(0, 1 << 22)
 
-    # Ordinary oils, an expired Chaos Oil, and all three successful native applications.
-    for oil, remaining in [(0, 0), (1, 60), (4, 60), (5, 0), (5, 80), (6, 80), (7, 80)]:
-        active = oil >= 5 and remaining > 0
-        if active:
-            s.action(16, 52 + oil - 5)
-            g.cpu.mem_write(a + 5, b"\1")
-            g.put(a + 13100, 0)
-            s.stub(0x280C1C, lambda *_: 0)
-            g.run(0x116D608, a, oil - 5)
-            assert g.get(a + 13100) == 0
-            s.stub(0x280C1C, lambda *_: 1)
-            g.run(0x116D608, a, oil - 5)
-            assert (g.get(a + 13100), g.get(a + 13108)) == (
-                oil,
-                float_bits([8100, 10800, 7200][oil - 5]),
-            )
-        assert start(oil, remaining) == 0x8000 + (55 if active else 2)
+    def apply_mind_eye():
+        # GU's item effect 0x61 passes oil kind 4 and its duration to 30305C.
+        g.cpu.reg_write(arm_const.UC_ARM_REG_S0, float_bits(80))
+        g.run(0x30305C, a, 4, 0)
+
+    # Each Chaos Oil tier commits on the native cue without replacing the item oil.
+    for oil in (5, 6, 7):
+        s.action(16, 52 + oil - 5)
+        g.cpu.mem_write(a + 5, b"\1")
+        g.put(a + 13100, 0)
+        apply_mind_eye()
+        s.stub(0x280C1C, lambda *_: 0)
+        g.run(0x116D608, a, oil - 5)
+        assert g.get(a + 13100) == 0
+        s.stub(0x280C1C, lambda *_: 1)
+        g.run(0x116D608, a, oil - 5)
+        assert (g.get(a + 13100), g.get(a + 13108)) == (
+            oil,
+            float_bits([8100, 10800, 7200][oil - 5]),
+        )
+        assert (g.get(a + 13096), g.get(a + 13104)) == (4, float_bits(80))
+        chaos_remaining = g.get(a + 13108)
+        g.put(a + 13096, 0)
+        g.put(a + 13104, 0)
+        apply_mind_eye()
+        assert (g.get(a + 13096), g.get(a + 13104)) == (4, float_bits(80))
+        assert (g.get(a + 13100), g.get(a + 13108)) == (oil, chaos_remaining)
+    for item, oil, power in (
+        (0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0), (4, 0, 8),
+        (0, 5, 8), (0, 6, 8), (0, 7, 8),
+        (1, 7, 8), (2, 7, 8), (3, 7, 8),
+        (4, 5, 16), (4, 6, 16), (4, 7, 16),
+    ):
+        assert start(oil, 80, item) == 0x8000 + (55 if power else 2)
         assert g.half(a + 1204) == 1405
         tick(29)
         assert not waves
         tick(31)
         tick(31)
         assert [h[1] for h in hits] == [31]
-        assert [power for _, power in waves] == ([16] if active else [])
-    # A remote w01 reconstructs Chaos Oil from the replicated status word.
+        assert [mv for _, mv in waves] == ([power] if power else [])
+    assert start(0, 0, 4, 0) == 0x8002
+    assert start(5, 0) == 0x8002
+    # A remote w01 reconstructs both oils from the replicated status word.
     peer = s.remote
     g.put(peer, 0x174A354)
     g.put(g.get(0x1885B58) + 32, peer)
@@ -429,13 +460,18 @@ def replay():
     g.put(peer + 1284, float_bits(240))
     g.put(peer + 28, float_bits(2))
     g.put(peer + 12700, shape)
-    for level in (0, 5, 6, 7):
+    for item, level, power in ((0, 0, 0), (4, 0, 8), (0, 5, 8), (3, 6, 8), (4, 7, 16)):
+        g.put(a + 10336, 0)
         g.put(a + 10340, 0)
+        g.put(a + 13096, item)
+        g.put(a + 13104, float_bits(100))
         g.put(a + 13100, level)
         g.put(a + 13108, float_bits(100))
         g.run(0x1168EEC, a)
         status = g.get(a + 10340)
         assert status == (1 << (level - 4) if level else 0)
+        assert g.get(a + 10336) == (1 << (item - 1) if item else 0)
+        g.put(peer + 10336, g.get(a + 10336))
         g.put(peer + 10340, status)
         assert g.get(peer + 13108) == 0
         g.cpu.mem_write(peer + 9478, struct.pack("<H2xH", 16, 0x8037))
@@ -444,10 +480,19 @@ def replay():
         g.run(g.hooks[0x2B8178], peer)
         g.put(peer + 1280, float_bits(30))
         g.run(g.hooks[0x2B8178], peer)
-        assert [power for _, power in waves] == ([16] if level else [])
+        assert [mv for _, mv in waves] == ([power] if power else [])
     g.put(g.get(0x1885B58) + 32, 0)
     assert start(5, 80) == 0x8037
     g.put(a + 13108, 0)
+    tick(30)
+    assert not waves
+    for timer in (13104, 13108):
+        assert start(5, 80, 4) == 0x8037
+        g.put(a + timer, 0)
+        tick(30)
+        assert [mv for _, mv in waves] == [8]
+    assert start(0, 0, 4) == 0x8037
+    g.put(a + 13104, 0)
     tick(30)
     assert not waves
     assert start(7, 80) == 0x8037
@@ -515,7 +560,7 @@ def replay():
         assert g.half(a + 1204) == 1448
         assert tick(30, command) == 0x8000 + dest
     print(
-        "GU w01: all oil levels and interruption, 31+16 independent contacts, expiry, buffered slash and shield loop passed"
+        "GU w01: oil application and stacking, 31+8/16 independent contacts, expiry, buffered slash and shield loop passed"
     )
     round_force(s, waves, load, shape)
 

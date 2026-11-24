@@ -83,9 +83,15 @@ mod entry {
             forge::log::prelude::warn!("Extreme Switch Axe: missing style registry");
             return;
         };
-        if let Err(error) =
-            registry.register(&EXTREME, c"极之型斩斧 F", c"怪物猎人边境极之型斩斧 F。")
-        {
+        if let Err(error) = registry.register(
+            &EXTREME,
+            c"极之型斩斧 F",
+            c"吸收怪物攻击可积蓄光剑槽。\r\n\
+              剑鬼形态回满光剑槽并拔出光剑，\r\n\
+              保留斩击槽并回复基础25点。\r\n\
+              能量累积回复斩击槽。\r\n\
+              详见猎人笔记的武器操作指南。",
+        ) {
             forge::log::prelude::warn!("Extreme Switch Axe registration failed: {error:?}");
             return;
         }

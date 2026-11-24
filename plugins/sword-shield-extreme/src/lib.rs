@@ -91,7 +91,11 @@ mod entry {
         if let Err(err) = registry.register(
             &STYLE,
             c"极之型单手剑",
-            c"持刀冲刺、回避攻击与盾击连段。混沌刃药强化回旋斩。",
+            c"回旋斩及同名狩技可各发一道真空波。\r\n\
+              心眼、混沌刃药单用动作值8，叠加16。\r\n\
+              真空波造成50%属性伤害与异常积蓄。\r\n\
+              跳步和回避斩均可累积刃鳞。\r\n\
+              详见猎人笔记的武器操作指南。",
         ) {
             forge::log::prelude::warn!("Extreme SnS registration failed: {err:?}");
             return;

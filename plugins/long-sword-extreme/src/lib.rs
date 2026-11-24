@@ -139,8 +139,15 @@ mod entry {
             forge::log::prelude::warn!("Extreme LS disabled: style registry unavailable at init");
             return;
         };
-        if let Err(err) = registry.register(&EXTREME, c"极之型太刀", c"怪物猎人边境极之型太刀。")
-        {
+        if let Err(err) = registry.register(
+            &EXTREME,
+            c"极之型太刀",
+            c"樱花气刃斩首次命中增加425点斩槽。\r\n\
+              练气解放圆月斩期间，极型招式\r\n\
+              不消耗练气。集中影响蓄力与积槽。\r\n\
+              化解受防御性能与防御强化影响。\r\n\
+              详见猎人笔记的武器操作指南。",
+        ) {
             forge::log::prelude::warn!("Extreme LS registration failed: {err:?}");
             return;
         }

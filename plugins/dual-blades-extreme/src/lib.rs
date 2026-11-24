@@ -105,8 +105,15 @@ mod entry {
             forge::log::prelude::warn!("Extreme DB disabled: style registry unavailable at init");
             return;
         };
-        if let Err(err) = registry.register(&EXTREME, c"极之型双剑", c"怪物猎人边境极之型双剑。")
-        {
+        if let Err(err) = registry.register(
+            &EXTREME,
+            c"极之型双剑",
+            c"刃打最多叠四层，连段中可延续。\r\n\
+              真鬼人和极鬼人的回避斩计入刃鳞。\r\n\
+              兽魂附身【饿狼】的左右手追击\r\n\
+              首次命中怪物时各回复1点体力。\r\n\
+              详见猎人笔记的武器操作指南。",
+        ) {
             forge::log::prelude::warn!("Extreme DB registration failed: {err:?}");
             return;
         }

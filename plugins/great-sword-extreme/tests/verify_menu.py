@@ -2,7 +2,16 @@
 
 import struct
 
-from verify_style import CONFIG, MENU_OPEN, MENU_UPDATE, REPO, STATUS_STYLE, STATUS_STYLE_SMALL, boot, hunters, service, style_descriptor
+from verify_style import CONFIG, MENU_OPEN, MENU_UPDATE, REPO, STATUS_STYLE, STATUS_STYLE_SMALL, boot, hunters, load_registered_style, service, style_descriptor
+
+MANUAL_HINT = "详见猎人笔记的武器操作指南。"
+GREAT_SWORD_DETAILS = (
+    "精准防御成功不耗耐力与锋利度。\r\n"
+    "挡住怪物攻击三次可发动辉烈剑。\r\n"
+    "蓄力或挥剑时可用不动抵抗硬直。\r\n"
+    "兽魂附身强化下一次有效攻击。\r\n"
+    + MANUAL_HINT
+)
 
 
 def verify_status(g):
@@ -31,7 +40,7 @@ def verify_status(g):
         g.put(ui + 76, equipment)
         g.run(g.hooks[STATUS_STYLE_SMALL], ui)
         assert labels[0x5C, 1] == labels[0x14, 1] == labels[0x69, 2] == expected
-        assert labels[0x14, 2] == ("怪物猎人边境极之型大剑。" if expected == "极之型大剑" else "GU text")
+        assert labels[0x14, 2] == (GREAT_SWORD_DETAILS if expected == "极之型大剑" else "GU text")
 
 
 def verify():
@@ -114,6 +123,7 @@ def verify():
     for _ in range(2):
         press(0x40)
     assert row() == 6 and labels[info, 2, 2] == "极之型大剑"
+    assert labels[info, 3, 2] == GREAT_SWORD_DETAILS
     assert press(0x2000) == 2 and g.run(selected, 0) == 0
     press(0x20)  # highlight No
     assert press(0x2000) == 1 and row() == 6 and g.run(selected, 0) == 0
@@ -163,8 +173,35 @@ def verify():
     g.cpu.mem_write(eq + 1236, b"\x01")
     open_box()
     assert g.half(ui + 32) == 6 and g.get(widgets + 100) == 6
+
+    styles = (
+        (11, "dual-blades", "双剑", ("回避斩计入刃鳞", "各回复1点体力")),
+        (7, "long-sword", "太刀", ("425点斩槽", "不消耗练气")),
+        (8, "switch-axe", "斩斧 F", ("回满光剑槽", "能量累积回复斩击槽")),
+        (1, "sword-shield", "单手剑", ("各发一道真空波", "叠加16", "造成50%属性伤害与异常积蓄")),
+        (9, "gunlance", "铳枪", ("近战不耗斩味", "蓝槽全满时可再次点火")),
+    )
+    for index, (weapon, name, label, effects) in enumerate(styles, start=1):
+        folder = name + "-extreme"
+        nro = f"{folder.replace('-', '_')}.nro"
+        load_registered_style(
+            g, REPO / "plugins" / folder / "dist" / folder / "romfs/nativeNX/plugins" / nro,
+            base=0x9200000 + index * 0x200000,
+        )
+        g.cpu.mem_write(eq + 1236, bytes([weapon]))
+        labels.clear()
+        open_box()
+        if row() != 6:
+            g.run(0x557D90, ui + 12, 5)
+            press(0x40)
+        assert row() == 6 and labels[info, 2, 2] == f"极之型{label}"
+        details = labels[info, 3, 2]
+        lines = details.split("\r\n")
+        assert len(lines) == 5 and lines[-1] == MANUAL_HINT
+        assert all(effect in details for effect in effects)
+
     print(
-        "GU equipment box: seventh style row, third Hunter Art slot, native reselect, paging and weapon filtering passed"
+        "GU equipment box: six style descriptions, third Hunter Art slot, native reselect, paging and weapon filtering passed"
     )
 
 

@@ -109,20 +109,20 @@ pub fn reset(index: usize) {
     }
 }
 
-pub unsafe fn launch(actor: u32, index: usize) {
-    unsafe { spawn(actor, index, None) }
+pub unsafe fn launch(actor: u32, index: usize, power: u16) {
+    unsafe { spawn(actor, index, power, None) }
 }
 
-pub unsafe fn launch_art(actor: u32, index: usize, tier: u32) {
+pub unsafe fn launch_art(actor: u32, index: usize, tier: u32, power: u16) {
     // Retail w01 HTS groups 10..12 have their furthest endpoints on the
     // diagonals (±d, ±d), each with capsule radius 125.
     if let Some(diagonal) = [175., 200., 300.].get(tier as usize) {
         let reach = (diagonal * core::f32::consts::SQRT_2 + 125.) * 1.15;
-        unsafe { spawn(actor, index, Some(reach)) };
+        unsafe { spawn(actor, index, power, Some(reach)) };
     }
 }
 
-unsafe fn spawn(actor: u32, index: usize, ring_reach: Option<f32>) {
+unsafe fn spawn(actor: u32, index: usize, power: u16, ring_reach: Option<f32>) {
     unsafe {
         let (origin, yaw) = particle::world_offset(actor, [0., program::WAVE_HEIGHT, 0.]);
         let shape = if let Some(reach) = ring_reach {
@@ -168,7 +168,7 @@ unsafe fn spawn(actor: u32, index: usize, ring_reach: Option<f32>) {
         w.ring_reach = ring_reach;
         let mut hdp: [u32; 14] = read(template, 0);
         hdp[0] = u32::from(program::WAVE_DURATION) * 2 << 16;
-        hdp[1] = hdp[1] & 0xffff0000 | u32::from(program::WAVE_POWER);
+        hdp[1] = hdp[1] & 0xffff0000 | u32::from(power);
         hdp[8] &= !255;
         hdp[9] &= !(255 << 8);
         let contact = w.pool.iter().next().unwrap();
@@ -178,10 +178,7 @@ unsafe fn spawn(actor: u32, index: usize, ring_reach: Option<f32>) {
         write(hit, 86, read::<u8>(hit, 86) / 2); // KO
         write(hit, 89, read::<u8>(hit, 89) / 2); // exhaust
         // 2ACFB8 uses +80 for either element damage or status buildup.
-        const WEAPON_STATUS: u32 = 2 | 4 | 1 | 0x20000;
-        if read::<u32>(hit, 72) & WEAPON_STATUS != 0 {
-            write(hit, 80, read::<u16>(hit, 80) / 2);
-        }
+        write(hit, 80, read::<u16>(hit, 80) / 2);
     }
 }
 

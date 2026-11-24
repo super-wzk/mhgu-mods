@@ -96,8 +96,8 @@ def replay():
 
     sword = a + 12320
     s.action(16, 0x8037)
-    g.put(a + 13100, 7)
-    g.put(a + 13108, float_bits(80))
+    g.put(a + 13096, 4)
+    g.put(a + 13104, float_bits(80))
     g.run(0x1168EEC, a)
     tick(0)
     assert (g.half(sword + 56), g.get(sword + 132)) == (31, shapes["blade_6"])
@@ -111,8 +111,8 @@ def replay():
     g.run(g.hooks[0x16ABAC], collision)
     (wave,) = waves
     assert g.half(wave + 52) != g.half(sword + 52)
-    resolve(wave, 16, (0, 100, 0))
-    assert g.get(status + 880) == 953
+    resolve(wave, 8, (0, 100, 0))
+    assert g.get(status + 880) == 961
 
     # Let GU construct both hits from the same equipped stats and live oils.
     eq = g.get(a + 5060)
@@ -120,7 +120,12 @@ def replay():
     g.cpu.mem_write(eq + 802, struct.pack("<h", 35))  # effective affinity
     g.cpu.mem_write(eq + 804, struct.pack("<h", 21))  # element value
     g.cpu.mem_write(eq + 834, struct.pack("<h", 1))   # fire
-    for oil, ko, exhaust, part_factor in [(0, 7, 8, 1.15), (3, 12, 14, 1.15), (2, 7, 8, 1.30)]:
+    g.put(a + 13100, 7)
+    g.put(a + 13108, float_bits(80))
+    for oil, ko, exhaust, part_factor, wave_power in [
+        (0, 7, 8, 1.15, 8), (3, 12, 14, 1.15, 8),
+        (4, 7, 8, 1.15, 16), (2, 7, 8, 1.30, 8),
+    ]:
         g.run(s.controller, 0, 0)
         s.action(16, 0x8037)
         g.put(a + 13096, oil)
@@ -132,10 +137,10 @@ def replay():
         waves.clear()
         g.run(g.hooks[0x16ABAC], collision)
         (wave,) = waves
-        for hit, divisor, power in ((sword, 1, 31), (wave, 2, 16)):
+        for hit, divisor, power in ((sword, 1, 31), (wave, 2, wave_power)):
             assert g.half(hit + 56) == power
             assert g.half(hit + 144) == 35 and g.get(hit + 48) & 0x20000
-            assert g.get(hit + 72) == 16 and g.half(hit + 80) == 21
+            assert g.get(hit + 72) == 16 and g.half(hit + 80) == 21 // divisor
             assert (g.cpu.mem_read(hit + 86, 1)[0], g.cpu.mem_read(hit + 89, 1)[0]) == (ko // divisor, exhaust // divisor)
             assert g.get(hit + 152) == float_bits(part_factor)
     print("Blade and wave: independent native affinity, fire, KO, exhaust and part modifiers passed")
@@ -159,6 +164,7 @@ def replay():
     # Cancel into Round Force with the forward wave still in flight. The
     # previous replay checks the native PMA. Here isolate its first cue and
     # keep GU's real contact constructors, HTS resources and list expansion.
+    g.cpu.mem_write(eq + 834, struct.pack("<h", 1))  # fire
     s.stub(g.originals[0x116D464], lambda owner, *_: g.put(owner + 12716, 1))
     s.action(16, 43)
     g.cpu.mem_write(a + 5, bytes([1]))
@@ -170,8 +176,9 @@ def replay():
     assert forward == wave and g.half(ring + 52) != g.half(forward + 52)
     assert g.get(ring + 132) == shapes["round_force"]
     assert g.get(groups[shapes["round_force"]] + 4) == 8
-    assert g.get(ring + 152) == float_bits(1.3) and g.half(ring + 56) == 16
-    assert g.get(ring + 72) == 0x20000 and g.half(ring + 80) == 10
+    assert g.get(ring + 152) == float_bits(1.3) and g.half(ring + 56) == 8
+    assert g.get(forward + 72) == 0x20000 and g.half(forward + 80) == 10
+    assert g.get(ring + 72) == 16 and g.half(ring + 80) == 10
     assert (g.cpu.mem_read(ring + 86, 1)[0], g.cpu.mem_read(ring + 89, 1)[0]) == (3, 4)
     g.put(collision + 10288, 0)
     assert g.run(g.hooks[0x1696FC], forward) == 1
@@ -315,7 +322,7 @@ def replay():
 
     assert bytes(g.cpu.mem_read(data, len(hdp))) == hdp
     print(
-        "w01 private HTS and native HDP: blade 31 + wave 16 HP, distinct serials, shield KO 13 and sharpness exemption passed"
+        "w01 private HTS and native HDP: blade 31 + wave 8 HP, distinct serials, shield KO 13 and sharpness exemption passed"
     )
 
 

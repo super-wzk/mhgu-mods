@@ -59,15 +59,25 @@ pub unsafe extern "C" fn commands(actor: u32, table: u32) -> *const CommandSet {
     }
 }
 
-unsafe fn chaos_oil(actor: u32, index: usize) -> bool {
-    unsafe {
+unsafe fn wave_power(actor: u32, index: usize) -> Option<u16> {
+    let (mind_eye, chaos) = unsafe {
         if index == 0 {
-            // 116D608 commits both fields only after the native application cue.
-            matches!(read::<u32>(actor, 13100), 5..=7) && read::<f32>(actor, 13108) > 0.
+            // GU 116E4D8 expires the two oils independently.
+            let mind_eye = read::<u32>(actor, 13096) == 4 && read::<f32>(actor, 13104) > 0.;
+            let chaos = matches!(read::<u32>(actor, 13100), 5..=7)
+                && read::<f32>(actor, 13108) > 0.;
+            (mind_eye, chaos)
         } else {
-            // 1168EEC mirrors all three tiers in the replicated status word.
-            read::<u32>(actor, 10340) & 14 != 0
+            // GU 1168EEC replicates ordinary oils in the low word and Chaos Oil in the high word.
+            let mind_eye = read::<u32>(actor, 10336) & 8 != 0;
+            let chaos = read::<u32>(actor, 10340) & 0xe != 0;
+            (mind_eye, chaos)
         }
+    };
+    match (mind_eye, chaos) {
+        (true, true) => Some(program::WAVE_POWER),
+        (false, false) => None,
+        _ => Some(program::WAVE_POWER / 2),
     }
 }
 
@@ -75,7 +85,7 @@ impl Battle {
     fn begin(&mut self, id: u8, turn: i16) -> bool {
         let a = self.actor;
         unsafe {
-            let id = if id == SPIN && chaos_oil(a, self.index) {
+            let id = if id == SPIN && wave_power(a, self.index).is_some() {
                 VACUUM
             } else {
                 id
@@ -227,8 +237,10 @@ impl Battle {
                         };
                         collision::strike(a, c.state, param, c.time.frame, late, can_bounce);
                     }
-                    13 if c.state == VACUUM && chaos_oil(a, self.index) => {
-                        collision::launch(a, self.index);
+                    13 if c.state == VACUUM => {
+                        if let Some(power) = wave_power(a, self.index) {
+                            collision::launch(a, self.index, power);
+                        }
                     }
                     14 => mhfz_sdk::camera::start(a, param),
                     15 => self.trail.start(self.index, a, frames),
@@ -642,7 +654,7 @@ pub unsafe extern "C" fn peer(actor: u32, id: u8) {
 }
 
 // Round Force keeps its retail action ID. Mark it in the existing style packet
-// field so a native-style SnS peer with Chaos Oil never emits an Extreme wave.
+// field so a native-style SnS peer never emits an Extreme wave.
 unsafe extern "C" fn encode_art(actor: u32) -> u8 {
     if matches!(unsafe { action::current(actor) }, (action::GROUP, 43..=45)) {
         1
@@ -682,16 +694,16 @@ unsafe fn round_force(actor: u32, tier: u32) -> u32 {
         let result = original!(actor, tier);
         if first && read::<u32>(actor, 12716) != 0 {
             if hunter::local() == Some(actor) {
-                if live(0, actor) && chaos_oil(actor, 0) {
-                    collision::launch_art(actor, 0, tier);
+                if live(0, actor) && let Some(power) = wave_power(actor, 0) {
+                    collision::launch_art(actor, 0, tier, power);
                 }
             } else if let Some(slot) = Roster::current().and_then(|r| r.peer_index(actor))
                 && live(slot + 1, actor)
-                && chaos_oil(actor, slot + 1)
+                && let Some(power) = wave_power(actor, slot + 1)
             {
                 PEERS.update(slot, actor, |saved, _| {
                     if saved.as_ref().is_some_and(|b| b.peer_round_force) {
-                        collision::launch_art(actor, slot + 1, tier);
+                        collision::launch_art(actor, slot + 1, tier, power);
                     }
                 });
             }

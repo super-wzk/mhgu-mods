@@ -94,7 +94,11 @@ mod entry {
         if let Err(error) = registry.register(
             &STYLE,
             c"极之型铳枪",
-            c"在突刺和炮击之间派生，可装填并连续炮击。",
+            c"点火后可蓄炮和连射，近战不耗斩味。\r\n\
+              热度槽改为显示点火时间和冷却，\r\n\
+              蓝槽全满时可再次点火。\r\n\
+              龙击炮准备中按A可追加装填。\r\n\
+              详见猎人笔记的武器操作指南。",
         ) {
             forge::log::prelude::warn!("Extreme Gunlance registration failed: {error:?}");
             return;
