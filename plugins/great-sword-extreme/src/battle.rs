@@ -33,6 +33,8 @@ const DEFLECTION: u8 = 3;
 pub(super) const ACTIONS: action::Actions = action::Actions::new(74).with(DASH).with(BRAKE);
 const GUARD_GROUP: u16 = 32;
 const GUARD_MOTION: u32 = 5005;
+const MONSTER_GUARD_SUCCESS: u8 = 66;
+const OTHER_GUARD_SUCCESS: u8 = 72;
 const GUARD_CANCEL_FRAME: i16 = 56;
 const SHEATHED_JUMP_SLASH: u16 = 38;
 const DRAWN_JUMP_SLASH: u16 = 67;
@@ -134,10 +136,10 @@ fn charge_animation_rate(cap: u8) -> f32 {
     if cap == 3 { 0.5 } else { 1. }
 }
 
-unsafe fn read<T: Copy>(p: u32, n: u32) -> T {
+pub(super) unsafe fn read<T: Copy>(p: u32, n: u32) -> T {
     unsafe { ((p + n) as *const T).read_unaligned() }
 }
-unsafe fn write<T>(p: u32, n: u32, x: T) {
+pub(super) unsafe fn write<T>(p: u32, n: u32, x: T) {
     unsafe { ((p + n) as *mut T).write_unaligned(x) }
 }
 macro_rules! native {
@@ -176,10 +178,13 @@ pub(super) unsafe fn local(p: u32) -> bool {
     }
 }
 mod peer;
-pub(super) use peer::{install as install_peers, peer_action};
+pub(super) use peer::{
+    guard_body_active as peer_guard_body_active, install as install_peers, peer_action,
+};
 
 struct Battle {
     peer_slot: usize,
+    peer_guard: peer::GuardBody,
     audio: Clock,
     motion_fx: MotionClock,
     owner: u32,
@@ -230,6 +235,7 @@ impl Battle {
     fn fresh(p: u32, equip: u32) -> Self {
         Self {
             peer_slot: 0,
+            peer_guard: peer::GuardBody::Off,
             audio: Default::default(),
             motion_fx: Default::default(),
             owner: p,
@@ -265,6 +271,7 @@ impl Battle {
         // latch. Do not clear it here after a guard/damage state has taken over.
         self.charge_effect = None;
         self.radiance_contact = None;
+        self.peer_guard = peer::GuardBody::Off;
         self.cursor = program::cursor(IDLE);
         self.motion_fx.seek(0, 0.);
         self.packed = 0xffff;
@@ -367,6 +374,9 @@ impl Battle {
             self.charge_effect = None;
             self.radiance_contact = None;
             self.cursor = cursor;
+            if !is_guard_success(state) {
+                self.peer_guard = peer::GuardBody::Off;
+            }
             self.roll_yaw = None;
             self.hit = false;
             self.deflected = false;
@@ -427,6 +437,15 @@ impl Battle {
                     7 | 8 if param != 0 => {
                         let remaining = (f32::from(param) * 2. - late).max(0.);
                         write(p, 11072, remaining.max(read::<f32>(p, 11072)));
+                        if let peer::GuardBody::Pending(area) = self.peer_guard {
+                            self.peer_guard = peer::GuardBody::Active { area, remaining };
+                        }
+                        if self.peer_slot == 0
+                            && is_guard_success(self.cursor.state)
+                            && remaining > 0.
+                        {
+                            crate::guard_body::arm_impact(p);
+                        }
                     }
                     12 if self.peer_slot == 0 => movement::stamina(p, -150., false),
                     4 if self.peer_slot == 0 => {
@@ -940,8 +959,8 @@ impl Battle {
                     return self.begin(
                         p,
                         match block {
-                            guard::Contact::Monster => 66,
-                            guard::Contact::Other => 72,
+                            guard::Contact::Monster => MONSTER_GUARD_SUCCESS,
+                            guard::Contact::Other => OTHER_GUARD_SUCCESS,
                         },
                     );
                 }
@@ -1116,4 +1135,18 @@ pub(super) unsafe extern "C" fn guard_policy(
         });
         guard::Decision::Precise
     }
+}
+
+fn is_guard_success(state: u8) -> bool {
+    matches!(state, MONSTER_GUARD_SUCCESS | OTHER_GUARD_SUCCESS)
+}
+
+unsafe fn guard_success_action(p: u32) -> bool {
+    let (group, slot) = unsafe { action::current(p) };
+    action::custom_id(group, slot).is_some_and(is_guard_success)
+}
+
+pub(super) unsafe fn guard_body_active(p: u32) -> bool {
+    // These states are entered only after consuming a confirmed precise block.
+    unsafe { guard_success_action(p) && read::<f32>(p, 11072) > 0. }
 }

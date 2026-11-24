@@ -14,6 +14,7 @@ pub(super) use ground::ground_strike;
 const ROUTES: &[u8] = include_bytes!("../target/assets/effects/routes.bin");
 const SHOCKWAVE_ROUTE: usize = 7; // Frontier bank 4022, selector 5.
 const CHARGE_ROUTE: usize = 9;
+const GUARD_SPARK_ROUTE: usize = 33; // Frontier bank 4022, selector 17.
 const _: () = {
     let mut route = CHARGE_ROUTE;
     while route <= CHARGE_ROUTE + 4 {
@@ -108,6 +109,14 @@ pub(super) unsafe fn radiance(p: u32, position: [f32; 3], yaw: u16) {
     unsafe { route(p, SHOCKWAVE_ROUTE, Attachment::World(position, yaw)) }
 }
 
+pub(super) unsafe fn guard_body_impact(p: u32) {
+    // The existing guard spark is spawned farther forward at the body barrier.
+    unsafe {
+        let (position, yaw) = particle::world_offset(p, [0., 55., 95.]);
+        route(p, GUARD_SPARK_ROUTE, Attachment::World(position, yaw));
+    }
+}
+
 pub(super) unsafe fn motion_events(
     clock: &mut MotionClock,
     p: u32,
@@ -159,7 +168,7 @@ unsafe fn motion_effect(p: u32, e: MotionEvent) {
             (4022, 6) => 21,
             (4022, 10) => 19,
             (4022, 15) => 32,
-            (4022, 17) => 33,
+            (4022, 17) => GUARD_SPARK_ROUTE,
             _ => return,
         };
         let joint = match e.node {

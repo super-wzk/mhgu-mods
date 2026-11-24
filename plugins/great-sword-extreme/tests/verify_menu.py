@@ -6,10 +6,10 @@ from verify_style import CONFIG, MENU_OPEN, MENU_UPDATE, REPO, STATUS_STYLE, STA
 
 MANUAL_HINT = "详见猎人笔记的武器操作指南。"
 GREAT_SWORD_DETAILS = (
-    "精准防御成功不耗耐力与锋利度。\r\n"
+    "精准防御成功不耗耐力与锋利度，\r\n"
+    "并可短暂挡住怪物的正面推进。\r\n"
     "挡住怪物攻击三次可发动辉烈剑。\r\n"
-    "蓄力或挥剑时可用不动抵抗硬直。\r\n"
-    "兽魂附身强化下一次有效攻击。\r\n"
+    "不动可抵抗硬直，兽魂附身强化下一击。\r\n"
     + MANUAL_HINT
 )
 

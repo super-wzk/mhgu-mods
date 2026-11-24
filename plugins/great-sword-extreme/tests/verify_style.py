@@ -241,7 +241,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         else set()
     )
     if "registry" in order and "sword" in order:
-        expected.update((EQUIPMENT_GRIP, MODEL_DEPTH))
+        expected.update((EQUIPMENT_GRIP, MODEL_DEPTH, 0xA6084, 0x17F188))
     actual = set(g.hooks)
     assert actual == expected, (
         [hex(addr) for addr in sorted(expected - actual)],
@@ -624,6 +624,131 @@ def verify_weapon_arts(g, p):
         assert g.half(p + 9482) == follow_up
         g.run(GS_CHANGE_ACTION, p, 16, 19, 0)
         assert g.half(p + 9482) == follow_up
+
+
+def guard_body_scene(g, area=0):
+    monster, state, vt = g.alloc(48000), g.alloc(24000), g.alloc(1000)
+    row, bank, body_vt = g.alloc(88), g.alloc(4), g.alloc(68)
+    dti, matrix = g.alloc(32), g.alloc(64)
+    noop, get_row, get_type, get_joint = (g.alloc(4) for _ in range(4))
+    g.stub(noop, lambda *_: 0)
+    g.stub(get_row, lambda *_: row)
+    g.put(dti + 4, g.get(0x1898674))
+    g.stub(get_type, lambda *_: dti)
+    g.stub(get_joint, lambda *_: matrix)
+    g.cpu.mem_write(matrix, struct.pack("<16f", 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1))
+    g.put(monster, vt)
+    g.put(monster + 5160, state)
+    g.put(monster + 30156, bank)
+    g.put(bank, body_vt)
+    g.put(body_vt + 64, get_row)
+    g.put(vt + 20, get_type)
+    g.put(vt + 208, get_joint)
+    g.put(vt + 880, noop)
+    g.put(vt + 980, noop)
+    g.cpu.mem_write(row + 44, b"\xff\xff")
+    g.cpu.mem_write(monster + 29916, b"\1")
+    g.stub(0x6F2BC, lambda *_: 0)  # unrelated monster update services
+
+    def position(address, xyz):
+        g.cpu.mem_write(address, struct.pack("<3f", *xyz))
+
+    def xyz(address):
+        return struct.unpack("<3f", g.cpu.mem_read(address, 12))
+
+    def f(address, value):
+        g.cpu.mem_write(address, struct.pack("<f", value))
+
+    g.cpu.mem_write(monster + 4180, bytes([area]))
+    start = (600, 0, 1000)  # root well outside the part that hits the hunter
+    position(monster + 64, start)
+    f(state + 428, 1)
+    f(state + 432, 1)
+    f(row + 16, 85)
+
+    def step(dx, dz, shape=(0, 50, 150)):
+        position(row + 20, shape)
+        position(state, start)
+        position(state + 64, (start[0] + dx, 2, start[2] + dz))
+        assert g.run(g.hooks[0xA6084], monster, 0) == state
+        x, y, z = xyz(state + 800)
+        assert y == 2 and xyz(state + 64) == (start[0] + x, y, start[2] + z)
+        return x, z
+    return monster, state, row, step
+
+
+def verify_guard_body(g, hunter, units, impact_route):
+    previous_hunter = bytes(g.cpu.mem_read(hunter + 64, 12))
+    area = g.cpu.mem_read(hunter + 4180, 1)[0]
+    monster, state, row, step = guard_body_scene(g, area)
+    g.cpu.mem_write(hunter + 64, bytes(12))
+    g.put(hunter + 4076, 0)
+
+    def position(address, xyz):
+        g.cpu.mem_write(address, struct.pack("<3f", *xyz))
+
+    def xyz(address):
+        return struct.unpack("<3f", g.cpu.mem_read(address, 12))
+
+    def impact_layers():
+        return [unit for unit in units if g.get(unit + 68) in impact_route]
+
+    initial_impacts = impact_layers()
+    x, z = step(0, -60, (125, 50, 100))
+    assert x > 0 and -60 < z < 0, (x, z)
+    assert impact_layers() == initial_impacts
+    x, z = step(0, -75)
+    assert x == 0 and -15.1 < z < -14.5, (x, z)
+    impacts = impact_layers()
+    assert [g.get(unit + 68) for unit in impacts[len(initial_impacts):]] == list(impact_route)
+    assert all(xyz(unit + 304) == (0., 55., 95.) for unit in impacts[len(initial_impacts):])
+    x, z = step(0, -75, (60, 50, 150))
+    assert x == 0 and -19 < z < -18, (x, z)
+    assert impact_layers() == impacts
+    # The closest part may lie between the native capsule's joints.
+    g.cpu.mem_write(row + 4, b"\1\0")
+    position(row + 32, (220, 50, 150))
+    x, z = step(0, -75, (-220, 50, 150))
+    assert x == 0 and -15.1 < z < -14.5, (x, z)
+    g.cpu.mem_write(row + 4, b"\0\0")
+    x, z = step(0, -60, (160, 50, 75))
+    assert x > 0 and -60 < z < 0, (x, z)
+    assert step(0, 60, (0, 50, 120)) == (0, 60)  # already touching and moving away
+    assert step(0, 75, (0, 50, -150)) == (0, 75)  # rear body contact
+    for owner, offset, value in (
+        (state, 442, b"\1"), (state, 1320, b"\1"), (monster, 46583, b"\1"),
+        (monster, 4180, bytes([area ^ 1])),
+    ):
+        before = bytes(g.cpu.mem_read(owner + offset, 1))
+        g.cpu.mem_write(owner + offset, value)
+        assert step(0, -75) == (0, -75)
+        g.cpu.mem_write(owner + offset, before)
+
+    hunter_push, monster_push = g.alloc(16), g.alloc(16)
+    position(hunter_push, (0, 0, -10))
+    position(monster_push, (0, 0, 10))
+    g.stub(0xAA278, lambda *_: 5)  # large monster would normally push only the hunter
+    g.run(g.hooks[0x17F188], 0, hunter, hunter_push, monster, monster_push)
+    assert xyz(hunter + 4160) == (0, 0, 0)
+    g.put(hunter + 11072, 0)
+    assert step(0, -75) == (0, -75)
+    g.run(g.hooks[0x17F188], 0, hunter, hunter_push, monster, monster_push)
+    assert xyz(hunter + 4160) == (0, 0, -10)
+    position(hunter + 4160, (0, 0, 0))
+    g.cpu.mem_write(hunter + 4176, b"\0")
+
+    g.cpu.mem_write(hunter + 11072, struct.pack("<f", 14.))
+    contact_state = g.half(hunter + 9482)
+    g.cpu.mem_write(hunter + 9482, struct.pack("<H", 0x8044))  # horizontal follow-up
+    assert step(0, -75) == (0, -75)
+    g.cpu.mem_write(hunter + 9482, struct.pack("<H", contact_state))
+    equipment = g.get(hunter + 5060)
+    g.cpu.mem_write(equipment + 1236, b"\x07")
+    assert step(0, -75) == (0, -75)
+    g.cpu.mem_write(equipment + 1236, b"\0")
+    assert -15.1 < step(0, -75)[1] < -14.5
+    g.cpu.mem_write(hunter + 64, previous_hunter)
+    print("GU precise guard body: front stop, side slide, bypass, expiry and counter release passed")
 
 
 def verify_battle(g, p, remote, resources):
@@ -1613,6 +1738,8 @@ def verify_battle(g, p, remote, resources):
         aura = [u for u in units if g.get(u + 68) in ready]
         assert len(aura) == (len(ready) if block == 3 else 0)
         assert all(g.get(u + 132) == 0x28 and g.half(u + 194) == 12 for u in aura)
+        if block == 1:
+            verify_guard_body(g, p, units, routes[33])
     f(28, 2.)
 
     def ready_pulse():

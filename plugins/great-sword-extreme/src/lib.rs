@@ -12,9 +12,13 @@ mod combat;
 #[cfg(target_arch = "arm")]
 mod fx;
 #[cfg(target_arch = "arm")]
+mod guard_body;
+#[cfg(target_arch = "arm")]
 mod program;
 #[cfg(target_arch = "arm")]
 mod sound;
+#[cfg(target_arch = "arm")]
+const STYLE_ID: u32 = 1;
 
 // Forge 1.5 generates a safe extern handler that dereferences its ABI argument.
 #[cfg(target_arch = "arm")]
@@ -42,7 +46,7 @@ mod entry {
     }
 
     static EXTREME: Style = Style {
-        id: 1,
+        id: super::STYLE_ID,
         weapon: 0,
         encode: Some(motion::encode),
         decode: Some(motion::decode),
@@ -68,10 +72,10 @@ mod entry {
         if let Err(err) = registry.register(
             &EXTREME,
             c"极之型大剑",
-            c"精准防御成功不耗耐力与锋利度。\r\n\
+            c"精准防御成功不耗耐力与锋利度，\r\n\
+              并可短暂挡住怪物的正面推进。\r\n\
               挡住怪物攻击三次可发动辉烈剑。\r\n\
-              蓄力或挥剑时可用不动抵抗硬直。\r\n\
-              兽魂附身强化下一次有效攻击。\r\n\
+              不动可抵抗硬直，兽魂附身强化下一击。\r\n\
               详见猎人笔记的武器操作指南。",
         ) {
             forge::log::prelude::warn!(
@@ -84,6 +88,7 @@ mod entry {
         if !rules::bind(EXTREME.id, &RULES) {
             forge::log::prelude::warn!("Style {}: GU rule service unavailable", EXTREME.id);
         }
+        super::guard_body::install();
         mhfz_sdk::effects::model::install();
         unsafe { mhgu_sdk::style::preload::bind(EXTREME.id, motion::preload) };
         motion::install();

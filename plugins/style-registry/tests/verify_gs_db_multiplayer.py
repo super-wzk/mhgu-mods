@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "plugins/great-sword-extreme/tests"))
 from damage_target import damage_target
-from verify_style import boot, load_registered_style, quest_entries
+from verify_style import boot, guard_body_scene, load_registered_style, quest_entries
 
 
 def replay(weapon, name, vtable):
@@ -233,8 +233,96 @@ def replay(weapon, name, vtable):
     receive(guest, outgoing)
     if weapon == 0:
         assert g.half(hit_frame(guest, 32, 12320) + 56) == expected_base
+        verify_guard_body_network(g, manager, packet, local, guest, second, sender)
     assert g.get(local + 12320 + 12) != guest
     print(name, "two peers in a mixed-weapon room, native packet, motion, hit ownership and monster HP passed")
+
+
+def verify_guard_body_network(g, manager, packet, local, guest, second, sender):
+    monster, _, _, step = guard_body_scene(g)
+    # Let GU apply the player's packet position, and isolate the original
+    # local action dispatcher while the registry still observes both peers.
+    g.cpu.hook_del(g.traps.pop(0x280548))
+    g.cpu.hook_del(g.traps.pop(0x710B0))
+    def observe_local(count=1):
+        dispatch = g.originals[0x282DA8]
+        g.stub(dispatch, lambda *_: 0)
+        for _ in range(count):
+            g.run(g.hooks[0x282DA8], local)
+        g.cpu.hook_del(g.traps.pop(dispatch))
+
+    def receive_guard(actor, z=0., marked=True, move=66):
+        if g.half(actor + 9482) == 0x8000 + move:
+            # A second success follows the new native guard, even if the
+            # private success slot is the same as it was on the previous hit.
+            g.put(manager + 28, sender)
+            g.cpu.mem_write(sender + 9478, struct.pack("<H2xH", 32, 0))
+            g.run(g.hooks[0x1FED90], packet, sender, 0)
+            g.put(manager + 28, local)
+            g.run(g.hooks[0x1FF308], packet, actor)
+            assert g.half(actor + 9478) == 32
+        g.put(manager + 28, sender)
+        g.cpu.mem_write(sender + 9478, struct.pack("<H2xH", 16, 0x8000 + move))
+        g.cpu.mem_write(sender + 64, struct.pack("<3f", 0, 0, z))
+        g.run(g.hooks[0x1FED90], packet, sender, 0)
+        assert g.get(packet + 16) >> 16 & 15 == 13
+        if not marked:
+            g.put(packet + 16, g.get(packet + 16) & ~(15 << 16))
+        g.put(manager + 28, local)
+        g.run(g.hooks[0x1FF308], packet, actor)
+        assert g.half(actor + 9482) == 0x8000 + move
+        assert g.cpu.mem_read(actor + 5, 1) == b"\0"
+        g.put(actor + 1280, 0)
+        g.run(0x282DA8, actor)
+        assert g.half(actor + 1204) == 1474
+
+    receive_guard(guest, marked=False)
+    assert step(0, -75) == (0, -75)
+    receive_guard(guest)
+    stopped = step(0, -75)
+    assert -15.1 < stopped[1] < -14.5, (stopped, g.get(guest + 11072), g.get(guest + 64), g.get(guest + 4076))
+    x, z = step(0, -75, (60, 50, 150))
+    assert x == 0 and -19 < z < -18, (x, z)
+    # The authoritative monster stops at the first of the two guard bodies,
+    # even when the closer guard was added later and occupies a higher slot.
+    receive_guard(second, z=10., move=72)
+    assert -5.1 < step(0, -75)[1] < -4.5
+    g.cpu.mem_write(monster + 46583, b"\1")
+    assert step(0, -75) == (0, -75)
+    g.cpu.mem_write(monster + 46583, b"\0")
+
+    push, normal = g.alloc(16), g.alloc(16)
+    g.cpu.mem_write(push, struct.pack("<4f", 0, 0, -10, 0))
+    g.cpu.mem_write(normal, struct.pack("<4f", 0, 0, 10, 0))
+    g.stub(0xAA278, lambda *_: 5)
+    g.run(g.hooks[0x17F188], 0, guest, push, monster, normal)
+    assert g.get(guest + 4168) == 0
+
+    # Native 30/60 Hz update sizes both expire at 14 clock units, independent
+    # of the remote motion frame (kept at zero here).
+    for elapsed in (1, 2):
+        if elapsed == 2:
+            receive_guard(guest)
+        g.cpu.mem_write(local + 28, struct.pack("<f", elapsed))
+        observe_local(14 // elapsed - 1)
+        assert step(0, -75)[1] > -75
+        observe_local()
+        assert step(0, -75) == (0, -75)
+    g.run(g.hooks[0x17F188], 0, guest, push, monster, normal)
+    assert struct.unpack("<f", g.cpu.mem_read(guest + 4168, 4)) == (-10.,)
+
+    receive_guard(guest)
+    g.cpu.mem_write(guest + 9482, struct.pack("<H", 0x8044))
+    assert step(0, -75) == (0, -75)
+    receive_guard(guest)
+    g.cpu.mem_write(guest + 4180, b"\1")
+    assert step(0, -75) == (0, -75)
+    g.cpu.mem_write(guest + 4180, b"\0")
+    g.put(manager + 32, 0)
+    observe_local()
+    g.put(manager + 32, guest)
+    assert step(0, -75) == (0, -75)
+    print("GU great sword guard body: packet marker, two simultaneous guards, owner, timeout, counter, area and roster passed")
 
 
 if __name__ == "__main__":

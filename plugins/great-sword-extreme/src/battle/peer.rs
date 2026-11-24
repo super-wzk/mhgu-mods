@@ -6,6 +6,14 @@ use mhgu_sdk::style::remote::{self, PeerStates, Roster};
 static PEERS: PeerStates<Battle> = PeerStates::new();
 static LEVEL: AtomicU32 = AtomicU32::new(0);
 static OWNER: AtomicU32 = AtomicU32::new(0);
+// 0..=4 are the original charge tiers. Only successful guard actions use 5.
+const GUARD_BODY: u8 = 5;
+
+pub(super) enum GuardBody {
+    Off,
+    Pending(u8),
+    Active { area: u8, remaining: f32 },
+}
 
 pub(crate) unsafe fn peer_action(actor: u32) -> bool {
     unsafe {
@@ -19,7 +27,9 @@ pub(super) fn publish(actor: u32, level: u8) {
     OWNER.store(actor, Relaxed);
 }
 unsafe extern "C" fn encode(actor: u32) -> u8 {
-    if OWNER.load(Relaxed) == actor {
+    if unsafe { guard_success_action(actor) } {
+        GUARD_BODY
+    } else if OWNER.load(Relaxed) == actor {
         LEVEL.load(Relaxed) as u8
     } else {
         u8::MAX
@@ -42,8 +52,24 @@ unsafe fn with_peer(actor: u32, visit: impl FnOnce(&mut Battle)) {
     }
 }
 unsafe extern "C" fn decode(actor: u32, level: u8) {
-    if level <= 4 {
-        unsafe { with_peer(actor, |b| b.level = level) };
+    unsafe {
+        if guard_success_action(actor) {
+            // GU has accepted the packet and queued the fresh motion start.
+            if read::<u8>(actor, 5) == 0 {
+                with_peer(actor, |b| {
+                    b.peer_guard = if level == GUARD_BODY {
+                        GuardBody::Pending(read(actor, 4180))
+                    } else {
+                        GuardBody::Off
+                    };
+                });
+            }
+        } else if level <= 4 {
+            with_peer(actor, |b| {
+                b.peer_guard = GuardBody::Off;
+                b.level = level;
+            });
+        }
     }
 }
 unsafe extern "C" fn tick(actor: u32, state: u8) {
@@ -116,12 +142,39 @@ pub(super) unsafe fn radiance_origin(actor: u32, shape: u32) -> Option<[f32; 3]>
     });
     origin
 }
+
+pub(crate) unsafe fn guard_body_active(actor: u32, roster: &Roster) -> bool {
+    unsafe {
+        let Some(index) = roster.peer_index(actor) else {
+            return false;
+        };
+        if PEERS.live(index, roster, 0) != Some(actor) || !guard_success_action(actor) {
+            return false;
+        }
+        let mut active = false;
+        PEERS.update(index, actor, |saved, _| {
+            active = saved.as_ref().is_some_and(|b| {
+                b.equip == read::<u32>(actor, 5060)
+                    && b.packed == read::<u16>(actor, 1204)
+                    && matches!(b.peer_guard, GuardBody::Active { area, remaining }
+                        if area == read::<u8>(actor, 4180) && remaining > 0.)
+            });
+        });
+        active
+    }
+}
+
 unsafe extern "C" fn observe(local: u32) {
     unsafe {
+        let elapsed = read::<f32>(local, 28).max(0.);
         PEERS.visit_live(0, |_, actor, b| {
             let (group, slot) = action::current(actor);
             if !action::custom(group, slot) || read::<u8>(actor, 4180) != read::<u8>(local, 4180) {
                 b.cancel();
+            } else if !guard_success_action(actor) {
+                b.peer_guard = GuardBody::Off;
+            } else if let GuardBody::Active { remaining, .. } = &mut b.peer_guard {
+                *remaining = (*remaining - elapsed).max(0.);
             }
         })
     }
