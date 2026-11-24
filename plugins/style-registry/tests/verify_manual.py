@@ -14,6 +14,38 @@ def expand(text):
 
 def replay(repo, elf, cases):
     g = boot(elf, b"[Weapons]\n", ("registry",))
+    close_native_manual = 0x65F7A4
+    # Forge 1.5.1 copies both entry instructions without relocating the PC-relative LDR.
+    assert g.originals[close_native_manual] == 0
+    manager, container, dialogs, native_dialog, dialog_vtable = (
+        g.alloc(size) for size in (332, 56, 56, 4, 8)
+    )
+    g.put(0x1899458, manager)
+    assert g.run(close_native_manual) == 0
+    g.put(manager + 328, container)
+    g.put(container + 52, dialogs)
+    g.cpu.hook_del(g.traps.pop(0x65CB3C))
+    assert g.run(close_native_manual) == 0
+
+    slot = dialogs + 13 * 4
+    native_close = []
+
+    def close_dialog(owner, *_):
+        assert owner == native_dialog
+        native_close.append("close")
+
+    def release_dialog(owner, *_):
+        assert owner == native_dialog
+        native_close.append("remove")
+
+    release = g.alloc(4)
+    g.put(native_dialog, dialog_vtable)
+    g.put(dialog_vtable + 4, release)
+    g.stub(release, release_dialog)
+    g.stub(0x56E04C, close_dialog)
+    g.put(slot, native_dialog)
+    assert g.run(close_native_manual) == dialogs and g.get(slot) == 0
+    assert native_close == ["close", "remove"]
     list_panel, selection, cursor, vt, panel, arrows = (
         g.alloc(n) for n in (100, 3, 100, 80, 100, 140))
     g.put(list_panel + 92, selection)
@@ -101,7 +133,6 @@ def replay(repo, elf, cases):
     stub(0x642A78, lambda *_: 0)
     stub(0x642B6C, lambda obj, text, *_: hints.append((g.string(text), obj)) or 0)
     stub(0x642D34, lambda obj, *_: hints.append(("restore", obj)) or 0)
-    stub(g.originals[0x65F7A4], lambda *_: 0)
     stub(0x65EFD0, lambda *_: dialog)
     stub(0x65F190, lambda _, text, *__: capture(dialog, 7, 1, text) or 1)
     closed = []
@@ -124,6 +155,8 @@ def replay(repo, elf, cases):
     assert strings[-1][2].startswith(all_pages[-1][0])
     press(0x4000)
     assert closed == [dialog]
-    g.run(g.hooks[0x65F7A4])
+    g.put(slot, native_dialog)
+    assert g.run(close_native_manual) == dialogs and g.get(slot) == 0
+    assert native_close == ["close", "remove", "close", "remove"]
     assert hints == [("save", hint), ("<ICON PAD_A> 武器操作指南", hint), ("restore", hint)]
     print(f"Both manual readers displayed {len(all_pages)} pages across six styles; optional registration and navigation passed.")

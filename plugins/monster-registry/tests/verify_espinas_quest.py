@@ -115,15 +115,16 @@ class Game:
 
     def hook(self, ret, addr, detour, saved):
         self.hooks[addr] = detour
-        if addr in self.inline_hooks:
-            # Each starts with a PC-independent instruction in GU 1.4.
-            trampoline = self.alloc(12)
-            self.cpu.mem_write(
-                trampoline,
-                bytes(self.cpu.mem_read(addr, 4))
-                + struct.pack("<II", 0xE51FF004, addr + 4),
-            )
-            self.put(saved, trampoline)
+        if addr in self.inline_hooks or not saved:
+            if saved:
+                # Each starts with a PC-independent instruction in GU 1.4.
+                trampoline = self.alloc(12)
+                self.cpu.mem_write(
+                    trampoline,
+                    bytes(self.cpu.mem_read(addr, 4))
+                    + struct.pack("<II", 0xE51FF004, addr + 4),
+                )
+                self.put(saved, trampoline)
             self.cpu.hook_add(
                 UC_HOOK_CODE,
                 lambda c, *_: c.reg_write(arm.UC_ARM_REG_PC, detour),

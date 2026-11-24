@@ -172,7 +172,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
 
     def hook(ret, addr, detour, saved):
         result = install(ret, addr, detour, saved)
-        g.originals[addr] = g.get(saved)
+        g.originals[addr] = g.get(saved) if saved else 0
         return result
 
     g.hook = hook

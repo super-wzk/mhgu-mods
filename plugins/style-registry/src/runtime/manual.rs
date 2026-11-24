@@ -351,8 +351,10 @@ unsafe fn close_dialog() {
     }
 }
 
-#[forge::hook(offset = 0x65f7a4)]
-unsafe fn close_manual() -> u32 {
+unsafe extern "C" fn close_manual() -> u32 {
+    const UI_MANAGER: u32 = 0x1899458;
+    const MANUAL_SLOT: u32 = 13;
+
     unsafe {
         if READER.swap(0, Relaxed) != 0 {
             close_dialog();
@@ -363,8 +365,24 @@ unsafe fn close_manual() -> u32 {
                 gu!(0x642d34, hint);
             }
         }
+
+        // GU 65F7A4 loads a PC-relative literal in its second instruction.
+        // Forge's ARM trampoline copies it without relocation. Preserve the
+        // native close and removal sequence through its original callees.
+        let base = forge::mem::text_addr();
+        let container = gu!(0x55d2b4, get::<u32>(base, UI_MANAGER), 0);
+        if container != 0 {
+            let dialog = gu!(0x65cb3c, container, MANUAL_SLOT);
+            if dialog != 0 {
+                gu!(0x56e04c, dialog);
+            }
+        }
+        let container = gu!(0x55d2b4, get::<u32>(base, UI_MANAGER), 0);
+        if container == 0 {
+            return 0;
+        }
+        gu!(0x65cb04, container, MANUAL_SLOT)
     }
-    original!()
 }
 
 pub(super) fn install(base: u32) {
@@ -375,6 +393,12 @@ pub(super) fn install(base: u32) {
         forge::install_hook!(base, notes_pages);
         forge::install_hook!(base, notes_draw);
         forge::install_hook!(base, pause_input);
-        forge::install_hook!(base, close_manual);
+        unsafe {
+            forge::sys::hook::forge_hook_create(
+                (base + 0x65f7a4) as *const _,
+                close_manual as *const _,
+                core::ptr::null_mut(),
+            );
+        }
     }
 }
