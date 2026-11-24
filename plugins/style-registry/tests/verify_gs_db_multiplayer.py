@@ -281,8 +281,13 @@ def verify_guard_body_network(g, manager, packet, local, guest, second, sender):
     receive_guard(guest)
     stopped = step(0, -75)
     assert -15.1 < stopped[1] < -14.5, (stopped, g.get(guest + 11072), g.get(guest + 64), g.get(guest + 4076))
+    away = (0, 50, 400)
+    assert step(15, -40, away) == (12, 0)
+    receive_guard(guest)
+    assert step(0, -40, away) == (0, -40)  # a new precise guard needs fresh contact
     x, z = step(0, -75, (60, 50, 150))
     assert x == 0 and -19 < z < -18, (x, z)
+    assert step(0, 30, away) == (0, 30)
     # The authoritative monster stops at the first of the two guard bodies,
     # even when the closer guard was added later and occupies a higher slot.
     receive_guard(second, z=10., move=72)
@@ -297,17 +302,35 @@ def verify_guard_body_network(g, manager, packet, local, guest, second, sender):
     g.stub(0xAA278, lambda *_: 5)
     g.run(g.hooks[0x17F188], 0, guest, push, monster, normal)
     assert g.get(guest + 4168) == 0
+    side_push, side_normal = g.alloc(16), g.alloc(16)
+    g.cpu.mem_write(side_push, struct.pack("<4f", 10, 0, 0, 0))
+    g.cpu.mem_write(side_normal, struct.pack("<4f", -10, 0, 0, 0))
+    assert step(0, -10, away) == (0, 0)
+    g.run(g.hooks[0x17F188], 0, second, side_push, monster, side_normal)
+    assert g.get(second + 4160) == 0
+
+    # A replica can establish protection from the hunter's own native push,
+    # even when GU has no combined separation vector for the monster.
+    g.cpu.mem_write(monster + 46583, b"\1")
+    zero_normal = g.alloc(16)
+    g.run(g.hooks[0x17F188], 0, guest, push, monster, zero_normal)
+    assert g.get(guest + 4168) == 0
+    g.run(g.hooks[0x17F188], 0, guest, side_push, monster, side_normal)
+    assert g.get(guest + 4160) == 0
+    g.cpu.mem_write(monster + 46583, b"\0")
+    receive_guard(guest)
 
     # Native 30/60 Hz update sizes both expire at 14 clock units, independent
     # of the remote motion frame (kept at zero here).
     for elapsed in (1, 2):
         if elapsed == 2:
             receive_guard(guest)
+            assert step(0, -75)[1] > -75
         g.cpu.mem_write(local + 28, struct.pack("<f", elapsed))
         observe_local(14 // elapsed - 1)
-        assert step(0, -75)[1] > -75
+        assert step(0, -75, away) == (0, 0)
         observe_local()
-        assert step(0, -75) == (0, -75)
+        assert step(0, -75, away) == (0, -75)
     g.run(g.hooks[0x17F188], 0, guest, push, monster, normal)
     assert struct.unpack("<f", g.cpu.mem_read(guest + 4168, 4)) == (-10.,)
 
@@ -322,7 +345,7 @@ def verify_guard_body_network(g, manager, packet, local, guest, second, sender):
     observe_local()
     g.put(manager + 32, guest)
     assert step(0, -75) == (0, -75)
-    print("GU great sword guard body: packet marker, two simultaneous guards, owner, timeout, counter, area and roster passed")
+    print("GU great sword guard body: packet marker, simultaneous guards, contact hold, timeout, counter, area and roster passed")
 
 
 if __name__ == "__main__":

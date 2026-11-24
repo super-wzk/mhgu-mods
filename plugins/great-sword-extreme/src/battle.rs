@@ -3,6 +3,7 @@
 use crate::{
     combat,
     fx::{self, ChargeEffect},
+    guard_body::Hold,
     motion, program, sound,
 };
 use core::{
@@ -42,6 +43,9 @@ const JUMP_COMBO_START: i16 = 54;
 const JUMP_COMBO_END: i16 = 158;
 const SWEEP: u8 = 0;
 const VERTICAL_FINISHER: u8 = 40;
+// GU w00 pl_w00.fup float rows 1–3, in 60 Hz clock units.
+const GU_CHARGE_THRESHOLDS: [f32; 3] = [50., 100., 140.];
+const UPPERCUT_FOURTH_TIER_INTERVALS: f32 = 4.65;
 
 const fn roll_commands(slash: u8, accept_until: i16) -> [BufferedCommand; 2] {
     // FZ 811D91FE buffers from 30 and opens the follow-up at 44.
@@ -179,12 +183,14 @@ pub(super) unsafe fn local(p: u32) -> bool {
 }
 mod peer;
 pub(super) use peer::{
-    guard_body_active as peer_guard_body_active, install as install_peers, peer_action,
+    edit_guard_hold as edit_peer_guard_hold, guarding_slot as guarding_peer_slot,
+    install as install_peers, peer_action,
 };
 
 struct Battle {
     peer_slot: usize,
     peer_guard: peer::GuardBody,
+    guard_hold: Option<Hold>,
     audio: Clock,
     motion_fx: MotionClock,
     owner: u32,
@@ -193,6 +199,7 @@ struct Battle {
     cursor: Cursor,
     packed: u16,
     charge: f32,
+    gu_charge_time: f32,
     charge_interval: f32,
     charging: bool,
     charge_effect: Option<ChargeEffect>,
@@ -215,7 +222,14 @@ struct Battle {
     sustain_poise: bool,
 }
 impl Battle {
-    fn charge_level(&mut self, was_charging: bool, delta: f32, cap: u8, wrapped: bool) -> u8 {
+    fn charge_level(
+        &mut self,
+        was_charging: bool,
+        delta: f32,
+        elapsed: f32,
+        cap: u8,
+        wrapped: bool,
+    ) -> u8 {
         // A newly armed charge already counted the trigger tick in event 30.
         if was_charging {
             // The wrap fallback already uses GU elapsed time. Otherwise undo
@@ -226,16 +240,26 @@ impl Battle {
                 charge_animation_rate(cap)
             };
             self.charge += delta * 0.5 / rate;
+            if delta > 0. {
+                self.gu_charge_time += elapsed;
+            }
         }
-        ((self.charge / self.charge_interval) as u8)
-            .saturating_sub(1)
-            .min(cap)
+        // Frontier's uppercut has a fourth tier beyond GU's three thresholds.
+        if cap == 4 && self.charge >= UPPERCUT_FOURTH_TIER_INTERVALS * self.charge_interval {
+            return 4;
+        }
+        let skill_rate = self.charge_interval / 20.;
+        GU_CHARGE_THRESHOLDS
+            .into_iter()
+            .take_while(|threshold| self.gu_charge_time >= threshold * skill_rate)
+            .count() as u8
     }
 
     fn fresh(p: u32, equip: u32) -> Self {
         Self {
             peer_slot: 0,
             peer_guard: peer::GuardBody::Off,
+            guard_hold: None,
             audio: Default::default(),
             motion_fx: Default::default(),
             owner: p,
@@ -244,6 +268,7 @@ impl Battle {
             cursor: program::cursor(IDLE),
             packed: 0xffff,
             charge: 0.,
+            gu_charge_time: 0.,
             charge_interval: 20.,
             charging: false,
             charge_effect: None,
@@ -272,6 +297,7 @@ impl Battle {
         self.charge_effect = None;
         self.radiance_contact = None;
         self.peer_guard = peer::GuardBody::Off;
+        self.guard_hold = None;
         self.cursor = program::cursor(IDLE);
         self.motion_fx.seek(0, 0.);
         self.packed = 0xffff;
@@ -374,6 +400,7 @@ impl Battle {
             self.charge_effect = None;
             self.radiance_contact = None;
             self.cursor = cursor;
+            self.guard_hold = None;
             if !is_guard_success(state) {
                 self.peer_guard = peer::GuardBody::Off;
             }
@@ -477,6 +504,7 @@ impl Battle {
                         self.charging = true;
                         // 811D84FE increments +2852 on the tick that event 30 arms it.
                         self.charge = 1. + late * 0.5;
+                        self.gu_charge_time = read::<f32>(p, 28).max(0.) + late;
                         let rate = charge_animation_rate(charge_cap(self.cursor.state));
                         if rate != 1. {
                             action::set_motion_rate(p, rate);
@@ -593,8 +621,9 @@ impl Battle {
                 }
             }
             let wrapped = self.cursor.time.observe(frame, sample.blend);
+            let elapsed = read::<f32>(p, 28).max(0.);
             let delta = if wrapped {
-                read::<f32>(p, 28).max(0.)
+                elapsed
             } else {
                 (frame - previous).max(0.)
             };
@@ -637,9 +666,11 @@ impl Battle {
                 };
                 write(p, 10296, duration);
             }
-            if self.charging && delta > 0. {
+            // A buffered X release can wait for the swing gate. Keep the
+            // earned tier during that wait, even with GU's earlier thresholds.
+            if self.charging && delta > 0. && (uppercut_charge || input.weapon_command(5)) {
                 let old = self.level;
-                self.level = self.charge_level(was_charging, delta, cap, wrapped);
+                self.level = self.charge_level(was_charging, delta, elapsed, cap, wrapped);
                 if self.level > old && self.level == 4 {
                     fx::emit(p, 0, Some(8));
                     crate::sound::play(p, true, 210);
@@ -1031,6 +1062,18 @@ impl Battle {
 struct Controller(AtomicBool, UnsafeCell<Option<Battle>>);
 unsafe impl Sync for Controller {}
 static CONTROL: Controller = Controller(AtomicBool::new(false), UnsafeCell::new(None));
+
+pub(super) fn edit_local_guard_hold(actor: u32, edit: impl FnOnce(&mut Option<Hold>)) {
+    if CONTROL.0.swap(true, Ordering::Acquire) {
+        return;
+    }
+    if let Some(battle) = unsafe { &mut *CONTROL.1.get() }
+        && battle.owner == actor
+    {
+        edit(&mut battle.guard_hold);
+    }
+    CONTROL.0.store(false, Ordering::Release);
+}
 
 pub(super) fn radiance_origin(owner: u32, shapes: u32) -> Option<[f32; 3]> {
     if let Some(origin) = unsafe { peer::radiance_origin(owner, shapes) } {

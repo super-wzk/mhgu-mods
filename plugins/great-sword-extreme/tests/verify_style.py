@@ -702,14 +702,24 @@ def verify_guard_body(g, hunter, units, impact_route):
     impacts = impact_layers()
     assert [g.get(unit + 68) for unit in impacts[len(initial_impacts):]] == list(impact_route)
     assert all(xyz(unit + 304) == (0., 55., 95.) for unit in impacts[len(initial_impacts):])
+    # A body part animated out of contact. Keep the inward component blocked
+    # and reduce the remaining side slip while the monster is still pressing in.
+    away = (0, 50, 400)
+    assert step(0, -40, away) == (0, 0)
+    assert step(15, -40, away) == (12, 0)
+    assert step(55, -60, away) == (55, -60)  # clear the side of the barrier
+    assert step(0, -40, away) == (0, -40)
     x, z = step(0, -75, (60, 50, 150))
     assert x == 0 and -19 < z < -18, (x, z)
     assert impact_layers() == impacts
+    assert step(0, 30, away) == (0, 30)  # retreat releases the hold
+    assert step(0, -40, away) == (0, -40)
     # The closest part may lie between the native capsule's joints.
     g.cpu.mem_write(row + 4, b"\1\0")
     position(row + 32, (220, 50, 150))
     x, z = step(0, -75, (-220, 50, 150))
     assert x == 0 and -15.1 < z < -14.5, (x, z)
+    assert step(20, 0, away) == (20, 0)  # sideways movement releases the hold
     g.cpu.mem_write(row + 4, b"\0\0")
     x, z = step(0, -60, (160, 50, 75))
     assert x > 0 and -60 < z < 0, (x, z)
@@ -730,14 +740,29 @@ def verify_guard_body(g, hunter, units, impact_route):
     g.stub(0xAA278, lambda *_: 5)  # large monster would normally push only the hunter
     g.run(g.hooks[0x17F188], 0, hunter, hunter_push, monster, monster_push)
     assert xyz(hunter + 4160) == (0, 0, 0)
+    assert step(0, -75)[1] > -75  # lock again before the timer expires
+    # An animated part can push sideways even while this monster is held.
+    position(hunter_push, (10, 0, 0))
+    position(monster_push, (-10, 0, 0))
+    g.run(g.hooks[0x17F188], 0, hunter, hunter_push, monster, monster_push)
+    assert xyz(hunter + 4160) == (0, 0, 0)
+    other_monster = g.alloc(46600)
+    g.put(other_monster + 5160, state)
+    g.cpu.mem_write(other_monster + 4180, bytes([area]))
+    g.run(g.hooks[0x17F188], 0, hunter, hunter_push, other_monster, monster_push)
+    assert xyz(hunter + 4160) == (10, 0, 0)
+    position(hunter + 4160, (0, 0, 0))
+    position(hunter_push, (0, 0, -10))
+    position(monster_push, (0, 0, 10))
     g.put(hunter + 11072, 0)
-    assert step(0, -75) == (0, -75)
+    assert step(0, -75, away) == (0, -75)
     g.run(g.hooks[0x17F188], 0, hunter, hunter_push, monster, monster_push)
     assert xyz(hunter + 4160) == (0, 0, -10)
     position(hunter + 4160, (0, 0, 0))
     g.cpu.mem_write(hunter + 4176, b"\0")
 
     g.cpu.mem_write(hunter + 11072, struct.pack("<f", 14.))
+    assert step(20, 0, away) == (20, 0)
     contact_state = g.half(hunter + 9482)
     g.cpu.mem_write(hunter + 9482, struct.pack("<H", 0x8044))  # horizontal follow-up
     assert step(0, -75) == (0, -75)
@@ -748,7 +773,7 @@ def verify_guard_body(g, hunter, units, impact_route):
     g.cpu.mem_write(equipment + 1236, b"\0")
     assert -15.1 < step(0, -75)[1] < -14.5
     g.cpu.mem_write(hunter + 64, previous_hunter)
-    print("GU precise guard body: front stop, side slide, bypass, expiry and counter release passed")
+    print("GU precise guard body: front stop, contact hold, side slide, bypass and release passed")
 
 
 def verify_battle(g, p, remote, resources):
@@ -1302,17 +1327,41 @@ def verify_battle(g, p, remote, resources):
         h(5136, 0)
         assert g.run(g.hooks[ENCODE], p, 28) & 255 == slot
     # GU's clock can pause. A long pause at one frame must not charge up.
+    f(28, 2.)
     for key, hold, release, expected, interval in [
         (32, 0, True, 60, 20),
-        (32, 38, True, 60, 20),
-        (32, 39, True, 85, 20),
+        (32, 23, True, 60, 20),
+        (32, 24, True, 85, 20),
+        (32, 48, True, 85, 20),
+        (32, 49, True, 105, 20),
+        (32, 68, True, 105, 20),
+        (32, 69, True, 146, 20),
         (32, 90, False, 146, 20),
-        (0x120, 100, True, 200, 20),
+        (0x120, 23, True, 58, 20),
+        (0x120, 24, True, 92, 20),
+        (0x120, 48, True, 92, 20),
+        (0x120, 49, True, 112, 20),
+        (0x120, 68, True, 112, 20),
+        (0x120, 69, True, 157, 20),
+        (0x120, 91, True, 157, 20),
+        (0x120, 92, True, 200, 20),
         (0x120, 111, False, 112, 20),
-        (32, 30, True, 60, 16),
-        (32, 31, True, 85, 16),
-        (32, 46, True, 60, 24),
-        (32, 47, True, 85, 24),
+        (32, 18, True, 60, 16),
+        (32, 19, True, 85, 16),
+        (32, 39, True, 105, 16),
+        (32, 55, True, 146, 16),
+        (0x120, 19, True, 92, 16),
+        (0x120, 55, True, 157, 16),
+        (0x120, 73, True, 157, 16),
+        (0x120, 74, True, 200, 16),
+        (32, 29, True, 60, 24),
+        (32, 30, True, 85, 24),
+        (32, 60, True, 105, 24),
+        (32, 83, True, 146, 24),
+        (0x120, 30, True, 92, 24),
+        (0x120, 83, True, 157, 24),
+        (0x120, 110, True, 157, 24),
+        (0x120, 111, True, 200, 24),
     ]:
         skills.clear()
         if interval != 20:
@@ -1338,15 +1387,16 @@ def verify_battle(g, p, remote, resources):
             )
         if release:
             if check_first_tier:
-                assert charge_rises == ([128] if expected == 85 else []), (hold, interval, charge_rises)
+                tier = (60, 85, 105, 146).index(expected)
+                assert charge_rises == list(range(128, 128 + tier)), (hold, interval, charge_rises)
                 flashes = [g.get(unit + 68) for unit in units if g.get(unit + 68) in routes[10]]
-                assert flashes == (list(routes[10]) if expected == 85 else []), (hold, interval, flashes)
+                assert flashes == (list(routes[10]) if tier else []), (hold, interval, flashes)
                 g.put(0x188A0D4, 0)
             frame = max(58, arm_at + frames_per_tick * hold)
             tick(frame if frame < end else loop_at + (frame - end) % (end - loop_at))
-        assert clip() in (28, 38) and value() == expected, (key, hold, clip(), value())
+        assert clip() in (28, 38, 39) and value() == expected, (key, hold, clip(), value())
         assert g.get(p + 5296) == 0x3F800000
-        if key == 0x120 and expected == 200:
+        if key == 0x120 and expected == 200 and interval == 20:
             g.put(0x188A0D4, manager)
             units.clear()
             origin = bytes(g.cpu.mem_read(p + 64, 12))
@@ -1371,15 +1421,15 @@ def verify_battle(g, p, remote, resources):
     for step in (1, 2):
         neutral()
         charge_rises.clear()
+        f(28, step)
         tick(0, held=32, pressed=32)
         tick(34, held=32)
         packed = g.half(p + 1204)
         bank = g.get(p + 3844 + 4 * (packed >> 8))
         header = g.run(0xB49E54, bank, packed & 255)
         g.run(0x952C7C, p, 0, header)
-        f(28, step)
         f(1276, 34.)
-        for elapsed in range(0, 78 + step, step):
+        for elapsed in range(0, 140 + step, step):
             # 29BF34 multiplies the base rate by the GU hitstop factor in s16.
             g.cpu.reg_write(arm.UC_ARM_REG_R4, p)
             g.cpu.reg_write(arm.UC_ARM_REG_S16, 0x3F800000 if elapsed else 0)
@@ -1388,12 +1438,10 @@ def verify_battle(g, p, remote, resources):
             tick(held=32)
             pose, = struct.unpack("<f", g.cpu.mem_read(p + 1280, 4))
             assert pose == 34. + max(0, elapsed - step) / 2
-            assert not charge_rises
-        g.run(0x951A80, p)
-        tick(held=32)
-        assert charge_rises == [128]
+            expected = [cue for time, cue in zip((50, 100, 140), (128, 129, 130)) if elapsed >= time]
+            assert charge_rises == expected, (step, elapsed, charge_rises)
         tick(held=0)
-        assert clip() == 28 and value() == 85 and g.get(p + 5296) == 0x3F800000
+        assert clip() == 28 and value() == 146 and g.get(p + 5296) == 0x3F800000
     f(28, 2)
 
     # Lion's Maw applies to the first registered strike even on a whiff.

@@ -3,7 +3,10 @@ use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 use super::{
     STYLE_ID,
-    battle::{guard_body_active, peer_guard_body_active, read, write},
+    battle::{
+        edit_local_guard_hold, edit_peer_guard_hold, guard_body_active, guarding_peer_slot, read,
+        write,
+    },
     fx,
 };
 use mhgu_sdk::{
@@ -19,6 +22,7 @@ const STATE: u32 = 5160;
 const AREA: u32 = 4180;
 const BODY_RADIUS: f32 = 50.; // GU 17CF40 hunter sphere, centered 50 units above the feet.
 const EXTRA_HALF_WIDTH: f32 = 30.;
+const HELD_LATERAL_RATE: f32 = 0.8;
 const MAX_STEP: f32 = 300.; // Leave large position corrections to GU.
 static IMPACT_OWNER: AtomicU32 = AtomicU32::new(0);
 
@@ -26,8 +30,58 @@ type Point = [f32; 3];
 
 struct Barrier {
     hunter: u32,
+    peer: Option<usize>,
+    position: Point,
     center: Point,
     forward: Point,
+    holding: bool,
+}
+
+pub(super) struct Hold {
+    monster: u32,
+    state: u32,
+    relative_root: Point,
+    forward: Point,
+}
+
+fn edit_guard_hold(hunter: u32, peer: Option<usize>, edit: impl FnOnce(&mut Option<Hold>)) {
+    if let Some(index) = peer {
+        edit_peer_guard_hold(index, hunter, edit);
+    } else {
+        edit_local_guard_hold(hunter, edit);
+    }
+}
+
+impl Barrier {
+    fn edit_hold(&self, edit: impl FnOnce(&mut Option<Hold>)) {
+        edit_guard_hold(self.hunter, self.peer, edit);
+    }
+
+    fn hold_step(&mut self, monster: u32, state: u32, start: Point, delta: Point, allowed: &mut Point) {
+        let relative_root = sub(start, self.position);
+        let mut holding = false;
+        self.edit_hold(|slot| {
+            let Some(hold) = slot.as_ref().filter(|hold| hold.monster == monster) else {
+                return;
+            };
+            let forward = hold.forward;
+            let across = [forward[2], 0., -forward[0]];
+            let from_contact = sub(relative_root, hold.relative_root);
+            let depth = dot(from_contact, forward);
+            let side = dot(advance(from_contact, delta, 1.), across);
+            if hold.state != state
+                || !is_frontal(delta, [-forward[0], 0., -forward[2]])
+                || depth * depth + side * side > BODY_RADIUS * BODY_RADIUS
+            {
+                *slot = None;
+                return;
+            }
+            holding = true;
+            let inward = (-dot(*allowed, forward)).max(0.) / dot(forward, forward);
+            *allowed = advance(*allowed, forward, inward);
+        });
+        self.holding = holding;
+    }
 }
 
 fn dot(a: Point, b: Point) -> f32 {
@@ -72,15 +126,20 @@ struct Contact {
     safe: f32,
     normal: Point,
     centered: bool,
-    hunter: u32,
+    guard_index: usize,
 }
 
 impl BodyShape {
-    fn sweep(&self, barrier: &Barrier, delta: Point, steps: u32, hit: &mut Option<Contact>) {
+    fn sweep(
+        &self,
+        guard_index: usize,
+        barrier: &Barrier,
+        delta: Point,
+        steps: u32,
+        hit: &mut Option<Contact>,
+    ) {
         let Barrier {
-            hunter,
-            center,
-            forward,
+            center, forward, ..
         } = *barrier;
         let axis = sub(self.end, self.start);
         let axis_len = dot(axis, axis);
@@ -136,7 +195,7 @@ impl BodyShape {
                         safe,
                         normal,
                         centered,
-                        hunter,
+                        guard_index,
                     });
                 }
                 break;
@@ -171,13 +230,17 @@ unsafe fn barriers(monster: u32, start: Point) -> [Option<Barrier>; PLAYER_COUNT
     unsafe {
         let visual_offset = sub(read(monster, POSITION), start);
         let area = read::<u8>(monster, AREA);
-        let make = |actor| {
-            let mut center = advance(read(actor, POSITION), visual_offset, 1.);
+        let make = |actor, peer| {
+            let position = read(actor, POSITION);
+            let mut center = advance(position, visual_offset, 1.);
             center[1] += BODY_RADIUS;
             Barrier {
                 hunter: actor,
+                peer,
+                position,
                 center,
                 forward: facing(actor),
+                holding: false,
             }
         };
         let mut guards = core::array::from_fn(|_| None);
@@ -185,15 +248,15 @@ unsafe fn barriers(monster: u32, start: Point) -> [Option<Barrier>; PLAYER_COUNT
             && read::<u8>(local, AREA) == area
             && local_guard_active(local)
         {
-            guards[0] = Some(make(local));
+            guards[0] = Some(make(local, None));
         }
         if let Some(roster) = Roster::current() {
             for index in 0..PLAYER_COUNT {
                 if let Some(peer) = roster.peer(index)
-                    && peer_guard_body_active(peer, &roster)
+                    && guarding_peer_slot(peer, &roster).is_some()
                     && read::<u8>(peer, AREA) == area
                 {
-                    guards[index + 1] = Some(make(peer));
+                    guards[index + 1] = Some(make(peer, Some(index)));
                 }
             }
         }
@@ -229,8 +292,10 @@ unsafe fn body_contact(monster: u32, guards: &[Option<Barrier>], delta: Point) -
                     }
                 }
                 if body.radius > 0. && body.radius.is_finite() {
-                    for guard in guards.iter().flatten() {
-                        body.sweep(guard, delta, steps, &mut hit);
+                    for (index, guard) in guards.iter().enumerate() {
+                        if let Some(guard) = guard.as_ref().filter(|guard| !guard.holding) {
+                            body.sweep(index, guard, delta, steps, &mut hit);
+                        }
                     }
                 }
             }
@@ -294,21 +359,41 @@ unsafe fn monster_step(monster: u32, posture: u32) -> u32 {
         }
         // The body shapes use the published pose. Translate the guards into
         // that coordinate frame before sweeping the proposed root movement.
-        let guards = barriers(monster, start);
-        if guards.iter().any(Option::is_some)
-            && let Some(hit) = body_contact(monster, &guards, delta)
+        let mut guards = barriers(monster, start);
+        let mut allowed = delta;
+        for guard in guards.iter_mut().flatten() {
+            guard.hold_step(monster, state, start, delta, &mut allowed);
+        }
+        if guards.iter().flatten().any(|guard| guard.holding) {
+            allowed = allowed.map(|component| component * HELD_LATERAL_RATE);
+        }
+        if dot(allowed, allowed) > 0.
+            && guards.iter().flatten().any(|guard| !guard.holding)
+            && let Some(hit) = body_contact(monster, &guards, allowed)
         {
-            let mut allowed = advance([0.; 3], delta, hit.safe);
+            let step = allowed;
+            allowed = advance([0.; 3], step, hit.safe);
             if hit.centered {
-                play_impact(hit.hunter);
+                let guard = guards[hit.guard_index].as_ref().unwrap();
+                guard.edit_hold(|slot| {
+                    slot.get_or_insert(Hold {
+                        monster,
+                        state,
+                        relative_root: sub(advance(start, allowed, 1.), guard.position),
+                        forward: guard.forward,
+                    });
+                });
+                play_impact(guard.hunter);
             } else {
                 let slide = advance(
-                    delta,
+                    step,
                     hit.normal,
-                    -dot(delta, hit.normal) / dot(hit.normal, hit.normal),
+                    -dot(step, hit.normal) / dot(hit.normal, hit.normal),
                 );
                 allowed = advance(allowed, slide, 1. - hit.safe);
             }
+        }
+        if allowed != delta {
             position[0] = start[0] + allowed[0];
             position[2] = start[2] + allowed[2];
             write(state, POSITION, position);
@@ -319,8 +404,8 @@ unsafe fn monster_step(monster: u32, posture: u32) -> u32 {
     result
 }
 
-// If pre-existing body overlap also requests a native push, hold the
-// guarding hunter in place at the front edge. Keep other push pairs native.
+// The contact can move around as the monster animates. Its combined native
+// push vector need not face forward after the guard has caught that monster.
 #[forge::hook(offset = 0x17f188)]
 unsafe fn body_push(
     manager: u32,
@@ -331,26 +416,53 @@ unsafe fn body_push(
 ) -> u32 {
     unsafe {
         let state = read::<u32>(monster, STATE);
-        let guarding = if hunter::local() == Some(hunter) {
+        let local = hunter::local() == Some(hunter);
+        let peer = if local {
+            None
+        } else {
+            Roster::current().and_then(|roster| guarding_peer_slot(hunter, &roster))
+        };
+        let guarding = if local {
             local_guard_active(hunter)
         } else {
-            Roster::current().is_some_and(|roster| peer_guard_body_active(hunter, &roster))
+            peer.is_some()
         };
         if guarding
             && has_ground_body(state)
             && read::<u8>(hunter, AREA) == read::<u8>(monster, AREA)
         {
+            let mut push = hunter_push.read();
             let [x, _, z, _] = monster_push.read();
             let separation = [x, 0., z];
+            let away_from_hunter = [-push[0], 0., -push[2]];
             let forward = facing(hunter);
-            if dot(separation, forward) > 0. {
-                let mut push = hunter_push.read();
-                // A replica does not clip the root step. Its native push still
-                // reports the frontal contact to the defending client.
-                if read::<u8>(monster, 46583) != 0
-                    && (push[0] != 0. || push[2] != 0.)
-                    && is_frontal(separation, forward)
-                {
+            let front = dot(separation, forward) > 0. || dot(away_from_hunter, forward) > 0.;
+            // A replica gets contact from the native push and leaves the
+            // monster's position to its owner.
+            let replica_contact = read::<u8>(monster, 46583) != 0
+                && (push[0] != 0. || push[2] != 0.)
+                && (is_frontal(separation, forward) || is_frontal(away_from_hunter, forward));
+            let relative_root = sub(read(state, POSITION), read(hunter, POSITION));
+            let mut held = false;
+            edit_guard_hold(hunter, peer, |slot| {
+                if let Some(hold) = slot.as_ref().filter(|hold| hold.monster == monster) {
+                    let [dx, _, dz] = sub(relative_root, hold.relative_root);
+                    held = hold.state == state && dx * dx + dz * dz <= BODY_RADIUS * BODY_RADIUS;
+                    if !held {
+                        *slot = None;
+                    }
+                }
+                if replica_contact {
+                    slot.get_or_insert(Hold {
+                        monster,
+                        state,
+                        relative_root,
+                        forward,
+                    });
+                }
+            });
+            if held || front {
+                if replica_contact {
                     play_impact(hunter);
                 }
                 push[0] = 0.;

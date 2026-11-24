@@ -96,8 +96,9 @@ impl Battle {
             let sample = MotionFrame::sample(p);
             let previous = self.cursor.time.frame;
             let wrapped = self.cursor.time.observe(sample.frame, sample.blend);
+            let elapsed = read::<f32>(p, 28).max(0.);
             let delta = if wrapped {
-                read::<f32>(p, 28).max(0.)
+                elapsed
             } else {
                 (sample.frame - previous).max(0.)
             };
@@ -107,7 +108,7 @@ impl Battle {
             let was_charging = self.charging;
             self.events(p);
             if self.charging {
-                let level = self.charge_level(was_charging, delta, charge_cap(state), wrapped);
+                let level = self.charge_level(was_charging, delta, elapsed, charge_cap(state), wrapped);
                 self.level = self.level.max(level);
                 self.charge_effect
                     .get_or_insert_with(|| ChargeEffect::start(p, self.peer_slot))
@@ -143,13 +144,11 @@ pub(super) unsafe fn radiance_origin(actor: u32, shape: u32) -> Option<[f32; 3]>
     origin
 }
 
-pub(crate) unsafe fn guard_body_active(actor: u32, roster: &Roster) -> bool {
+pub(crate) unsafe fn guarding_slot(actor: u32, roster: &Roster) -> Option<usize> {
     unsafe {
-        let Some(index) = roster.peer_index(actor) else {
-            return false;
-        };
+        let index = roster.peer_index(actor)?;
         if PEERS.live(index, roster, 0) != Some(actor) || !guard_success_action(actor) {
-            return false;
+            return None;
         }
         let mut active = false;
         PEERS.update(index, actor, |saved, _| {
@@ -160,8 +159,16 @@ pub(crate) unsafe fn guard_body_active(actor: u32, roster: &Roster) -> bool {
                         if area == read::<u8>(actor, 4180) && remaining > 0.)
             });
         });
-        active
+        active.then_some(index)
     }
+}
+
+pub(crate) fn edit_guard_hold(index: usize, actor: u32, edit: impl FnOnce(&mut Option<Hold>)) {
+    PEERS.update(index, actor, |saved, _| {
+        if let Some(battle) = saved {
+            edit(&mut battle.guard_hold);
+        }
+    });
 }
 
 unsafe extern "C" fn observe(local: u32) {
