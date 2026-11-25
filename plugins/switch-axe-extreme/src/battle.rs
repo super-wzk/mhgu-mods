@@ -1,4 +1,5 @@
 mod arts;
+mod landing;
 mod peer;
 
 use crate::{
@@ -186,6 +187,7 @@ struct Battle {
     branch_aim: Option<(u16, u16)>,
     x_press_aim: Option<u16>,
     roll_followup: Option<u8>,
+    landing_followup: Option<landing::Pending>,
     packed: u16,
     model_motion: u8,
     charge: f32,
@@ -217,6 +219,7 @@ impl Battle {
             branch_aim: None,
             x_press_aim: None,
             roll_followup: None,
+            landing_followup: None,
             packed: 0,
             model_motion: program::AXE_IDLE_MOTION,
             charge: 0.,
@@ -678,8 +681,19 @@ impl Battle {
                 movement::stamina(actor, -1., true);
             }
             let (sample, wrapped) = self.sample(actor, step.clip);
+            // FZ 812132C4 advances the motion program before 81815F30 reads
+            // commands. An X+A press on the end tick sees the new clip's window.
+            let c = self.cursor.as_mut().unwrap();
+            let complete = program::step_complete(step, c.time, sample, wrapped);
+            let advance_before_input = complete && sample.ended;
+            if advance_before_input {
+                c.time.step += 1;
+                self.play(actor);
+            }
+            let Some(c) = &self.cursor else { return true };
+            let (frame, blend) = (c.time.frame, c.time.blend);
             // Monster absorption opens its X+A rows at motion frame 10.
-            if matches!(state, 90 | 92) && sample.frame < 10. {
+            if matches!(state, 90 | 92) && frame < 10. {
                 let slash = bits & DIRECTIONAL_SLASHES;
                 if slash != 0 {
                     self.guard_slash = slash;
@@ -690,7 +704,7 @@ impl Battle {
                 }
                 self.guard_slash = 0;
             }
-            if matches!(state, 36 | 37 | 119 | 120) && sample.frame > 0. {
+            if matches!(state, 36 | 37 | 119 | 120) && frame > 0. {
                 let offset = if matches!(state, 36 | 119) {
                     0xc000
                 } else {
@@ -708,11 +722,6 @@ impl Battle {
                 && self.begin(actor, recoil)
             {
                 action::melee::clear_hitstop(actor);
-                return true;
-            }
-            // FZ 81815D60 exits a completed slash before 81815F30 checks inputs.
-            if matches!(state, 106..=108 | 152..=154) && sample.ended {
-                self.finish(actor);
                 return true;
             }
             let c = self.cursor.as_mut().unwrap();
@@ -801,8 +810,8 @@ impl Battle {
             // moving charge, after the ordinary branches have run.
             if matches!(state, 111 | 139 | 162)
                 && direction.is_some()
-                && sample.blend <= 0.
-                && sample.frame >= 40.
+                && blend <= 0.
+                && frame >= 40.
             {
                 let facing = read::<u16>(actor, 4076).wrapping_sub(yaw as u16);
                 return self.begin_facing(
@@ -828,9 +837,8 @@ impl Battle {
                     return self.begin(actor, next);
                 }
             }
-            let c = self.cursor.as_mut().unwrap();
-            if program::step_complete(step, c.time, sample, wrapped) {
-                c.time.step += 1;
+            if complete && !advance_before_input {
+                self.cursor.as_mut().unwrap().time.step += 1;
                 self.play(actor);
             }
             true
@@ -916,6 +924,23 @@ impl Battle {
             let left = degrees.is_some_and(|d| (-135..=-45).contains(&d));
             let right = degrees.is_some_and(|d| (45..=135).contains(&d));
             let back = degrees.is_some_and(|d| d.abs() >= 135);
+            let slash_dir = if left {
+                Some(1)
+            } else if right {
+                Some(2)
+            } else if back {
+                Some(0)
+            } else {
+                None
+            };
+            let landing_attack = landing::Pending::update(
+                &mut self.landing_followup,
+                actor,
+                current,
+                drawn,
+                dt,
+                landing::Attack::pressed(actor, direction.is_some(), slash_dir),
+            );
             // GU w08 11A03A8 can omit the chord when the buttons overlap
             // a held attack or the weapon shoulder. Use GU's filtered pad.
             let chord = input.weapon_command(WEAPON_XA)
@@ -1124,6 +1149,11 @@ impl Battle {
             }
             let sword = self.gauges.sword;
             let slash = arts::slash(actor);
+            if let Some(attack) = landing_attack {
+                return attack
+                    .action(self.gauges, slash)
+                    .is_some_and(|id| self.begin(actor, id));
+            }
             let id = if terrain_exit {
                 let sprint_energy = if axe_sprint { slash } else { self.gauges.light };
                 if move_stick && sprint_energy > 0 {
@@ -1141,24 +1171,13 @@ impl Battle {
                 return false;
             } else if charge {
                 if sword { 162 } else { 111 }
-            } else if chord && !sword && slash > 0 && (left || right || back) {
-                if left {
-                    107
-                } else if right {
-                    108
-                } else {
-                    106
-                }
+            } else if chord && !sword && slash > 0 && let Some(dir) = slash_dir {
+                106 + dir
             } else if chord {
                 // FZ 81212AA8 starts discharge from light-sword idle in any direction.
                 if sword { 70 } else { 2 }
             } else if x {
-                match (sword, move_stick) {
-                    (false, false) => 0,
-                    (false, true) => 3,
-                    (true, false) => 5,
-                    (true, true) => 17,
-                }
+                landing::ground_x(sword, move_stick)
             } else if a {
                 if sword { 78 } else { 1 }
             } else {
@@ -1326,10 +1345,15 @@ pub unsafe extern "C" fn request(actor: u32, r: *const ActionRequest) -> u32 {
         && req.group == action::GROUP
         && matches!(req.flags, 0 | 0x1000)
         && matches!(req.slot, 0..=7 | 19 | 20 | 35 | 38 | 800)
-        && movement::ground_idle(unsafe { action::current(actor) })
-        && unsafe { native!(0x2a2444, actor) != 0 && style_idle_input(actor) }
     {
-        return style::PASS;
+        let current = unsafe { action::current(actor) };
+        // Keep stock weapon commands from bypassing the landing recovery.
+        if unsafe { native!(0x2a2444, actor) != 0 }
+            && (unsafe { landing::recovering(actor, current) }
+                || (movement::ground_idle(current) && unsafe { style_idle_input(actor) }))
+        {
+            return style::PASS;
+        }
     }
     if req.group == action::GROUP
         && req.flags & 128 == 0

@@ -366,15 +366,15 @@ def replay(repo, root):
         assert state() == (16, 0x8000 + brake), (sprint, state())
         half(inp + 34, 80)
         half(actor + 5136, 80)
-    for slash, stick in ((0, 80), (50, 0)):
+    for slash, strength in ((0, 80), (50, 0)):
         g.put(actor + 13100, 100)
         enter(103)
         g.put(actor + 13100, slash)
         set_action(1, 138)
         frame(1)
         assert state() == (1, 138)
-        half(inp + 34, stick)
-        half(actor + 5136, stick)
+        half(inp + 34, strength)
+        half(actor + 5136, strength)
         set_action(2, 30)
         frame(1)
         assert state() == (16, 0x8000 + 105), (slash, stick, state())
@@ -399,6 +399,131 @@ def replay(repo, root):
     for slot in (97, 98, 99, 101, 102, 103, 137, 138, 139):
         g.run(g.hooks[0x2AB670], actor, 16, slot, 0)
         assert accepted[-1] == (16, slot, 0)
+
+    def native_action(group, slot, phase=0):
+        # GU 283090 saves the action being replaced.
+        old_group, old_slot = state()
+        set_action(group, slot)
+        half(actor + 9480, old_group)
+        half(actor + 9484, old_slot)
+        g.cpu.mem_write(actor + 5, bytes([phase]))
+
+    def press(held, edge=0, yaw=0, strength=0, dt=2):
+        half(actor + 5108, held)
+        half(actor + 5112, edge)
+        stick(strength, g.half(actor + 4076) - yaw)
+        g.run(0x11A03A8, actor)  # Native w08 weapon command mapper.
+        g.cpu.mem_write(inp + 16, bytes(g.cpu.mem_read(actor + 5156, 16)))
+        frame(1, dt)
+
+    def begin_jump(slot=56, slash=100, sword=False):
+        g.run(tick, 0, 0)
+        g.put(actor + 13100, slash)
+        if sword:
+            for _ in range(2):
+                enter(90)
+                frame(8)
+            enter(94)
+            frame(124)
+            assert state() == (16, 0x8000 + 110)
+        native_action(16, slot, 1)
+
+    def land(slot=56):
+        g.cpu.mem_write(actor + 5, b"\x02")
+        press(0, dt=24)
+        assert state() == (16, slot)
+        native_action(1, 0)
+        press(0)
+
+    # Use GU's dispatcher for the in-place 1 -> 2 -> 3 -> idle sequence.
+    stub(0x539F4C, lambda *_: 0)
+    stub(0x2A84D8, lambda *_: 1)
+    stub(0x2A063C, lambda *_: 0)
+    stub(0x280E4C, lambda *_: 0)
+    stub(0x281998, lambda hunter, clip, *_: half(hunter + 1204, clip & 0xFFFF) or 1)
+    stub(0x950BCC, lambda *_: 1)
+    stub(0x2B6E94, lambda _, mode, motion, *__: (
+        (mode, motion) == (0, 4) and (native_action(1, 0) or 1)
+    ))
+    begin_jump()
+    g.cpu.mem_write(actor + 6, b"\x01")
+    press(0x20, 0x20)
+    assert state() == (16, 56)
+    g.run(0x11A08E0, actor)
+    assert g.cpu.mem_read(actor + 5, 1) == b"\x02"
+    g.run(g.hooks[0x2AB670], actor, 16, 2, 0)
+    assert state() == (16, 56)  # Stock ground attacks cannot preempt recovery.
+    press(0x120, 0x100, yaw=-0x4000, strength=100)
+    g.run(0x11A08E0, actor)
+    assert g.cpu.mem_read(actor + 5, 1) == b"\x03"
+    press(0x120, yaw=0x4000, strength=100)
+    g.run(0x11A08E0, actor)
+    assert state() == (1, 0)
+    press(0)
+    assert state() == (16, 0x8000 + 107), state()  # Fresh chord replaced X; yaw was captured.
+    native_action(1, 0)
+    press(0)
+    assert state() == (1, 0)
+
+    for sword, button, yaw, strength, expected in (
+        (False, 0x20, 0, 0, 0), (False, 0x20, 0, 100, 3),
+        (False, 0x100, 0, 0, 1), (False, 0x120, 0, 0, 2),
+        (True, 0x20, 0, 0, 5), (True, 0x20, 0, 100, 17),
+        (True, 0x100, 0, 0, 78), (True, 0x120, 0, 100, 70),
+        (True, 0x120, 0x4000, 100, 154),
+    ):
+        begin_jump(slot=57, sword=sword)
+        press(button, button, yaw, strength)
+        land(57)
+        assert state() == (16, 0x8000 + expected), (sword, button, yaw, state())
+
+    begin_jump(slot=67)
+    press(0x100, 0x100)
+    stub(0x2831E0, lambda _, group, slot, __: native_action(group, slot) or 1)
+    g.cpu.mem_write(actor + 6, b"\x01")
+    g.run(0x11A08E0, actor)
+    assert state() == (16, 68)
+    press(0, dt=24)
+    assert state() == (16, 68)
+    native_action(1, 0)
+    press(0)
+    assert state() == (16, 0x8001)
+
+    begin_jump()
+    press(0x20, 0x20)
+    press(0x20, strength=100, dt=8)
+    land()
+    assert state() == (1, 0)  # Holding a button or changing the stick cannot refresh it.
+
+    begin_jump(slash=0)
+    press(0x120, 0x120, yaw=-0x4000, strength=100)
+    land()
+    assert state() == (1, 0)  # No gauge means no slash and no fallback to X+A.
+
+    for interruption in ((64, 6), (1, 2), (4, 14)):
+        begin_jump()
+        press(0x100, 0x100)
+        native_action(*interruption)
+        press(0)
+        native_action(1, 0)
+        press(0)
+        assert state() == (1, 0), interruption
+
+    begin_jump()
+    press(0x100, 0x100)
+    g.cpu.mem_write(actor + 4180, b"\x02")
+    land()
+    assert state() == (1, 0)
+
+    begin_jump()
+    press(0x20, 0x20)
+    g.cpu.mem_write(actor + 5, b"\x02")
+    press(0)
+    native_action(1, 0)
+    press(0x100, 0x100)
+    assert state() == (16, 0x8001)
+
+    print("GU aerial routes: native landing, newest press, both forms, gauge rejection, expiry and interruption passed.")
     print(
         "GU routes: weapon form on damage and falls, directional ledge exits, sprint brake/sheathe/climb/resume, 12 native art entries and nine continuation requests passed."
     )

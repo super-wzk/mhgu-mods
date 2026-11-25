@@ -47,6 +47,51 @@ class Frontier:
         mask = sum(1 << command for command in commands)
         return m.call(0x8121B914, self.actor, mask, mask)
 
+    def light_sword_chords(self, data, state, samples):
+        """Replay the native w12 motion and branch dispatch for one sword combo."""
+        m, actor = self.m, self.actor
+        ext, form, directory, weapons, states, rows, steps = (
+            MEM + offset for offset in (0x20000, 0x201C0, 0x30000, 0x31000, 0x32000, 0x34000, 0x35000)
+        )
+        m.put(0x82BB48C0, directory)
+        m.put(directory + 0x614, weapons)
+        m.put(weapons + 12 * 8, 178)
+        m.put(weapons + 12 * 8 + 4, states)
+        desc = 16 + 24 * state
+        for field, (destination, width) in enumerate(((steps, 12), (rows, 40))):
+            count, offset = struct.unpack_from("<2I", data, desc + 8 * field)
+            m.c.mem_write(states + 24 * state + 8 * field, struct.pack("<2I", count, destination))
+            m.c.mem_write(destination, data[offset : offset + width * count])
+        m.c.mem_write(actor, bytes(4176))
+        m.c.mem_write(ext + 28, bytes(16))
+        for offset, value in ((3, 12), (20, state), (820, 1), (3394, 3), (3406, 255)):
+            m.c.mem_write(actor + offset, bytes([value]))
+        m.c.mem_write(actor + 3990, struct.pack("<H", 1))
+        m.put(form + 4, 2)
+        self.sword = True
+        for address in (0x81901066, 0x817420EE, 0x8174214E, 0x817420DE, 0x81ECC418):
+            m.trap(address, lambda *_: 0)
+        for address in (0x8182B54E, 0x8183EF72, 0x8112FCDC, 0x81210CBC):
+            m.trap(address, lambda *_: 1)
+        for address in (0x8121097C, 0x81210358):
+            m.trap(address, lambda *_: 100)
+        m.trap(0x8183E574, lambda _, clip, blend, start: m.c.mem_write(
+            actor + 476, struct.pack("<f", start)
+        ))
+        selected = []
+        m.trap(0x81214070, lambda _, target, *__: selected.append(target))
+        for frame, pressed, ended in samples:
+            self.command((5, 17, 18, 19), -0x4000, button=214 if pressed else 0)
+            m.trap(0x8172C370, lambda *_: 0)
+            m.c.mem_write(actor + 476, struct.pack("<f", frame))
+            if ended:
+                m.put(actor + 468, 0)
+                m.call(0x81815D60, actor, 0, 0)
+            m.call(0x81815F30, actor, 0x8121B619, 0x8121BF53, 0x81214071)
+            if selected:
+                return selected[0]
+        return state
+
     def release(self, branch, *, sword=False, level=0, tier=1, yaw=0, facing=0):
         self.sword, self.level, self.tier, self.yaw = sword, level, tier, yaw
         self.selected = []

@@ -181,6 +181,32 @@ def replay(g, root, actor, form, weapon, set_action, defer_transition):
             enter(opener, energy=0)
             assert tap(0x120, window) == opener
 
+    # Compare the shipped branch rows in the native FZ interpreter with the
+    # same fresh pad edge in GU. The completion bit belongs to the old clip.
+    native = Frontier(root.parents[1] / "mhfz/eboot.bin.elf")
+    data = (root / "target/assets/switch_axe.fsaa").read_bytes()
+    for opener, samples, expected in (
+        (76, ((20, False, True), (30, True, False), (40, False, False)), 77),
+        (76, ((20, False, True), (49, True, False)), 77),
+        (76, ((20, False, True), (50, True, False)), 153),
+        (70, ((69, True, False), (70, False, False)), 70),
+        (70, ((69, False, False), (70, True, False)), 153),
+        (77, ((30, False, True), (69, True, False)), 77),
+        (77, ((30, False, True), (70, True, False)), 153),
+        (98, ((25, True, False),), 98),
+        (98, ((26, True, False),), 153),
+        (98, ((50, True, True),), 74),
+        (74, ((30, True, False),), 153),
+    ):
+        assert native.light_sword_chords(data, opener, samples) == expected
+        refill_light()
+        enter(opener, sword=True)
+        aim = (facing + 0x4000) & 0xFFFF
+        for frame, pressed, ended in samples:
+            active = pad(frame, 0x120 if pressed else 0, stick=100, wrap=ended)
+        assert active == expected, (opener, samples, active, expected)
+    aim = facing
+
     for strength, expected in ((0, 2), (48, 2), (49, 2), (50, 3), (100, 3)):
         moving = strength >= 50
         assert reference.command((2, 7), 0, stick=moving, button=209) == (7 if moving else 2)
