@@ -51,13 +51,17 @@ def package(dat, romfs):
         "--", "switch-axe", dat, "--gu-weapon", romfs / "nativeNX/arc/player/quest/w00.arc",
         "-o", assets,
     ], check=True)
+    motions = assets / "motions.arc"
     env = os.environ.copy()
     env.pop("RUSTUP_TOOLCHAIN", None)
     subprocess.run(["cargo", "forge", "build", "--release"], cwd=ROOT, env=env, check=True)
     overlay = ROOT / "dist/switch-axe-extreme"
     nx = overlay / "romfs/nativeNX"
+    unpack(motions, nx, "player/mot/frontier_sa/", MOTION)
     for sex in "mf":
-        unpack(assets / f"{sex}.arc", nx, "player/mot/frontier_sa/", MOTION)
+        (assets / f"{sex}.arc").unlink(missing_ok=True)
+        for group in (0, 2, 4):
+            (nx / f"player/mot/frontier_sa/{sex}_{group}.lmt").unlink(missing_ok=True)
     unpack(assets / "sound.arc", nx, "sound/se/pl/frontier_sa/", SOUND)
     unpack(assets / "effects/geometry.arc", nx, "effect/frontier_sa/", EFFECT)
     hud = nx / "GUI/frontier_sa"

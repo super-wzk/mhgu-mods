@@ -3,23 +3,16 @@ use mhgu_sdk::style::{PASS, action};
 
 const PRIVATE: u32 = 0x1_0000;
 static BANKS: MotionBanks = MotionBanks::new([
-    [
-        c"player\\mot\\frontier_gl\\m_0",
-        c"player\\mot\\frontier_gl\\m_2",
-        c"player\\mot\\frontier_gl\\m_4",
-    ],
-    [
-        c"player\\mot\\frontier_gl\\f_0",
-        c"player\\mot\\frontier_gl\\f_2",
-        c"player\\mot\\frontier_gl\\f_4",
-    ],
+    c"player\\mot\\frontier_gl\\0",
+    c"player\\mot\\frontier_gl\\2",
+    c"player\\mot\\frontier_gl\\4",
 ]);
 
 const GROUND: &[(u32, u16)] = &[(5001, 1001), (5002, 1002), (5003, 1003), (5004, 1004)];
 
-pub unsafe extern "C" fn preload(actor: u32) {
+pub unsafe extern "C" fn preload(_actor: u32) {
     unsafe {
-        BANKS.preload_for_hunt(actor, 1405);
+        BANKS.preload_for_hunt(1405);
         crate::sound::preload();
         crate::fx::preload();
     }

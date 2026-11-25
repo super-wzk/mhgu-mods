@@ -26,7 +26,7 @@ def replay(weapon, style, plugin, vt):
     g.put(actor + 3844 + 14 * 4, attack_bank)
     def load(_, kind, path, flags):
         if kind == 0x2125210:
-            return attack_bank if g.string(path).endswith("_4") else bank
+            return attack_bank if g.string(path).endswith("\\4") else bank
         return 0
     g.stub(loader, load)
     g.put(bank + 80, 1)
@@ -52,7 +52,7 @@ def replay(weapon, style, plugin, vt):
         group = (source - 1000) // 100
         clip = source % 100
         assert packed == (0xE00 if group == 4 else 0xF00) + clip
-        lmt = next((dist / "player/mot").rglob(f"m_{group}.lmt")).read_bytes()
+        lmt = next((dist / "player/mot").rglob(f"{group}.lmt")).read_bytes()
         offset, = struct.unpack_from("<I", lmt, 8 + 4 * clip)
         frames, loop = struct.unpack_from("<Ii", lmt, offset + 8)
         assert loop == -1

@@ -42,9 +42,12 @@ python3 plugins/long-sword-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 python3 plugins/switch-axe-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 python3 plugins/sword-shield-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 python3 plugins/gunlance-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
+python3 plugins/style-registry/package_all.py
 ```
 
-武器打包脚本先把源数据转换到插件的 `target/assets/`，再构建 NRO 并组装 `dist/<插件名>/romfs/nativeNX`。动作程序和部分事件表由 `include_bytes!` 编入 NRO，LMT、命中、粒子、音效和贴图等原生资源随模组目录安装。
+武器打包脚本先把源数据转换到插件的 `target/assets/`，再构建 NRO 并组装 `dist/<插件名>/romfs/nativeNX`。动作程序和部分事件表由 `include_bytes!` 编入 NRO，LMT、命中、粒子、音效和贴图先以开发散文件生成，供单武器回放读取。每种武器的男女模型共用 `0.lmt`、`2.lmt`、`4.lmt` 三个动作库。
+
+`package_all.py` 从这七个开发目录组装发布版 `plugins/style-registry/dist/packed/`。每种武器包含独立 NRO 和一个 `arc/frontier/<武器>.arc`。注册器目录包含独立 NRO 和 `arc/frontier/common.arc`。整合包共 14 个文件。当前共用贴图和音频样本按内容去重，打包器在 ARC 中重写 MRL 和 SBKR 引用。
 
 已有匹配的资源且本次仅改 Rust 时，可以增量构建。离线脚本通常读取 `dist` 中的 NRO，需同步本次产物再运行。以下以双剑为例。
 
@@ -54,7 +57,7 @@ python3 plugins/gunlance-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
      plugins/dual-blades-extreme/dist/dual-blades-extreme/romfs/nativeNX/plugins/
 ```
 
-共用 SDK 改动后重建受影响的注册器和武器。转换器、源数据或资源格式发生变化时，重新运行相关打包脚本，让 NRO 内的事件表与外部资源一起更新。整理代码后也可对比重建前后的非 NRO 文件清单和哈希，确认生成资源一致。
+共用 SDK 改动后重建受影响的注册器和武器。发布版更新后重新运行 `package_all.py`。转换器、源数据或资源格式发生变化时，重新运行相关打包脚本，让 NRO 内的事件表与外部资源一起更新。整理代码后也可对比重建前后的非 NRO 文件清单和哈希，确认生成资源一致。
 
 ## 调查原生入口
 
@@ -66,7 +69,7 @@ python3 plugins/gunlance-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 
 ## 安装和确认
 
-启用 Forge 后，把各插件 `dist/<插件名>` 分别装入 MHGURecomp 的模组目录，保留完整的 `romfs/nativeNX` 层级。武器插件通过 `registry::when_ready` 等待风格注册器就绪。安装棘龙时须让 `monster-registry` 先于 `monster-espinas` 初始化。共用钩子或资源布局发生变化时，把关联插件及转换资源一起更新。仅修改代码且资源匹配时可以只更新对应的 NRO。
+启用 Forge 后，把 `dist/packed` 下的注册器和所需武器目录分别装入 MHGURecomp 的模组目录，保留完整的 `romfs/nativeNX` 层级。单独开发时也可以安装各插件的散文件开发目录。武器插件通过 `registry::when_ready` 等待风格注册器就绪。安装棘龙时须让 `monster-registry` 先于 `monster-espinas` 初始化。共用钩子或资源布局发生变化时，把关联插件及转换资源一起更新。仅修改代码且资源匹配时可以只更新对应的 NRO。从散文件版升级时，整目录替换旧注册器和武器模组，以同步 NRO、common.arc 与各武器 ARC，并移除旧散文件。
 
 完整极之型合包包含配套的风格注册器与当前六个武器模组目录。归档前核对每个目录的 NRO 和配套资源。已有合包的命名格式为 `mhgu边境风格-YYYYMMDDHHMM.7z`。
 
@@ -89,6 +92,7 @@ python3 plugins/gunlance-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 ```sh
 python3 plugins/style-registry/tests/verify_chat_shortcut.py
 python3 plugins/style-registry/tests/verify_weapon_styles.py
+python3 plugins/style-registry/tests/verify_packed_release.py
 python3 plugins/switch-axe-extreme/tests/verify_lobby.py
 python3 plugins/switch-axe-extreme/tests/verify_port.py
 ```

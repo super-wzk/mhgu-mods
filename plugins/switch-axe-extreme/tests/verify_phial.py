@@ -291,7 +291,7 @@ def replay(g, root, actor, eq, receive, routes, stub, sync_light, hit_shape):
     manager = g.get(0x2126A64)
     load = g.get(g.get(manager) + 48)
     lmt = {}
-    for bank in ("m_0", "m_4"):
+    for bank in ("0", "4"):
         lmt[bank] = g.alloc(128)
         g.put(lmt[bank] + 80, 1)
     sound_banks = {name: g.alloc(128) for name in ("blade", "common", "weapon")}

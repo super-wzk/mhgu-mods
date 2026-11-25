@@ -155,10 +155,11 @@ def replay_style(repo, elf, name, weapon_id, style, hunter_vtable, clip, tag, au
     assert not paths
     assert g.run(init, actor) == 7
     prefix = f"player/mot/frontier_{tag}"
-    male, female = f"{prefix}/m_4.lmt", f"{prefix}/f_4.lmt"
+    attack_bank = f"{prefix}/4.lmt"
+    assert {file.name for file in (nx / prefix).glob("*.lmt")} == {"0.lmt", "2.lmt", "4.lmt"}
     sounds = [f"sound/se/pl/frontier_{tag}/{bank}.srqr" for bank in audio]
     expected = {
-        f"{prefix}/m_0.lmt", f"{prefix}/m_2.lmt", male, *sounds,
+        f"{prefix}/0.lmt", f"{prefix}/2.lmt", attack_bank, *sounds,
         f"effect/frontier_{tag}/particles.pel",
         *(f"player/hit/frontier_{tag}/{shape}.hts" for shape in shapes),
     }
@@ -183,7 +184,7 @@ def replay_style(repo, elf, name, weapon_id, style, hunter_vtable, clip, tag, au
     assert bytes(g.cpu.mem_read(banks, 8 * 4)) == before
 
     assert g.run(g.hooks[ENCODE], actor, 0x10000 | clip) == 0xE00 | (clip % 100)
-    assert g.get(banks + 6 * 4) == resources[male]
+    assert g.get(banks + 6 * 4) == resources[attack_bank]
     strikes = []
     attack = g.get(api_for(g, b"mhgu::StyleRegistryV1", b"SRG1") + 8)
     g.stub(attack, lambda _, data, *__: strikes.append(g.get(data + 16)) or 1)
@@ -246,16 +247,18 @@ def replay_style(repo, elf, name, weapon_id, style, hunter_vtable, clip, tag, au
         assert strikes == [0, 0]  # Both hits use GU's equipped weapon collision.
     assert paths == prepared
 
-    # Reinitializing reuses the same resources. A different model sex loads
-    # its own motion only, and first playback binds it to a free slot.
-    g.run(init, actor)
-    assert paths == prepared
+    # Both models reuse the cached resources and the same hunter bank.
+    assert g.run(init, actor) == 7 and paths == prepared
     g.cpu.mem_write(equipped + 1240, b"\x01")
-    g.run(init, actor)
-    assert set(paths[len(prepared):]) == {f"{prefix}/f_0.lmt", f"{prefix}/f_2.lmt", female}
-    prepared = list(paths)
-    assert g.run(g.hooks[ENCODE], actor, 0x10000 | clip) == 0xD00 | (clip % 100)
-    assert g.get(banks + 5 * 4) == resources[female] and paths == prepared
+    assert g.run(init, actor) == 7 and paths == prepared
+    slot = clip % 100
+    variant = slot + 128
+    resource = resources[attack_bank]
+    if g.run(0xB49E54, resource, variant):
+        slot = variant
+    assert g.run(g.hooks[ENCODE], actor, 0x10000 | clip) == 0xE00 | slot
+    assert g.get(banks + 6 * 4) == resource and g.get(banks + 5 * 4) == 0
+    assert paths == prepared
 
 
 CASES = (

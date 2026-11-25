@@ -5,6 +5,7 @@ use core::{
     ptr,
     sync::atomic::{AtomicPtr, AtomicU32, Ordering},
 };
+mod archive;
 mod attack;
 mod camera;
 mod chat;
@@ -649,6 +650,7 @@ fn start() {
     static RULES: rules::Service = rules::Service(bind_rules);
     unsafe { rules::publish(&RULES) };
     let base = forge::mem::text_addr();
+    archive::install(base);
     chat::install(base);
     forge::install_hook!(base, encode);
     forge::install_hook!(base, decode);

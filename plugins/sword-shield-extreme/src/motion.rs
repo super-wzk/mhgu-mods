@@ -4,21 +4,14 @@ use mhfz_sdk::motion::{DrawnRoll, MotionBanks};
 use mhgu_sdk::style::{PASS, action};
 
 static BANKS: MotionBanks = MotionBanks::new([
-    [
-        c"player\\mot\\frontier_sns\\m_0",
-        c"player\\mot\\frontier_sns\\m_2",
-        c"player\\mot\\frontier_sns\\m_4",
-    ],
-    [
-        c"player\\mot\\frontier_sns\\f_0",
-        c"player\\mot\\frontier_sns\\f_2",
-        c"player\\mot\\frontier_sns\\f_4",
-    ],
+    c"player\\mot\\frontier_sns\\0",
+    c"player\\mot\\frontier_sns\\2",
+    c"player\\mot\\frontier_sns\\4",
 ]);
 
-pub(super) unsafe extern "C" fn preload(actor: u32) {
+pub(super) unsafe extern "C" fn preload(_actor: u32) {
     unsafe {
-        BANKS.preload_for_hunt(actor, 1401);
+        BANKS.preload_for_hunt(1401);
         crate::collision::preload();
         crate::sound::preload();
         crate::fx::preload();

@@ -52,15 +52,11 @@ def package(dat, romfs):
         check=True,
     )
     tool = CONVERTER / "target/release" / CONVERTER.name
-    for sex in "mf":
-        subprocess.run(
-            [
-                tool, "long-sword-motions", dat,
-                *(["--female"] if sex == "f" else []),
-                "-o", assets / f"{sex}.arc",
-            ],
-            check=True,
-        )
+    motions = assets / "motions.arc"
+    subprocess.run(
+        [tool, "long-sword-motions", dat, "-o", motions],
+        check=True,
+    )
     subprocess.run(
         [tool, "long-sword-actions", dat, "-o", assets / "long_sword.flsa"],
         check=True,
@@ -82,8 +78,11 @@ def package(dat, romfs):
 
     overlay = ROOT / "dist/long-sword-extreme"
     nx = overlay / "romfs/nativeNX"
+    unpack(motions, nx, "player/mot/frontier_ls/", MOTION)
     for sex in "mf":
-        unpack(assets / f"{sex}.arc", nx, "player/mot/frontier_ls/", MOTION)
+        (assets / f"{sex}.arc").unlink(missing_ok=True)
+        for group in (0, 2, 4):
+            (nx / f"player/mot/frontier_ls/{sex}_{group}.lmt").unlink(missing_ok=True)
     hud = nx / "GUI/frontier_ls/gauge.tex"
     hud.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run([tool, "long-sword-hud", dat, "-o", hud], check=True)

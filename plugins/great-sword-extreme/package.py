@@ -20,15 +20,11 @@ def package(dat, romfs):
         check=True,
     )
     tool = CONVERTER / "target/release" / CONVERTER.name
-    for sex in "mf":
-        subprocess.run(
-            [
-                tool, "great-sword-motions", dat,
-                *(["--female"] if sex == "f" else []),
-                "-o", assets / f"frontier_gs_{sex}.arc",
-            ],
-            check=True,
-        )
+    motions = assets / "motions.arc"
+    subprocess.run(
+        [tool, "great-sword-motions", dat, "-o", motions],
+        check=True,
+    )
     subprocess.run(
         [tool, "great-sword-actions", dat, "-o", assets / "great_sword.fgsa"],
         check=True,
@@ -105,21 +101,24 @@ def package(dat, romfs):
                 255, 0, 1, 0, 0.0, radius, *ends[:3], 0.0, *ends[3:], 0.0,
             )
         )
+    arc = motions.read_bytes()
+    assert arc[:8] == b"ARC\0\x11\0\x03\0"
+    for i, group in enumerate((0, 2, 4)):
+        name, kind, packed, size, start = struct.unpack_from(
+            "<64s4I", arc, 12 + 80 * i
+        )
+        stem = str(group)
+        assert (
+            name.rstrip(b"\0") == f"player\\mot\\frontier_gs\\{stem}".encode()
+            and kind == 0x76820D81
+        )
+        data = zlib.decompress(arc[start : start + packed])
+        assert len(data) == size & 0x1FFFFFFF and data.startswith(b"LMT\0C\0")
+        (path / f"{stem}.lmt").write_bytes(data)
     for sex in "mf":
-        arc = (assets / f"frontier_gs_{sex}.arc").read_bytes()
-        assert arc[:8] == b"ARC\0\x11\0\x03\0"
-        for i, group in enumerate((0, 2, 4)):
-            name, kind, packed, size, start = struct.unpack_from(
-                "<64s4I", arc, 12 + 80 * i
-            )
-            stem = f"{sex}_{group}"
-            assert (
-                name.rstrip(b"\0") == f"player\\mot\\frontier_gs\\{stem}".encode()
-                and kind == 0x76820D81
-            )
-            data = zlib.decompress(arc[start : start + packed])
-            assert len(data) == size & 0x1FFFFFFF and data.startswith(b"LMT\0C\0")
-            (path / f"{stem}.lmt").write_bytes(data)
+        (assets / f"frontier_gs_{sex}.arc").unlink(missing_ok=True)
+        for group in (0, 2, 4):
+            (path / f"{sex}_{group}.lmt").unlink(missing_ok=True)
     (nx / "plugins").mkdir(exist_ok=True)
     shutil.copy2(
         ROOT / "great_sword_extreme.nro", nx / "plugins/great_sword_extreme.nro"

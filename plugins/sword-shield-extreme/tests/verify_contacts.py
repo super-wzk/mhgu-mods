@@ -205,7 +205,7 @@ def replay():
 
     s.stub(g.originals[CHANGE_ACTION], accept)
     s.stub(g.get(vtable + 360), lambda *_: 0)
-    lmt = (nx / "player/mot/frontier_sns/m_4.lmt").read_bytes()
+    lmt = (nx / "player/mot/frontier_sns/4.lmt").read_bytes()
     (offset,) = struct.unpack_from("<I", lmt, 8 + 4 * 47)
     length, loop = struct.unpack_from("<Ii", lmt, offset + 8)
     assert loop == -1 and length > 60

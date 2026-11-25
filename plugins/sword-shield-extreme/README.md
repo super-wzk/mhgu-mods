@@ -40,6 +40,8 @@ FZ 单手剑为武器 4（`motion/w04.mot`），在 GU 对应武器 1，注册�
 
 ## 构建与离线回放
 
+发布整合包时使用 [ARC 打包流程](../../docs/development.md#本地输入和构建)。正式发布目录中，本武器的资源放在一个 ARC，NRO 独立，通用素材随风格注册器安装。下文的单武器打包和回放使用开发目录。
+
 从仓库根目录运行，`MHFZ_DAT` 指向 FZ 的 dat 目录，`MHGU_ROMFS` 指向包含 `nativeNX` 的 GU RomFS 根目录。
 
 ```sh

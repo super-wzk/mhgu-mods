@@ -28,9 +28,11 @@ export MHGU_ROMFS="${MHGU_ROMFS:?请指定 GU RomFS 根目录}"
 python3 plugins/great-sword-extreme/package.py "${MHFZ_DAT:?请指定 FZ 的 dat 目录}" "$MHGU_ROMFS"
 ```
 
+发布整合包时使用 [ARC 打包流程](../../docs/development.md#本地输入和构建)。正式发布目录中，本武器的资源放在一个 ARC，NRO 独立，通用素材随风格注册器安装。下文的单武器打包和回放使用开发目录。
+
 将两个插件各自的 `dist/<插件名>` 安装到 mods 目录。大剑通过 `registry::when_ready` 等待风格注册器就绪。菜单选择立即生效，由注册器写入 Forge 的 `savedata:/style_registry.ini`。要切回原版，在同一页确认任一原版风格即可。
 
-打包后运行 `tests/verify_assets.py`、`tests/verify_style.py`、`tests/verify_menu.py`，需要 Unicorn、本机 Vita/GU ELF 和 GU 的大剑资源包。提取的动作和指令表在 `target/assets`。安装包将男女各三个 LMT 放在独立的 `player/mot/frontier_gs` 路径，保留组内槽号与空槽；不覆盖 GU 的 `w00.arc`。
+打包后运行 `tests/verify_assets.py`、`tests/verify_style.py`、`tests/verify_menu.py`，需要 Unicorn、本机 Vita/GU ELF 和 GU 的大剑资源包。提取的动作和指令表在 `target/assets`。安装包将男女共用的三个 LMT 放在独立的 `player/mot/frontier_gs` 路径，保留组内槽号与空槽；不覆盖 GU 的 `w00.arc`。
 
 - **源武器。** Vita 日文武器名表 `82CB0558` 的第 0 项是「大剣」，第 3 项是「ランス」。原版载入器以同一武器编号查 `8258A2EC` 和 `82BB30E8`：大剑取 `motion/w00.mot`，长枪取 `motion/w03.mot`。极之型的风格编号 3 与武器编号无关。
 - **动作。** w00 的上下半身按 0/1、2/3、4/5 三组配对，分别得到 11、3、67 个全身片段。程序保存武器 0 的 74 个源状态；其中有其他 Frontier 风格的分支和原生代码处理的空表项，不能按 74 个独立可操作招式计算。武器挂点按 Frontier `819070E2` 的时序写入 GU 动作事件：拔刀斩先从背部到右手、再交左手；拔刀上挑起手用右手；防御与成功格挡分别在第 52、106 帧换回左手。进入动作的混合期间保留原版指定的挂点。GU 原版负责装备箱、挂点变换、被击飞的物理过程和普通回避。

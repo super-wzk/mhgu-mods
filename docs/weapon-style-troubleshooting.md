@@ -44,7 +44,8 @@
 
 | 现象 | 已有案例与排查方法 |
 | --- | --- |
-| 任务加载页短暂停顿，或第一次拔刀才卡 | 检查 GU `29B7D4` 后本地风格预读传给 `BCAD18` 的加载标志。LMT 和私有 HTS 用 `1` 同步准备。PEL、SRQR 和 HUD TEX 用 `2` 提交给原生加载线程。核对资源 `+80` 的完成位，确认后台未就绪时消费方会跳过且不会重复读盘。动作库首次使用时才绑定到 GU 的空闲槽。见[共用武器验收](../plugins/style-registry/tests/verify_weapon_styles.py)。 |
+| 压缩资源版进任务后缺动作、特效或声音 | 检查同次构建的注册器 NRO、`arc/frontier/common.arc` 与对应武器 ARC 是否同时安装。首次资源请求应先读取 common，再读取武器包。档内贴图应早于 MRL，模型应早于 EFL，EFL 应早于 PEL，音频样本应早于 SBKR 和 SRQR。用[发布包回放](../plugins/style-registry/tests/verify_packed_release.py)核对顺序和引用。 |
+| 任务加载页短暂停顿，或第一次拔刀才卡 | 检查 GU `29B7D4` 后本地风格预读传给 `BCAD18` 的加载标志。LMT 和私有 HTS 用 `1` 同步准备。PEL、SRQR 和 HUD TEX 用 `2` 提交给原生加载线程。核对资源 `+80` 的完成位，确认后台未就绪时消费方会跳过且不会重复读盘。动作库首次使用时才绑定到 GU 的空闲槽。升级后若拔刀或攻击仍走 GU 动作，核对武器 NRO 和同包的 `0.lmt`、`2.lmt`、`4.lmt` 是否一起安装。见[共用武器验收](../plugins/style-registry/tests/verify_weapon_styles.py)。 |
 | 装备斩斧进入集会酒吧卡在加载画面 | GU `282DA8` 的共享派发也接收集会所角色。先核对装备对应的 actor 类型、任务状态是否已结束，以及是否读写了 `SWORD_POSE` 等只在任务内存在的字段。已知风险可用[任务到集会所回放](../plugins/switch-axe-extreme/tests/verify_lobby.py)检查。要定位新的读图故障仍需对应日志和复现场景。 |
 | 光剑收刀闪退、换区后残留特效 | 对照 GU 接管收刀、动作片段退出和区域变化三处时序。斩斧接管收刀时回收瓶光和冲刺层。冲刺收刀片段 1499 的跟踪层在受击或退出时回收。普通收刀片段 1003／1009 的闪光层停用。通过粒子释放回调移除已经回收的记录，检查跨区状态时只访问仍有效的 actor。见[斩斧战斗控制](../plugins/switch-axe-extreme/src/battle.rs)和[斩斧粒子](../plugins/switch-axe-extreme/src/fx.rs)。 |
 

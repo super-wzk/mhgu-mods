@@ -284,7 +284,7 @@ def target(archive, sex, requests):
     played = 0
     for i, group in enumerate([0, 2, 4]):
         name, kind, cs, sz, off = struct.unpack_from("<64s4I", b, 12 + i * 80)
-        assert name.rstrip(b"\0") == f"player\\mot\\frontier_gs\\{sex}_{group}".encode()
+        assert name.rstrip(b"\0") == f"player\\mot\\frontier_gs\\{group}".encode()
         assert kind == 0x76820D81
         lmt = zlib.decompress(b[off : off + cs])
         assert len(lmt) == sz & 0x1FFFFFFF
@@ -295,13 +295,19 @@ def target(archive, sex, requests):
         )
         assert m.call(0xB49E78, obj, stream) == 1  # native Switch rMotionList::load
         (slots,) = struct.unpack_from("<H", lmt, 6)
+        offsets = struct.unpack_from(f"<{slots}I", lmt, 8)
+        def model_slot(slot):
+            if sex == "f" and slot + 128 < slots and offsets[slot + 128]:
+                return slot + 128
+            return slot
+
         for slot in range(slots + 1):
             clip = m.call(0xB49E54, obj, slot)
             expected = (
                 struct.unpack_from("<I", lmt, 8 + 4 * slot)[0] if slot < slots else 0
             )
             assert clip == (buf + expected if expected else 0)
-            if not clip:
+            if not clip or slot != model_slot(slot & 127):
                 continue
             ts, n, frames = struct.unpack("<3I", m.c.mem_read(clip, 12))
             assert frames > 0
@@ -309,7 +315,7 @@ def target(archive, sex, requests):
             ids = {(bone, usage) for _, usage, _, bone in tracks}
             assert len(ids) == n and {(255, 4), (0, 0), (0, 1)} <= ids
             assert (8, 0) in ids and (12, 0) in ids, (group, slot)
-            motion = 1000 + 100 * group + slot
+            motion = 1000 + 100 * group + (slot & 127)
             (loop,) = struct.unpack("<i", m.c.mem_read(clip + 12, 4))
             if motion == 1465:
                 # FZ wraps past 136 on the next two-frame tick, back to 108.
@@ -374,7 +380,7 @@ def target(archive, sex, requests):
         for request, start, blend in requests:
             if (request - 1000) // 100 != group:
                 continue
-            slot = request % 100
+            slot = model_slot(request % 100)
 
             def float_bits(f):
                 return int.from_bytes(struct.pack("<f", f), "little")
@@ -491,7 +497,7 @@ if __name__ == "__main__":
     guard_effects()
     radiance(program)
     for sex in "mf":
-        print(f"{sex}: {target(p / f'frontier_gs_{sex}.arc', sex, requests)} GU clips")
+        print(f"{sex}: {target(p / 'motions.arc', sex, requests)} GU clips")
     print(
         f"FZ great sword: {len(requests)} verified openings, {len({r[0] for r in requests})} distinct clips"
     )

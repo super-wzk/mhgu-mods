@@ -93,8 +93,33 @@ pub enum Weapon {
     SwitchAxe = 12,
 }
 
-pub fn motions(dat: &Path, female: bool, weapon: Weapon) -> Result<Vec<u8>> {
-    let sex = if female { "f" } else { "m" };
+fn hunter_rig(dat: &Path, sex: &str) -> Result<Rig> {
+    let model = pac::decode(read(&dat.join(format!("parts/{sex}00/{sex}_editpl.bin")))?)?;
+    let rig = Rig::parse(&pac::member(&model, 1)?)?;
+    ensure!(
+        rig.joints.len() == 21 && (0..21).all(|i| rig.by_id.get(&(i as u16)) == Some(&i)),
+        "unrecognized hunter skeleton"
+    );
+    Ok(rig)
+}
+
+fn same_tracks(a: &[Track], b: &[Track]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(a, b)| {
+            a.bone == b.bone
+                && a.usage == b.usage
+                && a.samples.len() == b.samples.len()
+                && a.samples.iter().zip(&b.samples).all(|(a, b)| {
+                    a.to_array().map(f32::to_bits) == b.to_array().map(f32::to_bits)
+                })
+        })
+}
+
+// GU stores the slot in the low byte of a motion ID. Keep source slots
+// in the lower half and put only model-specific variants in the upper half.
+const FEMALE_SLOT: usize = 128;
+
+pub fn motions(dat: &Path, weapon: Weapon) -> Result<Vec<u8>> {
     let (source, stem, slots) = match weapon {
         Weapon::GreatSword => ("w00", "frontier_gs", [100, 15, 80]),
         Weapon::SwordShield => ("w04", "frontier_sns", [100, 15, 65]),
@@ -103,12 +128,7 @@ pub fn motions(dat: &Path, female: bool, weapon: Weapon) -> Result<Vec<u8>> {
         Weapon::Gunlance => ("w09", "frontier_gl", [100, 15, 85]),
         Weapon::SwitchAxe => ("w12", "frontier_sa", [70, 25, 100]),
     };
-    let model = pac::decode(read(&dat.join(format!("parts/{sex}00/{sex}_editpl.bin")))?)?;
-    let rig = Rig::parse(&pac::member(&model, 1)?)?;
-    ensure!(
-        rig.joints.len() == 21 && (0..21).all(|i| rig.by_id.get(&(i as u16)) == Some(&i)),
-        "unrecognized hunter skeleton"
-    );
+    let rigs = [hunter_rig(dat, "m")?, hunter_rig(dat, "f")?];
     let b = pac::decode(read(&dat.join(format!("motion/{source}.mot")))?)?;
     let mot = MotionArchive::from_directory(&b)?;
     ensure!(
@@ -143,7 +163,11 @@ pub fn motions(dat: &Path, female: bool, weapon: Weapon) -> Result<Vec<u8>> {
         let stepping_slash = weapon == Weapon::LongSword && group == 4;
         let advancing_shield = weapon == Weapon::SwordShield && group == 4;
         let extra = if advancing_shield { 4 } else { usize::from(stepping_slash) };
-        let mut w = Writer::new(slots + extra)?;
+        ensure!(
+            slots + extra <= FEMALE_SLOT,
+            "hunter motion group exceeds 128 slots"
+        );
+        let mut w = Writer::new(FEMALE_SLOT + slots + extra)?;
         for slot in 0..slots {
             let pair = (mot.motion(group, slot)?, mot.motion(group + 1, slot)?);
             let (lower, upper) = match pair {
@@ -151,14 +175,23 @@ pub fn motions(dat: &Path, female: bool, weapon: Weapon) -> Result<Vec<u8>> {
                 (Some(a), Some(b)) => (a, b),
                 _ => anyhow::bail!("unpaired {source} slot {group}:{slot}"),
             };
-            let (lo, a) = bake(&lower, &rig, Some(0), Some(0))
-                .with_context(|| format!("{source} lower {group}:{slot}"))?;
-            let (hi, b) = bake(&upper, &rig, Some(1), Some(0))
-                .with_context(|| format!("{source} upper {}:{slot}", group + 1))?;
+            let bake_layers = |rig: &Rig| -> Result<_> {
+                let (lo, a) = bake(&lower, rig, Some(0), Some(0))
+                    .with_context(|| format!("{source} lower {group}:{slot}"))?;
+                let (hi, b) = bake(&upper, rig, Some(1), Some(0))
+                    .with_context(|| format!("{source} upper {}:{slot}", group + 1))?;
+                Ok((lo.max(hi), [a, b]))
+            };
+            let (frames, male) = bake_layers(&rigs[0])?;
+            let (female_frames, female) = bake_layers(&rigs[1])?;
+            ensure!(
+                frames == female_frames,
+                "model-specific duration at {source} {group}:{slot}"
+            );
             // FZ 8173208A plays the last sample of the Shining Sword loop
             // for one 30 Hz tick. GU 951A80 wraps as soon as it reaches the
             // end, so hold that pose for two motion frames in the LMT.
-            let frames = lo.max(hi)
+            let frames = frames
                 + if weapon == Weapon::GreatSword && group == 4 && slot == 65 {
                     2
                 } else {
@@ -176,70 +209,75 @@ pub fn motions(dat: &Path, female: bool, weapon: Weapon) -> Result<Vec<u8>> {
                 }
                 _ => anyhow::bail!("unmatched hunter loop points at {group}:{slot}"),
             };
-            let mut tracks = merge(&rig, [a, b], frames as usize)?;
-            if weapon == Weapon::LongSword && group == 4 && slot == 51 {
-                // FZ 811F9916 scales the horizontal root delta on 30 Hz ticks
-                // ending in [28,46). Apply it to both GU samples of each tick.
-                let root = tracks
-                    .iter_mut()
-                    .find(|t| t.usage == Usage::RootTranslation)
-                    .context("instant slash lacks a root translation track")?;
-                let mut extra = Vec4::ZERO;
-                let mut previous = root.samples[0];
-                for (frame, sample) in root.samples.iter_mut().enumerate() {
-                    let authored = *sample;
-                    if (28..46).contains(&frame.next_multiple_of(2)) {
-                        let delta = authored - previous;
-                        extra += Vec4::new(delta.x, 0., delta.z, 0.) * instant_travel;
+            let male = merge(&rigs[0], male, frames as usize)?;
+            let female = merge(&rigs[1], female, frames as usize)?;
+            let variant = (!same_tracks(&male, &female)).then_some((FEMALE_SLOT, female));
+            for (model_offset, mut tracks) in std::iter::once((0, male)).chain(variant) {
+                let gu_slot = model_offset + slot;
+                if weapon == Weapon::LongSword && group == 4 && slot == 51 {
+                    // FZ 811F9916 scales the horizontal root delta on 30 Hz ticks
+                    // ending in [28,46). Apply it to both GU samples of each tick.
+                    let root = tracks
+                        .iter_mut()
+                        .find(|t| t.usage == Usage::RootTranslation)
+                        .context("instant slash lacks a root translation track")?;
+                    let mut extra = Vec4::ZERO;
+                    let mut previous = root.samples[0];
+                    for (frame, sample) in root.samples.iter_mut().enumerate() {
+                        let authored = *sample;
+                        if (28..46).contains(&frame.next_multiple_of(2)) {
+                            let delta = authored - previous;
+                            extra += Vec4::new(delta.x, 0., delta.z, 0.) * instant_travel;
+                        }
+                        previous = authored;
+                        *sample += extra;
                     }
-                    previous = authored;
-                    *sample += extra;
                 }
-            }
-            w.clip_with_loop(slot, frames, &tracks, loop_frame)?;
-            if advancing_shield && (54..=57).contains(&slot) {
-                // 811EB426..811EB49E: +4 local Z each 30 Hz tick before the clip gate.
-                // These source clips are also used by the stationary flurry.
-                let root = tracks.iter_mut().find(|t| t.usage == Usage::RootTranslation)
-                    .context("shield blow lacks a root track")?;
-                root.samples.resize(frames as usize, *root.samples.last().unwrap());
-                let gate = [16, 12, 14, 20][slot - 54];
-                for (frame, point) in root.samples.iter_mut().enumerate() {
-                    point.z += 2. * frame.min(gate) as f32;
+                w.clip_with_loop(gu_slot, frames, &tracks, loop_frame)?;
+                if advancing_shield && (54..=57).contains(&slot) {
+                    // 811EB426..811EB49E: +4 local Z each 30 Hz tick before the clip gate.
+                    // These source clips are also used by the stationary flurry.
+                    let root = tracks.iter_mut().find(|t| t.usage == Usage::RootTranslation)
+                        .context("shield blow lacks a root track")?;
+                    root.samples.resize(frames as usize, *root.samples.last().unwrap());
+                    let gate = [16, 12, 14, 20][slot - 54];
+                    for (frame, point) in root.samples.iter_mut().enumerate() {
+                        point.z += 2. * frame.min(gate) as f32;
+                    }
+                    let extra_slot = model_offset + slots + slot - 54;
+                    w.clip_with_loop(extra_slot, frames, &tracks, loop_frame)?;
+                    sword_shield_equipment(&mut w, extra_slot, 1400 + slot)?;
                 }
-                let extra_slot = slots + slot - 54;
-                w.clip_with_loop(extra_slot, frames, &tracks, loop_frame)?;
-                sword_shield_equipment(&mut w, extra_slot, 1400 + slot)?;
-            }
-            if stepping_slash && slot == 1 {
-                // 811F98BC adds 7.5 forward on ticks 40..56 in state 12 only.
-                // Private clip 1460 lets GU apply this movement against terrain.
-                let root = tracks
-                    .iter_mut()
-                    .find(|t| t.usage == Usage::RootTranslation)
-                    .context("stepping slash lacks a root translation track")?;
-                root.samples
-                    .resize(frames as usize, *root.samples.last().unwrap());
-                for (frame, point) in root.samples.iter_mut().enumerate() {
-                    point.z += 7.5 * ((frame.saturating_sub(38) as f32 * 0.5).min(8.));
+                if stepping_slash && slot == 1 {
+                    // 811F98BC adds 7.5 forward on ticks 40..56 in state 12 only.
+                    // Private clip 1460 lets GU apply this movement against terrain.
+                    let root = tracks
+                        .iter_mut()
+                        .find(|t| t.usage == Usage::RootTranslation)
+                        .context("stepping slash lacks a root translation track")?;
+                    root.samples
+                        .resize(frames as usize, *root.samples.last().unwrap());
+                    for (frame, point) in root.samples.iter_mut().enumerate() {
+                        point.z += 7.5 * ((frame.saturating_sub(38) as f32 * 0.5).min(8.));
+                    }
+                    w.clip_with_loop(model_offset + slots, frames, &tracks, loop_frame)?;
+                    long_sword_equipment(&mut w, model_offset + slots, 1401)?;
                 }
-                w.clip_with_loop(slots, frames, &tracks, loop_frame)?;
-                long_sword_equipment(&mut w, slots, 1401)?;
-            }
-            if frames > 1 {
-                let motion = 1000 + 100 * group + slot;
-                match weapon {
-                    Weapon::DualBlades => dual_blades_equipment(&mut w, slot, motion, frames)?,
-                    Weapon::SwordShield => sword_shield_equipment(&mut w, slot, motion)?,
-                    Weapon::Gunlance => gunlance_equipment(&mut w, slot, motion)?,
-                    Weapon::GreatSword => equipment(&mut w, slot, motion)?,
-                    Weapon::SwitchAxe => switch_axe_equipment(&mut w, slot, motion)?,
-                    Weapon::LongSword => long_sword_equipment(&mut w, slot, motion)?,
+                if frames > 1 {
+                    let motion = 1000 + 100 * group + slot;
+                    match weapon {
+                        Weapon::DualBlades => dual_blades_equipment(&mut w, gu_slot, motion, frames)?,
+                        Weapon::SwordShield => sword_shield_equipment(&mut w, gu_slot, motion)?,
+                        Weapon::Gunlance => gunlance_equipment(&mut w, gu_slot, motion)?,
+                        Weapon::GreatSword => equipment(&mut w, gu_slot, motion)?,
+                        Weapon::SwitchAxe => switch_axe_equipment(&mut w, gu_slot, motion)?,
+                        Weapon::LongSword => long_sword_equipment(&mut w, gu_slot, motion)?,
+                    }
                 }
             }
         }
         assets.push(arc::Asset {
-            name: format!("player\\mot\\{stem}\\{sex}_{group}"),
+            name: format!("player\\mot\\{stem}\\{group}"),
             kind: arc::MOTION,
             data: w.finish(),
         });

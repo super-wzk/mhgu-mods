@@ -63,6 +63,7 @@ def package(dat, romfs):
         ],
         check=True,
     )
+    motions = assets / "motions.arc"
     env = os.environ.copy()
     env.pop("RUSTUP_TOOLCHAIN", None)
     subprocess.run(
@@ -70,8 +71,11 @@ def package(dat, romfs):
     )
     overlay = ROOT / "dist/sword-shield-extreme"
     nx = overlay / "romfs/nativeNX"
+    unpack(motions, nx, "player/mot/frontier_sns/", MOTION)
     for sex in "mf":
-        unpack(assets / f"{sex}.arc", nx, "player/mot/frontier_sns/", MOTION)
+        (assets / f"{sex}.arc").unlink(missing_ok=True)
+        for group in (0, 2, 4):
+            (nx / f"player/mot/frontier_sns/{sex}_{group}.lmt").unlink(missing_ok=True)
     unpack(assets / "sound.arc", nx, "sound/se/pl/frontier_sns/", SOUND)
     unpack(assets / "effects/geometry.arc", nx, "effect/frontier_sns/", EFFECT)
     hit = nx / "player/hit/frontier_sns"

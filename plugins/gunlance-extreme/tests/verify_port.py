@@ -1384,9 +1384,12 @@ def verify_assets():
     for sex in "mf":
         for clip in motions:
             bank, slot = divmod(clip - 1000, 100)
-            lmt = (NX / f"player/mot/frontier_gl/{sex}_{bank}.lmt").read_bytes()
+            lmt = (NX / f"player/mot/frontier_gl/{bank}.lmt").read_bytes()
             slots, = struct.unpack_from("<H", lmt, 6)
             motion, = struct.unpack_from("<I", lmt, 8 + 4 * slot)
+            if sex == "f" and slot + 128 < slots:
+                variant, = struct.unpack_from("<I", lmt, 8 + 4 * (slot + 128))
+                motion = variant or motion
             assert slot < slots and motion, (sex, clip)
             equipment, = struct.unpack_from("<I", lmt, motion + 52)
             assert struct.unpack_from("<2H", lmt, equipment) == (3, 2), (sex, clip)

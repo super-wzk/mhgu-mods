@@ -9,16 +9,9 @@ pub(super) const SHEATHE_ACTION: (u16, u16) = (1, 2);
 const GU_SHEATHE_MOTION: u32 = 5003;
 
 static BANKS: MotionBanks = MotionBanks::new([
-    [
-        c"player\\mot\\frontier_sa\\m_0",
-        c"player\\mot\\frontier_sa\\m_2",
-        c"player\\mot\\frontier_sa\\m_4",
-    ],
-    [
-        c"player\\mot\\frontier_sa\\f_0",
-        c"player\\mot\\frontier_sa\\f_2",
-        c"player\\mot\\frontier_sa\\f_4",
-    ],
+    c"player\\mot\\frontier_sa\\0",
+    c"player\\mot\\frontier_sa\\2",
+    c"player\\mot\\frontier_sa\\4",
 ]);
 
 pub(super) unsafe fn native_clip(actor: u32) -> Option<u16> {
@@ -164,9 +157,9 @@ pub unsafe fn play(actor: u32, clip: u16, start: u16, blend: u16) -> Option<u16>
     }
 }
 
-pub(super) unsafe extern "C" fn preload(actor: u32) {
+pub(super) unsafe extern "C" fn preload(_actor: u32) {
     unsafe {
-        BANKS.preload_for_hunt(actor, 1412);
+        BANKS.preload_for_hunt(1412);
         crate::battle::preload_hit_shapes();
         sound::preload();
         fx::preload();

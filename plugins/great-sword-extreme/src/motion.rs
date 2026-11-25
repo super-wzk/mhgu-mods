@@ -16,21 +16,14 @@ macro_rules! call {
 }
 
 static BANKS: MotionBanks = MotionBanks::new([
-    [
-        c"player\\mot\\frontier_gs\\m_0",
-        c"player\\mot\\frontier_gs\\m_2",
-        c"player\\mot\\frontier_gs\\m_4",
-    ],
-    [
-        c"player\\mot\\frontier_gs\\f_0",
-        c"player\\mot\\frontier_gs\\f_2",
-        c"player\\mot\\frontier_gs\\f_4",
-    ],
+    c"player\\mot\\frontier_gs\\0",
+    c"player\\mot\\frontier_gs\\2",
+    c"player\\mot\\frontier_gs\\4",
 ]);
 
-pub(super) unsafe extern "C" fn preload(actor: u32) {
+pub(super) unsafe extern "C" fn preload(_actor: u32) {
     unsafe {
-        BANKS.preload_for_hunt(actor, 1410);
+        BANKS.preload_for_hunt(1410);
         crate::combat::preload();
         crate::sound::preload();
         crate::fx::preload();

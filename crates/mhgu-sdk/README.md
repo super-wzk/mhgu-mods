@@ -64,7 +64,7 @@ GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提�
 
 [input](src/style/input.rs) 读取 GU 的组合键状态、过滤后的 X／A 按下沿和当前附加肩键。通过 [movement](src/style/movement.rs) 查询摇杆方向、应用朝向和使用原生耐力入口。回避准入复用 `has_evade_stamina` 检查体术、料理和免耗效果。读取任务专用字段前，用 [hunter::is_quest](src/style/hunter.rs) 核对角色类型。
 
-[preload](src/style/preload.rs) 登记本地风格在 GU 完成任务猎人初始化后执行的资源准备回调。动作库预加载后仍在首次播放时绑定运行时槽，私有 HTS 可通过 [CachedHitShape](src/combat/collision/shapes.rs) 复用已加载资源。
+[preload](src/style/preload.rs) 登记本地风格在 GU 完成任务猎人初始化后执行的资源准备回调。[MotionBanks](src/style/action/motion_bank.rs) 缓存男女模型共用的 LMT。首次播放时才绑定运行时 bank，按装备模型选择基础片段或槽号加 128 的专用片段。私有 HTS 可通过 [CachedHitShape](src/combat/collision/shapes.rs) 复用已加载资源。
 
 [remote](src/style/remote.rs) 提供 GU 玩家槽查询和远端动作状态的存储。读取远端装备前按当前名册核对猎人，角色离场、换武器或槽位更换时释放旧状态。风格插件负责根据 GU 接收的动作回放各自的招式。插件可以分别登记动作回放（`bind`）、逐帧观察（`observe`）和可选的动作状态收发（`bind_action_state`）。注册器校验当前武器的动作包是否有可用位，插件定义状态值的含义。
 

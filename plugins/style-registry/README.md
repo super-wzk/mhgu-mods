@@ -8,7 +8,7 @@
 
 手册是风格插件的可选项。风格登记成功后可调用 `mhgu_sdk::style::manual::bind(id, include_str!("manual.txt"))`。UTF-8 文件用空行分页。操作页首行为标题，以下每行用一个制表符分隔操作与招式，最多九行。说明页支持 GU 的 `<ICON>`、`<SIZE>` 和 `<COL>` 标记。两种页面均可写 `{X}`、`{A}`、`{B}`、`{Y}`、`{R}`、`{摇杆}` 显示原版按键图标。
 
-从仓库根目录运行 `python3 plugins/style-registry/package.py`，把生成的 `dist/style-registry` 和需要的武器风格插件分别安装到 mods 目录。装备箱的选择立即生效并保存到 Forge 的 `savedata:/style_registry.ini`（MHGURecomp 通常为 `save/save_0/style_registry.ini`）。该设置在角色之间共享；自定义编号不会写入 GU 的装备数据。也可关闭游戏后直接编辑：
+从仓库根目录运行 `python3 plugins/style-registry/package.py` 构建注册器。发布整合包时，先构建六个武器目录，再运行 `python3 plugins/style-registry/package_all.py`。安装 `dist/packed` 下的注册器及所需武器目录。散文件包可用于开发回放。装备箱的选择立即生效并保存到 Forge 的 `savedata:/style_registry.ini`（MHGURecomp 通常为 `save/save_0/style_registry.ini`）。该设置在角色之间共享；自定义编号不会写入 GU 的装备数据。也可关闭游戏后直接编辑：
 
 ```ini
 [Weapons]
@@ -39,7 +39,9 @@ V1 注册服务同时提供攻击提交与格挡结果。GU 从武器动作组�
 
 `art_slots` 指定狩技槽位数（0–3），装备、充能和发动由 GU 处理。`independent` 使 GU 的固定长度风格表使用索引 0，并停用勇气槽。仅替换动作资源的风格可以省略控制器。
 
-极之型武器使用同一个[预读入口](../../crates/mhgu-sdk/src/style/preload.rs)。GU `29B7D4` 完成任务初始化后，注册器只调用本地猎人当前风格的预读回调。当前模型的动作库和私有命中形状同步准备，供入场后的首次攻击使用。PEL、SRQR 和 HUD TEX 交给 GU 资源加载线程，原生资源标记完成后才能使用。动作库在实际播放时绑定到猎人。
+发布版首次请求某把武器的私有路径时，注册器先通过 GU `BCAD18` 读取 `common.arc`，再读取对应武器 ARC。两者保留在资源缓存中。GU 的 `B39F58` 按归档顺序加载依赖，供当前猎人和队友后续的原生路径请求复用。详见[打包回归](tests/verify_packed_release.py)。
+
+极之型武器使用同一个[预读入口](../../crates/mhgu-sdk/src/style/preload.rs)。GU `29B7D4` 完成任务初始化后，注册器只调用本地猎人当前风格的预读回调。男女模型共用的三组动作库和私有命中形状同步准备，供入场后的首次攻击使用。PEL、SRQR 和 HUD TEX 交给 GU 资源加载线程，原生资源标记完成后才能使用。动作库在实际播放时绑定到猎人。
 
 武器插件通过 [ParticleModelV1](../../crates/mhgu-sdk/src/style/particle.rs) 登记模型粒子绘制回调。注册器初始化共用的 FZ 模型粒子渲染器，负责保存和恢复 GU 的绘制状态，并派发粒子释放回调。
 

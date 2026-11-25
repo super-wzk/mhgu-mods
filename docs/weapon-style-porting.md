@@ -21,12 +21,12 @@
 
 ## 2. 转换资源并校正时序
 
-1. 在 `tools` 的转换器中复用 `mhf-resource` 解包和 `mhgu-resource` 写入。现有武器把上下身的 0/1、2/3、4/5 三组轨道分别合成全身 LMT，保留原组内槽位、空槽和循环点。男女模型分别生成。
+1. 在 `tools` 的转换器中复用 `mhf-resource` 解包和 `mhgu-resource` 写入。现有武器把上下身的 0/1、2/3、4/5 三组轨道分别合成全身 LMT，保留原组内槽位、空槽和循环点。按男女骨架分别烘焙后写入同一套 LMT。相同片段使用源槽，有差异的女性模型片段写在源槽加 128 的位置。运行时按装备模型选择，解码时恢复源槽号。
 2. 核对根轨、坐标和武器挂点事件。先看站立、拔刀、收刀和防御回正，再看活动幅度大的攻击。换手或离背要对齐源动作帧，混合期间也要观察。双剑左右手分别有挂点和接触槽。
 3. 用私有路径加载资源，例如 `player/mot/frontier_db`。通过 mhfz-sdk 的 [MotionBanks](../crates/mhfz-sdk/src/motion.rs) 或武器自己的编码器，将源片段映射到 GU 空闲的运行时 bank 和槽。GU 的资源载入和绑定由 mhgu-sdk 提供。播放通过 `action::play_motion` 进入 GU 的层播放函数。
 4. 分别标记动作播放帧、逻辑刻和实际经过时间。一刻 FZ 30 Hz 逻辑时间对应两个 GU 60 Hz 时钟单位。半速动作要分别验证片段事件帧和独立计时，例如大剑纵斩的蓄力升段。表驱动的特效使用 `MotionClock`，按 FZ `817BD900` 在混合结束后扫描 `[当前姿势帧, 下一播放帧)`。跳入新片段时按起播帧重置游标，循环在取到回绕后的姿势时重新扫描，重复采样跳过已处理的区间。见[动作特效游标](../crates/mhfz-sdk/src/effects.rs)。
 
-资源生成脚本负责组装 `dist`。源参数最好留在提取的数据或动作程序中，运行时以可辨识的名称取用。新增 GU 派生参数也应注明用途和单位，比如[双剑空中下劈的水平速度](../plugins/dual-blades-extreme/src/program.rs)。
+资源生成脚本负责组装开发用 `dist`。发布时用注册器的 `package_all.py` 生成 `common.arc` 及每把武器的私有 ARC。武器的逻辑资源名及 EFL、PEL 引用保留，重复的图集与音频样本由打包器改写到共用路径。源参数最好留在提取的数据或动作程序中，运行时以可辨识的名称取用。新增 GU 派生参数也应注明用途和单位，比如[双剑空中下劈的水平速度](../plugins/dual-blades-extreme/src/program.rs)。
 
 ## 3. 接入 GU 的风格和动作生命周期
 
@@ -51,7 +51,7 @@
 | 音效 | 挥刀随当前动作时间线触发，蓄力、格挡等事件按动作程序触发。命中和弹刀用 GU 的碰撞结果播公共音效。逐个核对发射方向、阶段及同时和逐发模式的请求次数。沿成品 SRQR、SBKR 解码 ADPCM 验证有效信号，并检查循环重复触发和动作打断后的清理。 |
 | HUD | 原版狩技继续使用 GU 的槽位和结算。新资源放在独立路径，从当前猎人的风格状态取得进度并更新显示。可参考[双剑 HUD](../plugins/dual-blades-extreme/src/hud.rs)的火焰槽与刃打层数。 |
 
-在注册后通过 `style::preload::bind` 登记预加载回调。GU `29B7D4` 完成任务猎人初始化后，注册器为本地当前风格调用回调。各极型武器可用 `MotionBanks::preload_for_hunt` 预加载当前模型的移动、地形和攻击动作库，首次播放时再绑定 GU 的运行时槽。各插件按需在同一回调准备音库、粒子、私有 HTS 和 HUD。私有 HTS 可使用 `CachedHitShape` 持有缓存引用，攻击时取得独立引用，未预加载时仍可按路径加载。见[预加载接口](../crates/mhgu-sdk/src/style/preload.rs)和[形状缓存](../crates/mhgu-sdk/src/combat/collision/shapes.rs)。
+在注册后通过 `style::preload::bind` 登记预加载回调。GU `29B7D4` 完成任务猎人初始化后，注册器为本地当前风格调用回调。各极型武器可用 `MotionBanks::preload_for_hunt` 预加载男女模型共用的移动、地形和攻击动作库，首次播放时再绑定 GU 的运行时槽。各插件按需在同一回调准备音库、粒子、私有 HTS 和 HUD。私有 HTS 可使用 `CachedHitShape` 持有缓存引用，攻击时取得独立引用，未预加载时仍可按路径加载。见[预加载接口](../crates/mhgu-sdk/src/style/preload.rs)和[形状缓存](../crates/mhgu-sdk/src/combat/collision/shapes.rs)。
 
 ## 5. 按功能验收
 

@@ -63,8 +63,6 @@ enum Command {
     GreatSwordMotions {
         /// Frontier dat directory (motion/w00.mot and parts/<sex>00/<sex>_editpl.bin)
         dat: PathBuf,
-        #[arg(long)]
-        female: bool,
         /// Output independent GU motion ARC; never replaces a native style
         #[arg(short, long)]
         output: PathBuf,
@@ -116,8 +114,6 @@ enum Command {
     /// Convert Frontier w07 motions and their equipment events.
     LongSwordMotions {
         dat: PathBuf,
-        #[arg(long)]
-        female: bool,
         #[arg(short, long)]
         output: PathBuf,
     },
@@ -130,8 +126,6 @@ enum Command {
     /// Convert the paired Frontier dual-blade motion directories.
     DualBladesMotions {
         dat: PathBuf,
-        #[arg(long)]
-        female: bool,
         #[arg(short, long)]
         output: PathBuf,
     },
@@ -332,20 +326,14 @@ fn main() -> Result<()> {
         Command::GreatSwordActions { dat, output } => {
             save(&output, hunter::actions(&dat, hunter::Weapon::GreatSword)?)
         }
-        Command::GreatSwordMotions {
-            dat,
-            female,
-            output,
-        } => save(
+        Command::GreatSwordMotions { dat, output } => save(
             &output,
-            hunter::motions(&dat, female, hunter::Weapon::GreatSword)?,
+            hunter::motions(&dat, hunter::Weapon::GreatSword)?,
         ),
         Command::Gunlance { dat, gu_weapon, output } => {
             fs::create_dir_all(&output)?;
             let kind = hunter::Weapon::Gunlance;
-            for (sex, female) in [("m", false), ("f", true)] {
-                save(&output.join(format!("{sex}.arc")), hunter::motions(&dat, female, kind)?)?;
-            }
+            save(&output.join("motions.arc"), hunter::motions(&dat, kind)?)?;
             save(&output.join("gunlance.fgla"), hunter::actions(&dat, kind)?)?;
             let (assets, timeline) = sound::gunlance(&dat)?;
             save(&output.join("frontier_gl_sound.flse"), timeline)?;
@@ -355,9 +343,7 @@ fn main() -> Result<()> {
         Command::SwordShield { dat, gu_weapon, output } => {
             fs::create_dir_all(&output)?;
             let kind = hunter::Weapon::SwordShield;
-            for (sex, female) in [("m", false), ("f", true)] {
-                save(&output.join(format!("{sex}.arc")), hunter::motions(&dat, female, kind)?)?;
-            }
+            save(&output.join("motions.arc"), hunter::motions(&dat, kind)?)?;
             save(&output.join("sword_shield.fsns"), hunter::actions(&dat, kind)?)?;
             hunter::blade_shapes(&dat, &output, &[6, 7, 23, 28, 29], 1)?;
             let (assets, timeline) = sound::sword_shield(&dat)?;
@@ -369,12 +355,10 @@ fn main() -> Result<()> {
             fs::create_dir_all(&output)?;
             save(&output.join("gauge.tex"),hunter_hud::switch_axe(&dat)?)?;
             hunter_fx::switch_axe(&dat, &output.join("effects"), &gu_weapon)?;
-            for (sex, female) in [("m", false), ("f", true)] {
-                save(
-                    &output.join(format!("{sex}.arc")),
-                    hunter::motions(&dat, female, hunter::Weapon::SwitchAxe)?,
-                )?;
-            }
+            save(
+                &output.join("motions.arc"),
+                hunter::motions(&dat, hunter::Weapon::SwitchAxe)?,
+            )?;
             save(
                 &output.join("switch_axe.fsaa"),
                 hunter::actions(&dat, hunter::Weapon::SwitchAxe)?,
@@ -397,25 +381,17 @@ fn main() -> Result<()> {
             gu_weapon,
             output,
         } => hunter_fx::long_sword(&dat, &output, &gu_weapon),
-        Command::LongSwordMotions {
-            dat,
-            female,
-            output,
-        } => save(
+        Command::LongSwordMotions { dat, output } => save(
             &output,
-            hunter::motions(&dat, female, hunter::Weapon::LongSword)?,
+            hunter::motions(&dat, hunter::Weapon::LongSword)?,
         ),
         Command::LongSwordActions { dat, output } => {
             hunter::blade_shapes(&dat, output.parent().unwrap_or(Path::new(".")), &[0, 32, 33], 3)?;
             save(&output, hunter::actions(&dat, hunter::Weapon::LongSword)?)
         }
-        Command::DualBladesMotions {
-            dat,
-            female,
-            output,
-        } => save(
+        Command::DualBladesMotions { dat, output } => save(
             &output,
-            hunter::motions(&dat, female, hunter::Weapon::DualBlades)?,
+            hunter::motions(&dat, hunter::Weapon::DualBlades)?,
         ),
         Command::DualBladesActions { dat, output } => {
             save(&output, hunter::actions(&dat, hunter::Weapon::DualBlades)?)

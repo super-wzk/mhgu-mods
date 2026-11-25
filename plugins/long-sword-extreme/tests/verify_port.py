@@ -153,14 +153,16 @@ def source():
     assert sum(bool(records(i, 0, "<6H")) for i in range(85)) == 64
     for sex in "mf":
         for group, count in ((0, 9), (2, 3), (4, 54)):
-            data = (NX / f"player/mot/frontier_ls/{sex}_{group}.lmt").read_bytes()
+            data = (NX / f"player/mot/frontier_ls/{group}.lmt").read_bytes()
             assert data[:4] == b"LMT" + bytes(1)
             slots = struct.unpack_from("<H", data, 6)[0]
             offsets = struct.unpack_from(f"<{slots}I", data, 8)
-            source_slots = 60 if group == 4 else slots
+            if sex == "f":
+                offsets = tuple(female or male for male, female in zip(offsets, offsets[128:]))
+            source_slots = slots - 128 - (group == 4)
             assert sum(bool(x) for x in offsets[:source_slots]) == count
             if group == 4:
-                assert slots == 61 and offsets[60]
+                assert slots == 128 + 61 and offsets[60]
                 # State 12 uses 1401 with 60 additional forward units. Other
                 # callers of 1401 still play the original root track.
                 original = struct.unpack_from("<3f", data, offsets[1] + 16)
@@ -534,7 +536,7 @@ def instant_slash(g, actor, controller, set_action):
     inputs = g.alloc(40)
 
     # Read clip 1451's actual GU root track, including the baked FZ dash multiplier.
-    lmt = (NX / "player/mot/frontier_ls/m_4.lmt").read_bytes()
+    lmt = (NX / "player/mot/frontier_ls/4.lmt").read_bytes()
     clip, = struct.unpack_from("<I", lmt, 8 + 51 * 4)
     tracks, count, clip_length = struct.unpack_from("<3I", lmt, clip)
     root, = [t for t in range(tracks, tracks + count * 36, 36) if lmt[t:t + 4] == bytes((4, 4, 0, 255))]
@@ -619,7 +621,7 @@ def attack_rolls(g, actor, controller, set_action):
         if kind != 0x2125210:
             return 0
         rel = g.string(name).replace("\\", "/")
-        assert rel in ("player/mot/frontier_ls/m_0", "player/mot/frontier_ls/f_0") and flags == 1
+        assert rel == "player/mot/frontier_ls/0" and flags == 1
         bank = (NX / (rel + ".lmt")).read_bytes()
         count, = struct.unpack_from("<H", bank, 6)
         header, obj = g.alloc(8 + count * 4), g.alloc(104)

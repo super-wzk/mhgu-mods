@@ -310,17 +310,16 @@ def replay(repo, root):
         active += 1
         steps += count
         clips.update(ids)
-    for sex in ("m", "f"):
-        folder = root / "dist/switch-axe-extreme/romfs/nativeNX/player/mot/frontier_sa"
-        banks = {i: (folder / f"{sex}_{i}.lmt").read_bytes() for i in (0, 2, 4)}
-        for clip in clips:
-            bank = banks[(clip - 1000) // 100]
-            slot = clip % 100
-            assert slot < struct.unpack_from("<H", bank, 6)[0]
-            at = struct.unpack_from("<I", bank, 8 + 4 * slot)[0]
-            assert 0 < at < len(bank) - 48, (sex, clip, at)
+    folder = root / "dist/switch-axe-extreme/romfs/nativeNX/player/mot/frontier_sa"
+    banks = {i: (folder / f"{i}.lmt").read_bytes() for i in (0, 2, 4)}
+    for clip in clips:
+        bank = banks[(clip - 1000) // 100]
+        slot = clip % 100
+        assert slot < struct.unpack_from("<H", bank, 6)[0]
+        at = struct.unpack_from("<I", bank, 8 + 4 * slot)[0]
+        assert 0 < at < len(bank) - 48, (clip, at)
     print(
-        f"GU action package: {active} state entries, {steps} steps, {len(clips)} clips in both animation sets."
+        f"GU action package: {active} state entries, {steps} steps, {len(clips)} clips shared by both models."
     )
     # GU handles the climb and landing. Keep the stick held while native action
     # 1:138 owns the actor, then redispatch sprint in 2:30 without another flick.

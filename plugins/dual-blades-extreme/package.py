@@ -77,15 +77,11 @@ def package(dat, romfs):
         check=True,
     )
     tool = CONVERTER / "target/release" / CONVERTER.name
-    for sex in "mf":
-        subprocess.run(
-            [
-                tool, "dual-blades-motions", dat,
-                *(["--female"] if sex == "f" else []),
-                "-o", assets / f"{sex}.arc",
-            ],
-            check=True,
-        )
+    motions = assets / "motions.arc"
+    subprocess.run(
+        [tool, "dual-blades-motions", dat, "-o", motions],
+        check=True,
+    )
     subprocess.run(
         [tool, "dual-blades-actions", dat, "-o", assets / "dual_blades.fdba"],
         check=True,
@@ -110,8 +106,11 @@ def package(dat, romfs):
     hud = nx / "GUI/frontier_db/gauge.tex"
     hud.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run([tool, "dual-blades-hud", "-o", hud], check=True)
+    unpack(motions, nx, "player/mot/frontier_db/", MOTION)
     for sex in "mf":
-        unpack(assets / f"{sex}.arc", nx, "player/mot/frontier_db/", MOTION)
+        (assets / f"{sex}.arc").unlink(missing_ok=True)
+        for group in (0, 2, 4):
+            (nx / f"player/mot/frontier_db/{sex}_{group}.lmt").unlink(missing_ok=True)
     unpack(sound, nx, "sound/se/pl/frontier_db/", SOUND)
     unpack(effects / "geometry.arc", nx, "effect/frontier_db/", EFFECT)
     package_peer_trails(nx / "effect/frontier_db")

@@ -215,6 +215,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             VALOR_HUD,
             DISPATCH,
             INIT_HUNTER,
+            0xBCAD18, 0xB39F58,  # Private release ARC lookup and dependency order.
             WEAPON_DISPATCH,
             HIT_ROW,
             HIT_EXPAND,
@@ -475,17 +476,19 @@ def verify_great_sword(g):
     assert encode(actor, 5001) == 0x501
     g.put(actor + 3844 + 13 * 4, 0)
     assert encode(actor, 5001) == 0xD01 and decode(actor, 0xD01) == 5001
-    assert g.get(actor + 3844 + 13 * 4) == resources[r"player\mot\frontier_gs\m_0"]
+    assert g.get(actor + 3844 + 13 * 4) == resources[r"player\mot\frontier_gs\0"]
     assert g.get(actor + 3844 + 15 * 4) == 0x1234 and decode(remote, 0xD01) == 13001
     assert encode(actor, 5001) == 0xD01 and len(loads) == 1
     byte(eq + 1240, 1)
     g.put(actor + 3844 + 12 * 4, 0)
-    assert encode(actor, 5001) == 0xC01 and loads[-1].endswith("f_0")
+    assert encode(actor, 5001) == 0xD81 and decode(actor, 0xD81) == 5001
+    assert len(loads) == 1 and g.get(actor + 3844 + 12 * 4) == 0
+    byte(eq + 1240, 0)
     g.put(actor + 3844 + 11 * 4, 0)
     load_hit_data(g, actor, remote, encode)
     verify_battle(g, actor, remote, resources)
     byte(eq + 1236, 1)
-    assert encode(actor, 5001) == 0x501 and decode(actor, 0xC01) == 12001
+    assert encode(actor, 5001) == 0x501 and decode(actor, 0xD81) == 13129
     assert bytes(g.cpu.mem_read(eq + 1241, 1)) == b"\x05"
 
 

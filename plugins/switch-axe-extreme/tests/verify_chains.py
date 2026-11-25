@@ -237,7 +237,7 @@ def replay(g, root, actor, form, weapon, set_action, defer_transition):
 
     def cycle(clip, button, entry, repeat, *, exhaust=False):
         bank = root / "dist/switch-axe-extreme/romfs/nativeNX/player/mot/frontier_sa"
-        data = (bank / f"m_{clip // 100 - 10}.lmt").read_bytes()
+        data = (bank / f"{clip // 100 - 10}.lmt").read_bytes()
         offset, = struct.unpack_from("<I", data, 8 + 4*(clip % 100))
         length, restart = struct.unpack_from("<Ii", data, offset + 8)
         assert 0 <= restart < length - 1

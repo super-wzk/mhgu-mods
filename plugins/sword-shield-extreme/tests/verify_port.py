@@ -152,10 +152,12 @@ def resources():
                 clips.add(clip)
     for sex in "mf":
         for group in (0, 2, 4):
-            bank = (nx / f"player/mot/frontier_sns/{sex}_{group}.lmt").read_bytes()
+            bank = (nx / f"player/mot/frontier_sns/{group}.lmt").read_bytes()
             magic, version, count = struct.unpack_from("<4sHH", bank)
             assert (magic, version) == (b"LMT\0", 67)
             offsets = struct.unpack_from(f"<{count}I", bank, 8)
+            if sex == "f":
+                offsets = tuple(female or male for male, female in zip(offsets, offsets[128:]))
             for clip in clips:
                 if (clip - 1000) // 100 == group:
                     assert 0 < offsets[clip % 100] < len(bank), (sex, clip)

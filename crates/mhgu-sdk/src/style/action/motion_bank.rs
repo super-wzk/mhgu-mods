@@ -3,17 +3,20 @@ use core::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
-/// GU hunter LMT resources indexed by the caller's group and the hunter's model sex.
+/// GU hunter LMT resources shared by both models. Slots 128–255 hold
+/// optional female-model variants of the corresponding slots 0–127.
 pub struct MotionBanks<const GROUPS: usize> {
-    paths: [[&'static CStr; GROUPS]; 2],
-    resources: [[AtomicU32; GROUPS]; 2],
+    paths: [&'static CStr; GROUPS],
+    resources: [AtomicU32; GROUPS],
 }
 
 impl<const GROUPS: usize> MotionBanks<GROUPS> {
-    pub const fn new(paths: [[&'static CStr; GROUPS]; 2]) -> Self {
+    pub const VARIANT_BIT: u8 = 128;
+
+    pub const fn new(paths: [&'static CStr; GROUPS]) -> Self {
         Self {
             paths,
-            resources: [const { [const { AtomicU32::new(0) }; GROUPS] }; 2],
+            resources: [const { AtomicU32::new(0) }; GROUPS],
         }
     }
 
@@ -22,9 +25,26 @@ impl<const GROUPS: usize> MotionBanks<GROUPS> {
     /// # Safety
     /// The actor must be a live GU hunter with equipped gear on the game thread.
     pub unsafe fn encode(&self, actor: u32, group: usize, slot: u8) -> Option<u16> {
-        let slot = u32::from(slot);
+        if slot >= Self::VARIANT_BIT {
+            return None;
+        }
         unsafe {
-            let resource = self.resource(actor, group, slot)?;
+            let equipment = ((actor + 5060) as *const u32).read();
+            if equipment == 0 {
+                return None;
+            }
+            let female = match ((equipment + 1240) as *const u8).read() {
+                0 => false,
+                1 => true,
+                _ => return None,
+            };
+            let resource = self.resource(group, u32::from(slot))?;
+            let variant = slot | Self::VARIANT_BIT;
+            let slot = u32::from(if female && has_clip(resource, u32::from(variant)) {
+                variant
+            } else {
+                slot
+            });
             let mut free = None;
             for bank in (8..16).rev() {
                 let r = ((actor + 3844 + 4 * bank) as *const u32).read();
@@ -46,9 +66,9 @@ impl<const GROUPS: usize> MotionBanks<GROUPS> {
     /// Cache a motion resource without taking a runtime bank on the hunter.
     ///
     /// # Safety
-    /// Call on the game thread with a live hunter and initialized resource manager.
-    pub unsafe fn preload(&self, actor: u32, group: usize, slot: u8) {
-        unsafe { self.resource(actor, group, u32::from(slot)) };
+    /// Call on the game thread with an initialized resource manager.
+    pub unsafe fn preload(&self, group: usize, slot: u8) {
+        unsafe { self.resource(group, u32::from(slot)) };
     }
 
     /// Resolve the caller's group from a packed GU motion ID.
@@ -64,27 +84,18 @@ impl<const GROUPS: usize> MotionBanks<GROUPS> {
         if resource == 0 {
             return None;
         }
-        (0..GROUPS).find(|&group| {
-            self.resources
-                .iter()
-                .any(|sex| sex[group].load(Ordering::Acquire) == resource)
-        })
+        self.resources
+            .iter()
+            .position(|bank| bank.load(Ordering::Acquire) == resource)
     }
 
-    unsafe fn resource(&self, actor: u32, group: usize, slot: u32) -> Option<u32> {
+    unsafe fn resource(&self, group: usize, slot: u32) -> Option<u32> {
         unsafe {
-            let equipment = ((actor + 5060) as *const u32).read();
-            if equipment == 0 {
-                return None;
-            }
-            let sex = usize::from(((equipment + 1240) as *const u8).read());
-            let cache = self.resources.get(sex)?.get(group)?;
-            let path = self.paths[sex][group];
-            let has_clip: unsafe extern "C" fn(u32, u32) -> u32 =
-                core::mem::transmute(crate::memory::entry(0xb49e54));
+            let cache = self.resources.get(group)?;
+            let path = self.paths[group];
             let cached = cache.load(Ordering::Acquire);
             if cached != 0 {
-                return (has_clip(cached, slot) != 0).then_some(cached);
+                return has_clip(cached, slot).then_some(cached);
             }
             let manager = (crate::memory::entry(0x2126a64) as *const u32).read();
             if manager == 0 {
@@ -99,7 +110,7 @@ impl<const GROUPS: usize> MotionBanks<GROUPS> {
             }
             let release: unsafe extern "C" fn(u32) =
                 core::mem::transmute(crate::memory::entry(0x887660));
-            if ((resource + 80) as *const u32).read() & 1 == 0 || has_clip(resource, slot) == 0 {
+            if ((resource + 80) as *const u32).read() & 1 == 0 || !has_clip(resource, slot) {
                 release(resource);
                 return None;
             }
@@ -113,5 +124,13 @@ impl<const GROUPS: usize> MotionBanks<GROUPS> {
                 },
             )
         }
+    }
+}
+
+unsafe fn has_clip(resource: u32, slot: u32) -> bool {
+    unsafe {
+        let lookup: unsafe extern "C" fn(u32, u32) -> u32 =
+            core::mem::transmute(crate::memory::entry(0xb49e54));
+        lookup(resource, slot) != 0
     }
 }
