@@ -103,7 +103,7 @@ unsafe extern "C" fn expand_world_contact(owner: u32, hit: u32) -> u32 {
 mod entry {
     use super::{STYLE_ID, WEAPON, battle, motion};
     use mhgu_sdk::style::{
-        Style, StyleRegistry,
+        Style, StyleRegistry, remote,
         rules::{self, Rules},
     };
 
@@ -162,8 +162,8 @@ mod entry {
         if !bound {
             forge::log::prelude::warn!("Extreme LS: world contact service unavailable");
         }
-        if !unsafe { mhgu_sdk::style::remote::bind(STYLE_ID, super::peer::tick) } {
-            forge::log::prelude::warn!("Extreme LS: remote action playback unavailable");
+        if !unsafe { remote::bind_playback(STYLE_ID, &super::peer::PLAYBACK) } {
+            forge::log::prelude::warn!("Style {}: remote action playback unavailable", STYLE_ID);
         }
         unsafe { mhgu_sdk::style::preload::bind(STYLE_ID, motion::preload) };
         battle::install();

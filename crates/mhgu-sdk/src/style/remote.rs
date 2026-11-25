@@ -141,6 +141,13 @@ pub struct ActionState {
     pub decode: unsafe extern "C" fn(actor: u32, bits: u8),
 }
 
+/// A style's remote action playback and optional companion callbacks.
+pub struct Playback {
+    pub tick: Tick,
+    pub observe: Option<Observe>,
+    pub action_state: Option<ActionState>,
+}
+
 #[doc(hidden)]
 #[repr(C)]
 pub struct Service {
@@ -160,6 +167,30 @@ fn current() -> Option<&'static Service> {
         return None;
     }
     unsafe { service::find(NAME, MAGIC) }
+}
+
+/// Bind a registered style's playback on the game thread. Returns false if
+/// the service is unavailable or a companion callback is rejected.
+///
+/// # Safety
+/// Call during style initialization after registration succeeds. The style,
+/// descriptor and callbacks must remain loaded.
+pub unsafe fn bind_playback(id: u32, playback: &'static Playback) -> bool {
+    let Some(api) = current() else { return false };
+    unsafe {
+        if let Some(state) = &playback.action_state
+            && !(api.bind_action_state)(id, state)
+        {
+            return false;
+        }
+        if let Some(observe) = playback.observe
+            && !(api.observe)(id, observe)
+        {
+            return false;
+        }
+        (api.bind)(id, playback.tick);
+    }
+    true
 }
 
 /// # Safety

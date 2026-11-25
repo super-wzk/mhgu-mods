@@ -2,7 +2,13 @@
 use crate::battle::Battle;
 use mhgu_sdk::style::{
     action, hunter,
-    remote::{PLAYER_COUNT, PeerStates, Roster},
+    remote::{PLAYER_COUNT, PeerStates, Playback, Roster},
+};
+
+pub(super) static PLAYBACK: Playback = Playback {
+    tick,
+    observe: None,
+    action_state: None,
 };
 
 static PEERS: PeerStates<Battle> = PeerStates::new();
@@ -39,7 +45,7 @@ impl Slot {
     }
 }
 
-pub(super) unsafe extern "C" fn tick(actor: u32, state: u8) {
+unsafe extern "C" fn tick(actor: u32, state: u8) {
     unsafe {
         let Some(index) = Roster::current().and_then(|roster| roster.peer_index(actor)) else {
             return;

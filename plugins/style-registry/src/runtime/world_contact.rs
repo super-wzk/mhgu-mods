@@ -20,7 +20,7 @@ unsafe fn expand(hit: u32) -> u32 {
             && let Some(style) = if crate::runtime::local_hunter() == owner {
                 crate::runtime::actor_entry(owner)
             } else {
-                crate::runtime::peer_entry(owner)
+                crate::runtime::multiplayer::peer_entry(owner)
             }
         {
             let callback = style.world_contact.load(Ordering::Acquire);

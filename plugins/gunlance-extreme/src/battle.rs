@@ -1014,12 +1014,16 @@ unsafe extern "C" fn decode_ammo(actor: u32, count: u8) {
     }
 }
 
-pub(super) static AMMO_STATE: remote::ActionState = remote::ActionState {
-    encode: encode_ammo,
-    decode: decode_ammo,
+pub(super) static PLAYBACK: remote::Playback = remote::Playback {
+    tick: peer,
+    observe: Some(observe),
+    action_state: Some(remote::ActionState {
+        encode: encode_ammo,
+        decode: decode_ammo,
+    }),
 };
 
-pub unsafe extern "C" fn peer(actor: u32, state: u8) {
+unsafe extern "C" fn peer(actor: u32, state: u8) {
     unsafe {
         let Some(index) = Roster::current().and_then(|r| r.peer_index(actor)) else {
             return;
@@ -1052,7 +1056,7 @@ pub unsafe extern "C" fn peer(actor: u32, state: u8) {
     }
 }
 
-pub unsafe extern "C" fn observe(local: u32) {
+unsafe extern "C" fn observe(local: u32) {
     unsafe {
         PEERS.visit_live(crate::WEAPON, |_, actor, battle| {
             let elapsed = read::<f32>(actor, 28).max(0.);

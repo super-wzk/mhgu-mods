@@ -620,7 +620,7 @@ pub unsafe extern "C" fn request(actor: u32, raw: *const ActionRequest) -> u32 {
     PASS
 }
 
-pub unsafe extern "C" fn peer(actor: u32, id: u8) {
+unsafe extern "C" fn peer(actor: u32, id: u8) {
     unsafe {
         let Some(slot) = Roster::current().and_then(|r| r.peer_index(actor)) else {
             return;
@@ -712,16 +712,20 @@ unsafe fn round_force(actor: u32, tier: u32) -> u32 {
     }
 }
 
-pub fn install_round_force() {
-    static STATE: remote::ActionState = remote::ActionState {
+pub(super) static PLAYBACK: remote::Playback = remote::Playback {
+    tick: peer,
+    observe: Some(observe),
+    action_state: Some(remote::ActionState {
         encode: encode_art,
         decode: decode_art,
-    };
-    unsafe { remote::bind_action_state(crate::STYLE_ID, &STATE) };
+    }),
+};
+
+pub fn install_round_force() {
     forge::install_hook!(forge::mem::text_addr(), round_force);
 }
 
-pub unsafe extern "C" fn observe(local: u32) {
+unsafe extern "C" fn observe(local: u32) {
     unsafe {
         PEERS.visit_live(crate::WEAPON, |_, actor, b| {
             let (group, slot) = action::current(actor);

@@ -49,7 +49,7 @@ unsafe fn write<T>(address: u32, offset: u32, value: T) {
 mod entry {
     use super::{STYLE_ID, WEAPON_ID, battle, motion, program};
     use mhgu_sdk::style::{
-        Style, StyleRegistry,
+        Style, StyleRegistry, remote,
         rules::{self, Rules},
     };
 
@@ -100,6 +100,9 @@ mod entry {
             forge::log::prelude::warn!("Style {}: GU rule service unavailable", STYLE_ID);
         }
         mhfz_sdk::effects::model::install();
+        if !unsafe { remote::bind_playback(STYLE_ID, &battle::PLAYBACK) } {
+            forge::log::prelude::warn!("Style {}: remote action playback unavailable", STYLE_ID);
+        }
         battle::install();
         unsafe { mhgu_sdk::style::preload::bind(STYLE_ID, motion::preload) };
     }

@@ -1,6 +1,6 @@
 use super::{Battle, EXPLOSIONS, OWNER, scaled_gain};
 use crate::{
-    STYLE_ID, WEAPON_ID, fx, motion, native,
+    WEAPON_ID, fx, motion, native,
     program::{self, DischargeTier},
     read,
 };
@@ -55,11 +55,6 @@ pub(super) unsafe fn hit(actor: u32) {
 
 pub(super) static BLADE_KIND: [AtomicU32; remote::PLAYER_COUNT] =
     [const { AtomicU32::new(0) }; remote::PLAYER_COUNT];
-
-static PHIAL: remote::ActionState = remote::ActionState {
-    encode: send_phial,
-    decode: receive_phial,
-};
 
 unsafe extern "C" fn send_phial(actor: u32) -> u8 {
     if actor != OWNER.load(Relaxed) {
@@ -181,10 +176,11 @@ unsafe extern "C" fn receive(actor: u32, id: u8) {
     }
 }
 
-pub(super) unsafe fn install() {
-    unsafe {
-        remote::bind(STYLE_ID, receive);
-        remote::observe(STYLE_ID, peer_frame);
-        remote::bind_action_state(STYLE_ID, &PHIAL);
-    }
-}
+pub(crate) static PLAYBACK: remote::Playback = remote::Playback {
+    tick: receive,
+    observe: Some(peer_frame),
+    action_state: Some(remote::ActionState {
+        encode: send_phial,
+        decode: receive_phial,
+    }),
+};

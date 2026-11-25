@@ -105,15 +105,15 @@ mod entry {
         }
         mhgu_sdk::style::manual::bind(STYLE_ID, include_str!("manual.txt"));
         rules::bind(STYLE_ID, &RULES);
+        if !unsafe { remote::bind_playback(STYLE_ID, &battle::PLAYBACK) } {
+            forge::log::prelude::warn!("Style {}: remote action playback unavailable", STYLE_ID);
+        }
         heat::install();
         fx::install();
         motion::install();
         shell::install();
         unsafe {
             preload::bind(STYLE_ID, motion::preload);
-            remote::bind(STYLE_ID, battle::peer);
-            remote::bind_action_state(STYLE_ID, &battle::AMMO_STATE);
-            remote::observe(STYLE_ID, battle::observe);
         }
     }
 }

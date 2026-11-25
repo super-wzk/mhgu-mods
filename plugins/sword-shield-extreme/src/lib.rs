@@ -102,14 +102,15 @@ mod entry {
         }
         mhgu_sdk::style::manual::bind(STYLE_ID, include_str!("manual.txt"));
         rules::bind(STYLE_ID, &RULES);
+        if !unsafe { remote::bind_playback(STYLE_ID, &battle::PLAYBACK) } {
+            forge::log::prelude::warn!("Style {}: remote action playback unavailable", STYLE_ID);
+        }
         battle::install_round_force();
         motion::install();
         mhfz_sdk::effects::model::install();
         trail::install();
         unsafe {
             preload::bind(STYLE_ID, motion::preload);
-            remote::bind(STYLE_ID, battle::peer);
-            remote::observe(STYLE_ID, battle::observe);
             if !world_contact::bind(STYLE_ID, collision::expand)
                 || !world_contact::bind_pass(STYLE_ID, collision::submit_waves)
             {

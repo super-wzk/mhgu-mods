@@ -66,7 +66,7 @@ GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提�
 
 [preload](src/style/preload.rs) 登记本地风格在 GU 完成任务猎人初始化后执行的资源准备回调。[MotionBanks](src/style/action/motion_bank.rs) 缓存男女模型共用的 LMT。首次播放时才绑定运行时 bank，按装备模型选择基础片段或槽号加 128 的专用片段。私有 HTS 可通过 [CachedHitShape](src/combat/collision/shapes.rs) 复用已加载资源。
 
-[remote](src/style/remote.rs) 提供 GU 玩家槽查询和远端动作状态的存储。读取远端装备前按当前名册核对猎人，角色离场、换武器或槽位更换时释放旧状态。风格插件负责根据 GU 接收的动作回放各自的招式。插件可以分别登记动作回放（`bind`）、逐帧观察（`observe`）和可选的动作状态收发（`bind_action_state`）。注册器校验当前武器的动作包是否有可用位，插件定义状态值的含义。
+[remote](src/style/remote.rs) 提供 GU 名册查询和远端状态存储。风格注册成功后，用 `bind_playback` 一次提交常驻的 `Playback` 描述符，包含动作回放 `tick`、可选的逐帧观察 `observe` 和动作包状态 `action_state`。注册器校验当前武器的动作包是否有可用位，插件定义状态值及回放逻辑。读取远端装备前按当前名册核对猎人，角色离场、换武器或槽位更换时释放旧状态。原有的三个独立绑定函数仍可通过 V1 服务调用。
 
 [physical](src/style/physical.rs) 提供统一的物理攻击力回调登记。回调可限定在 GU 的左右刀身碰撞槽，也可覆盖同一猎人的独立武器碰撞。风格插件负责数值与生效条件。
 

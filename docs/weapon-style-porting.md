@@ -38,7 +38,7 @@
 - 转向通过 GU 的方向判定和 `movement::set_facing`、`movement::turn` 更新当前与目标朝向。需要长按摇杆时按实时相机方向取角度，可以像斩斧一样使用 `live_relative_stick_yaw`，沿用 GU 的死区和按住锁，只修正相机方位。若派生有输入缓冲，按该招的源规则保存方向或到执行帧再取方向。见[移动接口](../crates/mhgu-sdk/src/style/movement.rs)。
 - 公共移动、收刀、落地、受击、骑乘和狩技继续走 GU。`art_slots` 配置装备页槽位数，允许出招的窗口提交 `Transition::HUNTER_ART`。武器专属狩技要从本武器原版派发表确认起手、后续动作、槽更新和收尾。通过 `guard::Policy` 交付防御结果，使用 `guard::take` 取得已发生的格挡。风格通过 `StyleRulesV1` 声明格挡半角及其他可选规则。注册器处理 GU 来袭角、防御强化与伤害结算，具体防御窗口、接招和资源收益由风格决定。见[防御接入](../plugins/style-registry/src/runtime/guard.rs)。
 
-共享派发在读取任务专用字段前先确认角色类型。联机回放按当前 GU 名册、任务猎人类型和装备武器定位远端角色。动作由原生 `netPlAction` 同步，额外的状态值由风格通过 `bind_action_state` 声明，注册器检查武器是否有可用位。离场、换武器或复用名册槽时回收该槽的旧状态。见[远端接口](../crates/mhgu-sdk/src/style/remote.rs)。
+共享派发在读取任务专用字段前先确认角色类型。注册风格后从 `lib.rs` 用 `remote::bind_playback` 登记常驻的 `Playback`。`tick` 回放 GU 接受的私有动作，`observe` 可在公共动作期间推进或清理队友状态，`action_state` 可为原生 `netPlAction` 提供额外状态的编码和解码。注册器检查武器是否有可用位，并按当前 GU 名册、任务猎人类型和远端装备武器定位回放。离场、换武器或复用名册槽时回收该槽的旧状态。见[远端接口](../crates/mhgu-sdk/src/style/remote.rs)和[收发与派发入口](../plugins/style-registry/src/runtime/multiplayer.rs)。
 
 ## 4. 接入命中、特效、声音和 HUD
 

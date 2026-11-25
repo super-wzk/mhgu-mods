@@ -182,9 +182,9 @@ pub(super) unsafe fn local(p: u32) -> bool {
     }
 }
 mod peer;
+pub(super) use peer::PLAYBACK;
 pub(super) use peer::{
-    edit_guard_hold as edit_peer_guard_hold, guarding_slot as guarding_peer_slot,
-    install as install_peers, peer_action,
+    edit_guard_hold as edit_peer_guard_hold, guarding_slot as guarding_peer_slot, peer_action,
 };
 
 struct Battle {

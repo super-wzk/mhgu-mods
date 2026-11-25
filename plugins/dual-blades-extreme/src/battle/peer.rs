@@ -134,11 +134,11 @@ unsafe extern "C" fn observe(local: u32) {
         })
     }
 }
-pub(super) fn install() {
-    static STATE: remote::ActionState = remote::ActionState { encode, decode };
-    unsafe {
-        remote::bind(crate::STYLE_ID, tick);
-        remote::observe(crate::STYLE_ID, observe);
-        remote::bind_action_state(crate::STYLE_ID, &STATE);
-    }
-}
+pub(crate) static PLAYBACK: remote::Playback = remote::Playback {
+    tick: tick,
+    observe: Some(observe),
+    action_state: Some(remote::ActionState {
+        encode: encode,
+        decode: decode,
+    }),
+};

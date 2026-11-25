@@ -1,6 +1,7 @@
 mod arts;
 mod landing;
 mod peer;
+pub(super) use peer::PLAYBACK;
 
 use crate::{
     STYLE_ID, fx, motion, native,
@@ -1399,7 +1400,6 @@ pub fn install() {
     arts::install();
     motion::install();
     unsafe {
-        peer::install();
         action::melee::bind_contact(STYLE_ID, hit);
         style::world_contact::bind(STYLE_ID, expand);
     }

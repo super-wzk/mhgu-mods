@@ -1,6 +1,7 @@
 //! Local hunter state. GU owns transitions, hits, movement and Hunter Arts.
 mod maw;
 mod peer;
+pub(super) use peer::PLAYBACK;
 mod sharpen;
 
 use crate::{
@@ -1233,7 +1234,6 @@ unsafe fn native_demon_status(actor: u32) -> u32 {
 }
 
 pub(super) fn install() {
-    peer::install();
     let base = forge::mem::text_addr();
     forge::install_hook!(base, native_demon_gauge);
     forge::install_hook!(base, record_contact);

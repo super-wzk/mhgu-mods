@@ -64,7 +64,7 @@ fn local_actor() -> Option<u32> {
 mod entry {
     use super::{STYLE_ID, WEAPON, battle, motion};
     use mhgu_sdk::style::{
-        Style, StyleRegistry,
+        Style, StyleRegistry, remote,
         rules::{self, Rules},
     };
 
@@ -123,6 +123,9 @@ mod entry {
         }
         mhfz_sdk::effects::model::install();
         unsafe { mhgu_sdk::style::preload::bind(STYLE_ID, motion::preload) };
+        if !unsafe { remote::bind_playback(STYLE_ID, &battle::PLAYBACK) } {
+            forge::log::prelude::warn!("Style {}: remote action playback unavailable", STYLE_ID);
+        }
         battle::install();
         super::fx::install(EXTREME.id);
         super::hud::install();

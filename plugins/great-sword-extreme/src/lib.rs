@@ -26,7 +26,7 @@ const STYLE_ID: u32 = 1;
 mod entry {
     use super::motion;
     use mhgu_sdk::style::{
-        Style, StyleRegistry,
+        Style, StyleRegistry, remote,
         rules::{self, Rules},
     };
 
@@ -92,7 +92,9 @@ mod entry {
         mhfz_sdk::effects::model::install();
         unsafe { mhgu_sdk::style::preload::bind(EXTREME.id, motion::preload) };
         motion::install();
-        super::battle::install_peers();
+        if !unsafe { remote::bind_playback(EXTREME.id, &super::battle::PLAYBACK) } {
+            forge::log::prelude::warn!("Style {}: remote action playback unavailable", EXTREME.id);
+        }
         if !unsafe { mhgu_sdk::style::world_contact::bind(EXTREME.id, super::combat::expand) } {
             forge::log::prelude::warn!("Extreme GS: world contact service unavailable");
         }
