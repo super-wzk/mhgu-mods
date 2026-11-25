@@ -31,6 +31,10 @@ HUD 沿用 GU `hud9_g_lance` 的外框和数字弹量。原热度槽内的色块
 
 充能特效结束时提交的武器请求 30 是 `dbsT` 类型 2。用 `wi037` 的请求表回放 Vita `82031AF8`，该请求向现有声音提交释放命令 `0x10000001`。同一回放中，动作音效 35–37 走采样入口，分别请求装备音库 `Prog` 中程序 1 的键 63、64、65。PC 的 `wi000snd.abn` 和 `wi500snd.abn` 共核对 468 份去重音库，均缺这个程序。`we09.snd` 的请求表到 34，公共音库的同号请求属于程序 4。还需 Vita 的装备音库 `sound_vita/wi*.vsnd` 核对这组音区的原始波形。
 
+## 联机回放
+
+极之型动作通过 GU 原生动作包同步起手时的现有弹数。队友按原生弹仓容量回放普通、快速及奔跑装填，并在相同的动作事件提交炮击、蓄炮、全弹和龙击炮。追加装填后的剩余弹数随下一动作同步。炮弹沿用 GU 的命中、伤害归属及怪物扣血流程。联机双方需使用本次构建的铳枪插件和风格注册器。
+
 ## 构建与离线检查
 
 从仓库根目录运行。两项路径参数的含义见[开发指引](../../docs/development.md)。
@@ -39,6 +43,7 @@ HUD 沿用 GU `hud9_g_lance` 的外框和数字弹量。原热度槽内的色块
 python3 plugins/style-registry/package.py
 python3 plugins/gunlance-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 python3 plugins/gunlance-extreme/tests/verify_port.py
+python3 plugins/style-registry/tests/verify_sns_gl_multiplayer.py
 python3 plugins/style-registry/tests/verify_weapon_styles.py
 ```
 

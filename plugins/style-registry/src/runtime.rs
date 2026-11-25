@@ -230,7 +230,8 @@ unsafe extern "C" fn bind_peer_frame(id: u32, callback: remote::Observe) -> bool
 
 unsafe extern "C" fn bind_action_state(id: u32, state: &'static remote::ActionState) -> bool {
     // These weapons leave the packet flag nibble at bits 16..19 free.
-    let Some(entry) = registered_entry(id).filter(|e| matches!(e.style.weapon, 0 | 1 | 8 | 11)) else {
+    let Some(entry) = registered_entry(id).filter(|e| matches!(e.style.weapon, 0 | 1 | 8 | 9 | 11))
+    else {
         return false;
     };
     entry
@@ -240,7 +241,7 @@ unsafe extern "C" fn bind_action_state(id: u32, state: &'static remote::ActionSt
 }
 
 // Retail 1FED90 and 1FF308 use bits 16..19 at packet +16 only for
-// weapon 4, 6 and 14. W00, W01, W08 and W11 ignore that nibble.
+// weapon 4, 6 and 14. W00, W01, W08, W09 and W11 ignore that nibble.
 const STATE_PRESENT: u8 = 0b1000;
 const STATE_VALUE: u8 = 0b0111;
 const STATE_SHIFT: u32 = 16;

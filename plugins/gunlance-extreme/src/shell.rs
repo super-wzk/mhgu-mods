@@ -41,6 +41,10 @@ pub unsafe fn capacity(actor: u32) -> u8 {
     unsafe { read(actor, MAX_AMMO) }
 }
 
+pub unsafe fn sync_ammo(actor: u32, count: u8) {
+    unsafe { write(actor, AMMO, count.min(capacity(actor))) };
+}
+
 pub unsafe fn can_reload(actor: u32) -> bool {
     unsafe { ammo(actor) < capacity(actor) }
 }
@@ -142,7 +146,7 @@ pub unsafe fn fire(actor: u32, kind: u32, variant: u32, gain: f32) -> bool {
         true
     }
 }
-pub unsafe fn wyvern_fire(actor: u32, kind: u32, gain: f32, duration: f32) -> bool {
+pub unsafe fn wyvern_fire(actor: u32, kind: u32, gain: f32, duration: Option<f32>) -> bool {
     unsafe {
         if !available(actor) {
             return false;
@@ -155,7 +159,9 @@ pub unsafe fn wyvern_fire(actor: u32, kind: u32, gain: f32, duration: f32) -> bo
             gain.to_bits(),
             forge::mem::text_addr() + 0x11b086c,
         );
-        set_wyvern_cooldown(actor, duration);
+        if let Some(duration) = duration {
+            set_wyvern_cooldown(actor, duration);
+        }
         true
     }
 }

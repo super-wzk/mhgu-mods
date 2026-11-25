@@ -112,6 +112,7 @@ mod entry {
         unsafe {
             preload::bind(STYLE_ID, motion::preload);
             remote::bind(STYLE_ID, battle::peer);
+            remote::bind_action_state(STYLE_ID, &battle::AMMO_STATE);
             remote::observe(STYLE_ID, battle::observe);
         }
     }

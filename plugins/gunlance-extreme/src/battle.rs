@@ -18,7 +18,7 @@ use mhgu_sdk::{
         hunter,
         input::{attack_chord_pressed, attack_chord_with_shoulder},
         movement,
-        remote::{PeerStates, Roster},
+        remote::{self, PeerStates, Roster},
     },
     sync::Shared,
 };
@@ -44,6 +44,8 @@ struct Battle {
     steam: f32,
     next_steam: f32,
     reload_rounds: u8,
+    received_ammo: Option<(u8, u8)>,
+    synced_ammo: bool,
     area: u8,
     rounds: u8,
     chambered: u8,
@@ -99,6 +101,10 @@ pub unsafe extern "C" fn commands(actor: u32, table: u32) -> *const CommandSet {
 }
 
 impl Battle {
+    fn replay_shells(&self) -> bool {
+        self.local || self.synced_ammo
+    }
+
     fn begin(&mut self, state: u8) -> bool {
         if !program::ACTIONS.contains(state)
             || !unsafe { action::accept_custom_start(self.actor, state) }
@@ -134,16 +140,24 @@ impl Battle {
         }
         unsafe {
             let a = self.actor;
+            let count = self
+                .received_ammo
+                .take()
+                .filter(|&(action, _)| action == state);
+            self.synced_ammo = count.is_some();
+            if let Some((_, count)) = count {
+                shell::sync_ammo(a, count);
+            }
             write(a, 5, 1u8);
             native!(0x282fd8, a, 0, u32::from(state != program::SPRINT), 0);
             if native!(0x2a2444, a) == 0 {
                 native!(0x2a264c, a, 1);
             }
             native!(0x2a2560, a, 1);
-            if self.local && matches!(state, 47 | 49) {
+            if self.replay_shells() && matches!(state, 47 | 49) {
                 self.chambered = shell::consume(a, 1);
             }
-            if self.local && matches!(state, 30 | 31 | 42..=45) {
+            if self.replay_shells() && matches!(state, 30 | 31 | 42..=45) {
                 self.burst = shell::ammo(a).min(program::burst_limit(shell::shell_type(a)));
             }
             if self.local && state == program::SPRINT {
@@ -263,17 +277,15 @@ impl Battle {
             return;
         }
         unsafe {
-            if self.local {
+            if self.replay_shells() {
                 let kind = match state {
                     50 | 60 | 61 => 1,
                     73 | 74 => 3,
                     _ => 0,
                 };
-                let cooldown = program::fire_cooldown(
-                    shell::shell_type(self.actor),
-                    self.chambered,
-                    kind == 3,
-                );
+                let cooldown = self.local.then(|| {
+                    program::fire_cooldown(shell::shell_type(self.actor), self.chambered, kind == 3)
+                });
                 if !shell::wyvern_fire(self.actor, kind, 1., cooldown) {
                     return;
                 }
@@ -285,7 +297,7 @@ impl Battle {
         }
     }
 
-    fn native_step(&mut self, state: u8, frame: f32, bits: u32, yaw: Option<u16>, dt: f32) -> bool {
+    fn native_step(&mut self, state: u8, bits: u32, yaw: Option<u16>, dt: f32) -> bool {
         let actor = self.actor;
         let phase = self.cursor.as_ref().unwrap().time.step;
         unsafe {
@@ -340,46 +352,51 @@ impl Battle {
                         });
                     }
                 }
-                30 | 31 | 42..=45 if frame >= 50. || self.burst_started => {
-                    self.burst_started = true;
-                    let spread = matches!(state, 43 | 45);
-                    let sequential = matches!(state, 31 | 44 | 45);
-                    let (kind, variant) = if spread { (3, 0) } else { (2, 0) };
-                    // Wide simultaneous bursts divide their shells among four
-                    // contacts. GU accepts at most three requests per update.
-                    let groups = if sequential { 1 } else { 4 };
-                    for remaining in (1..=groups).rev() {
-                        if self.burst == 0 || !shell::available(actor) {
-                            break;
-                        }
-                        let rounds = if spread && !sequential {
-                            self.burst.div_ceil(remaining)
-                        } else {
-                            1
-                        };
-                        if shell::consume(actor, rounds) == 0 {
-                            self.burst = 0;
-                            break;
-                        }
-                        if shell::queue(actor, kind, variant, f32::from(rounds))
-                            && (sequential || !self.fired)
-                        {
-                            shell::feedback(actor, kind);
-                            sound::full_burst(actor);
-                            self.fired = true;
-                        }
-                        self.burst -= rounds;
-                    }
-                    self.quick_reload = 0.;
-                }
                 _ => {}
             }
         }
         false
     }
 
+    fn fire_burst(&mut self, state: u8) {
+        let actor = self.actor;
+        unsafe {
+            self.burst_started = true;
+            let spread = matches!(state, 43 | 45);
+            let sequential = matches!(state, 31 | 44 | 45);
+            let (kind, variant) = if spread { (3, 0) } else { (2, 0) };
+            // Wide simultaneous bursts divide their shells among four
+            // contacts. GU accepts at most three requests per update.
+            let groups = if sequential { 1 } else { 4 };
+            for remaining in (1..=groups).rev() {
+                if self.burst == 0 || !shell::available(actor) {
+                    break;
+                }
+                let rounds = if spread && !sequential {
+                    self.burst.div_ceil(remaining)
+                } else {
+                    1
+                };
+                if shell::consume(actor, rounds) == 0 {
+                    self.burst = 0;
+                    break;
+                }
+                if shell::queue(actor, kind, variant, f32::from(rounds))
+                    && (sequential || !self.fired)
+                {
+                    shell::feedback(actor, kind);
+                    sound::full_burst(actor);
+                    self.fired = true;
+                }
+                self.burst -= rounds;
+            }
+            self.quick_reload = 0.;
+        }
+    }
+
     fn events(&mut self) {
         let actor = self.actor;
+        let replay_shells = self.replay_shells();
         while let Some(cursor) = self.cursor.as_mut()
             && let Some((kind, value, late)) = cursor.next_event()
         {
@@ -440,24 +457,29 @@ impl Battle {
                         }
                     }
                     12 => {
-                        self.reload_rounds = if self.local {
+                        self.reload_rounds = if replay_shells {
                             let missing = shell::capacity(actor).saturating_sub(shell::ammo(actor));
                             shell::reload(actor, true);
                             self.quick_reload = 0.;
                             missing
                         } else {
-                            // The accepted action is visible to peers without the shell count.
+                            // Older peers still get the animation and its cue.
                             1
                         };
                     }
                     13 => {
-                        if self.local {
+                        self.reload_rounds = if replay_shells {
+                            let missing = shell::can_reload(actor);
                             shell::reload(actor, false);
-                        }
-                        self.reload_rounds = 1;
+                            u8::from(missing)
+                        } else {
+                            1
+                        };
                     }
-                    14 if self.local => self.rounds = shell::consume(actor, 1),
-                    15 if self.local => self.quick_reload = program::timer(program::QUICK_RELOAD),
+                    14 if replay_shells => self.rounds = shell::consume(actor, 1),
+                    15 if replay_shells => {
+                        self.quick_reload = program::timer(program::QUICK_RELOAD)
+                    }
                     16 => {
                         self.heat_blade = program::timer(program::IGNITION);
                         self.ignition_cooldown = 0.;
@@ -471,7 +493,7 @@ impl Battle {
                             _ => 0,
                         };
                         let charged = kind == 18;
-                        if self.local {
+                        if replay_shells {
                             if self.rounds == 0 {
                                 continue;
                             }
@@ -497,7 +519,7 @@ impl Battle {
                             fx::muzzle_flash(actor, charged || shell::shell_type(actor) != 0);
                         }
                     }
-                    19 if self.local => {
+                    19 if replay_shells => {
                         shell::fire(actor, 2, 0, 1.);
                     }
                     21 if self.local => mhfz_sdk::camera::start(actor, value),
@@ -568,13 +590,18 @@ impl Battle {
         }
         self.events();
         match state {
+            30 | 31 | 42..=45
+                if self.replay_shells() && (sample.frame >= 50. || self.burst_started) =>
+            {
+                self.fire_burst(state);
+            }
             48 | 50 => self.wyvern_fire(state),
             59..=61 if sample.frame >= 2. => self.wyvern_fire(state),
             73 | 74 if phase == 1 && sample.frame >= 30. => self.wyvern_fire(state),
             _ => {}
         }
         if let Some(input) = input {
-            if self.native_step(state, sample.frame, bits, yaw, dt) {
+            if self.native_step(state, bits, yaw, dt) {
                 return;
             }
             let heat_blade = self.heat_blade > 0.;
@@ -954,6 +981,44 @@ pub unsafe extern "C" fn request(actor: u32, raw: *const ActionRequest) -> u32 {
     }
 }
 
+// GU sends its action before the first animation event consumes or reloads shells.
+unsafe extern "C" fn encode_ammo(actor: u32) -> u8 {
+    let (group, slot) = unsafe { action::current(actor) };
+    if action::custom_id(group, slot).is_some() {
+        unsafe { shell::ammo(actor) }
+    } else {
+        u8::MAX
+    }
+}
+
+unsafe extern "C" fn decode_ammo(actor: u32, count: u8) {
+    unsafe {
+        if read::<u8>(actor, 5) != 0 {
+            return;
+        }
+        let (group, slot) = action::current(actor);
+        let Some(state) = action::custom_id(group, slot) else {
+            return;
+        };
+        let Some(index) = Roster::current().and_then(|r| r.peer_index(actor)) else {
+            return;
+        };
+        PEERS.update(index, actor, |saved, _| {
+            let battle = saved.get_or_insert_with(|| Battle {
+                actor,
+                fx_owner: index + 1,
+                ..Battle::default()
+            });
+            battle.received_ammo = (count != u8::MAX).then_some((state, count));
+        });
+    }
+}
+
+pub(super) static AMMO_STATE: remote::ActionState = remote::ActionState {
+    encode: encode_ammo,
+    decode: decode_ammo,
+};
+
 pub unsafe extern "C" fn peer(actor: u32, state: u8) {
     unsafe {
         let Some(index) = Roster::current().and_then(|r| r.peer_index(actor)) else {
@@ -992,6 +1057,7 @@ pub unsafe extern "C" fn observe(local: u32) {
         PEERS.visit_live(crate::WEAPON, |_, actor, battle| {
             let elapsed = read::<f32>(actor, 28).max(0.);
             battle.heat_blade = (battle.heat_blade - elapsed).max(0.);
+            battle.quick_reload = (battle.quick_reload - elapsed).max(0.);
             let (group, slot) = action::current(actor);
             let state = action::custom_id(group, slot);
             let same_area = read::<u8>(actor, 4180) == read::<u8>(local, 4180);
@@ -1003,6 +1069,9 @@ pub unsafe extern "C" fn observe(local: u32) {
             if state.is_none() || !same_area {
                 battle.flame.stop();
                 battle.cursor = None;
+                if !same_area {
+                    battle.quick_reload = 0.;
+                }
             } else {
                 battle.flame.update(actor, elapsed);
             }

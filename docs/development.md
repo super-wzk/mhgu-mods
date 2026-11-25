@@ -75,7 +75,7 @@ python3 plugins/gunlance-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 | 攻击、防御、狩技和武器专属派生 | [大剑与双剑弹刀、刃打和双手刀光](../plugins/style-registry/tests/verify_deflection.py)、[专属狩技](../plugins/style-registry/tests/verify_weapon_arts.py)、[太刀](../plugins/long-sword-extreme/tests/verify_port.py)、[斩斧](../plugins/switch-axe-extreme/tests/verify_port.py)与[单手剑](../plugins/sword-shield-extreme/tests/verify_port.py)的动作回放。 |
 | 动作、音效、特效与材质 | 对照输出槽位、事件帧、挂点或材质字段。参考[资源检查](../plugins/great-sword-extreme/tests/verify_assets.py)、[原生粒子](../plugins/great-sword-extreme/tests/verify_native_fx.py)和[材质绘制](../plugins/great-sword-extreme/tests/verify_native_material.py)。 |
 | 预加载、换区和角色交接 | [共用武器验收](../plugins/style-registry/tests/verify_weapon_styles.py)覆盖各武器的注册、任务预读和成品粒子路径。[斩斧集会所回放](../plugins/switch-axe-extreme/tests/verify_lobby.py)核对任务角色和集会所角色交接。 |
-| 联机动作与伤害归属 | [大剑与双剑](../plugins/style-registry/tests/verify_gs_db_multiplayer.py)、[太刀](../plugins/long-sword-extreme/tests/verify_multiplayer.py)和[斩斧](../plugins/switch-axe-extreme/tests/verify_port.py)覆盖 GU 原生动作包和队员命中。实机另查双方的动作、特效和结算。 |
+| 联机动作与伤害归属 | [大剑与双剑](../plugins/style-registry/tests/verify_gs_db_multiplayer.py)、[太刀](../plugins/long-sword-extreme/tests/verify_multiplayer.py)、[片手与铳枪](../plugins/style-registry/tests/verify_sns_gl_multiplayer.py)和[斩斧](../plugins/switch-axe-extreme/tests/verify_port.py)覆盖 GU 原生动作包和队员命中。实机另查双方的动作、特效和结算。 |
 
 从仓库根目录使用可导入 `unicorn` 的 Python 运行离线脚本。准备相应的本地 ELF，并保留打包生成的 `target/assets` 和 `dist`。涉及 GU 原版武器 ARC 的脚本还需要导出 `MHGU_ROMFS`。共用武器验收需要已构建的注册器和所有武器风格的 `dist`。
 

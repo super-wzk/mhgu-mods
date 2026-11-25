@@ -13,9 +13,11 @@ from damage_target import damage_target
 from verify_style import boot, guard_body_scene, load_registered_style, quest_entries
 
 
-def replay(weapon, name, vtable):
-    g = boot((ROOT / "mhgu/main.elf").read_bytes(), f"[Weapons]\n{weapon}={1 if weapon == 0 else 2}\n".encode(), ("registry",))
+def network_scene(weapon, style, name, vtable):
+    g = boot((ROOT / "mhgu/main.elf").read_bytes(), f"[Weapons]\n{weapon}={style}\n".encode(), ("registry",))
     nx = ROOT / "plugins" / name / "dist" / name / "romfs/nativeNX"
+    if weapon == 1:
+        g.inline_hooks.add(0x116D464)
     desc = load_registered_style(g, nx / "plugins" / (name.replace("-", "_") + ".nro"))
     def half(addr, value):
         g.cpu.mem_write(addr, struct.pack("<H", value))
@@ -108,6 +110,24 @@ def replay(weapon, name, vtable):
     for index, actor in enumerate((local, guest, second)):
         g.put(manager + 28 + index*4, actor)
     monster, status, _, _, collision, credit = damage_target(g, vtable)
+
+    return g, nx, desc, manager, session, packet, local, guest, second, sender, (monster, status, collision, credit)
+
+
+def replay(weapon, name, vtable):
+    g, nx, desc, manager, _, packet, local, guest, second, sender, target = network_scene(
+        weapon, 1 if weapon == 0 else 2, name, vtable
+    )
+    monster, status, collision, credit = target
+
+    def half(addr, value):
+        g.cpu.mem_write(addr, struct.pack("<H", value))
+
+    def number(addr, value):
+        g.cpu.mem_write(addr, struct.pack("<f", value))
+
+    def zero(*_):
+        return 0
 
     def receive(actor, move, bits=None, flags=0):
         half(sender + 9478, 16)
