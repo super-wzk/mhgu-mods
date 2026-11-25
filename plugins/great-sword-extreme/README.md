@@ -25,10 +25,10 @@
 ```sh
 python3 plugins/style-registry/package.py
 export MHGU_ROMFS="${MHGU_ROMFS:?请指定 GU RomFS 根目录}"
-python3 plugins/great-sword-extreme/package.py "${MHFZ_DAT:?请指定 FZ 的 dat 目录}"
+python3 plugins/great-sword-extreme/package.py "${MHFZ_DAT:?请指定 FZ 的 dat 目录}" "$MHGU_ROMFS"
 ```
 
-将两个插件各自的 `dist/<插件名>` 安装到 mods 目录，并让 `style-registry` 先于极型大剑初始化。若顺序相反，本次启动继续使用原版风格。菜单选择立即生效，由注册器写入 Forge 的 `savedata:/style_registry.ini`；要切回原版，在同一页确认任一原版风格即可。
+将两个插件各自的 `dist/<插件名>` 安装到 mods 目录。大剑通过 `registry::when_ready` 等待风格注册器就绪。菜单选择立即生效，由注册器写入 Forge 的 `savedata:/style_registry.ini`。要切回原版，在同一页确认任一原版风格即可。
 
 打包后运行 `tests/verify_assets.py`、`tests/verify_style.py`、`tests/verify_menu.py`，需要 Unicorn、本机 Vita/GU ELF 和 GU 的大剑资源包。提取的动作和指令表在 `target/assets`。安装包将男女各三个 LMT 放在独立的 `player/mot/frontier_gs` 路径，保留组内槽号与空槽；不覆盖 GU 的 `w00.arc`。
 

@@ -30,7 +30,7 @@
 
 ## 3. 接入 GU 的风格和动作生命周期
 
-- 在内容插件 `lib.rs` 定义常驻 `Style`，声明全局唯一的风格编号、GU 武器类型、所需回调和已实现的动作 ID。在 Forge 入口调用 `StyleRegistry::register` 一次。见[大剑入口](../plugins/great-sword-extreme/src/lib.rs)和[双剑入口](../plugins/dual-blades-extreme/src/lib.rs)。
+- 在内容插件 `lib.rs` 定义常驻 `Style`，声明全局唯一的风格编号、GU 武器类型、所需回调和已实现的动作 ID。在 Forge 入口用 `registry::when_ready` 登记初始化函数，由该函数调用 `registry.register` 一次，并在成功后绑定预读、联机和手册等回调。见[大剑入口](../plugins/great-sword-extreme/src/lib.rs)和[双剑入口](../plugins/dual-blades-extreme/src/lib.rs)。
 - 沿用 V1 注册接口和装备箱选择。配置由注册器按武器保存，未注册、不匹配或无配置时解析为 0。`independent` 让 GU 固定表使用内部索引 0，实际风格由独立描述符决定。切出风格或场景更换时，控制器会收到空输入。旧 actor 为 0 时只清理插件自己的状态。
 - 风格动作 ID 为 0–255，编码为 GU 武器组 `16` 的 `0x8000..0x80ff` 槽。与 GU 切招交接用 `action::enter`、`action::transition_to` 等现有接口。启动新招式时可用 `accept_custom_start` 接受 GU 已排定且尚未启动的目标动作。等 GU 接受目标后再更新朝向、建立游标、播放动作并安装命中和派生窗口。
 - 从 `Input::command`、`Input::weapon_command` 与原生 `ActionRequest` 取用 GU 已解析的输入。逐项核对按下、持续、松开和组合键优先级。附加肩键读取 `Input::auxiliary_pressed`，由 GU 原生键位查询处理默认 ZR 和交换布局。收刀冲刺的原生过滤可能只保留冲刺键，注册器从 GU 的过滤前按键中恢复附加肩键。`request` 返回已注册的动作 ID 可接手请求。普通武器切招中 `NATIVE_ACTION` 放行原生槽，`PASS` 拒绝本次请求。拔刀路由中的 `PASS` 保留 GU 选中的路由。见[请求解析](../plugins/style-registry/src/runtime.rs)和[武器路由](../plugins/style-registry/src/runtime/weapon.rs)。
@@ -59,7 +59,7 @@
 
 | 项目 | 用新武器确认的行为 |
 | --- | --- |
-| 注册与资源 | 装备箱可选、切回原版、男女模型、重复初始化及首次出招。追踪实际读取的动作库、音库、粒子表、命中形状和 HUD，检查排队或绑定是否发生在正确阶段。 |
+| 注册与资源 | 装备箱可选、切回原版、男女模型、重复初始化及首次出招。追踪实际读取的动作库、音库、粒子表、命中形状和 HUD，检查排队或绑定是否发生在正确阶段。为新极之型编写 `src/manual.txt`，核对猎人笔记和暂停菜单中的页序、翻页和返回。见[手册格式](../plugins/style-registry/README.md)。 |
 | 输入、位移与结束 | 从 GU 的键位映射走到实际动作，核对组合键优先级、预输入、起手帧、转向和根位移。覆盖拔收刀、翻滚、冲刺、台阶、空中、落地和受击打断，确认回到公共动作后能正常交互。 |
 | 判定与状态 | 从出招走到原生命中解算，验证判定形状、帧、动作值、重复命中、斩味、硬直和骑乘。核对格挡或反击窗口、资源与 HUD 更新、狩技续段和中断。将刀身和独立弹波分别验证。 |
 | 音效与绘制 | 回放至少一招在空挥、命中及中断时的实际音效和发射事件。按 FZ 源层核对挂点、颜色、Alpha、材质、混合和深度淡化，在 GU 绘制提交中确认参数已生效。检查干地与水面分支以及持续效果的清理。 |
@@ -67,4 +67,4 @@
 
 组合键回放从完整前置连段进入，保留 GU 的原生命令表。至少比较同次采样、各键错开一次采样、先按住一键再补按、两种松键顺序，以及松开后重新按下。分别在派生窗口开启前、接收与执行之间、关闭前检查动作槽。确认合法的单键或双键派生也能独立完成。有肩键时覆盖两种布局。
 
-打包后运行 `python3 plugins/style-registry/tests/verify_weapon_styles.py`。它从 `plugins/*-extreme/Cargo.toml` 发现新武器，缺少验收用例时会报出插件名。共用回放检查风格注册、预读和首次动作库绑定、PEL 到 TEX 的资源引用，以及各模型路径实际经过的共用绘制入口。武器特有的输入和招式走各自的回放。已知故障和可复用用例见[常见故障与排查](weapon-style-troubleshooting.md)。
+打包后运行 `python3 plugins/style-registry/tests/verify_weapon_styles.py`。它从 `plugins/*-extreme/Cargo.toml` 发现新武器，缺少验收用例时会报出插件名。共用回放检查风格注册顺序、手册、预读和首次动作库绑定、PEL 到 TEX 的资源引用，以及各模型路径实际经过的共用绘制入口。武器特有的输入和招式走各自的回放。已知故障和可复用用例见[常见故障与排查](weapon-style-troubleshooting.md)。交付前按[文档同步流程](development.md#文档同步)更新对应说明。

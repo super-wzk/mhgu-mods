@@ -8,23 +8,60 @@ import subprocess
 import zlib
 from pathlib import Path
 
-from build_assets import ROOT, build
+ROOT = Path(__file__).resolve().parent
+CONVERTER = ROOT.parents[1] / "tools" / "mhfz2mhgu"
 
 
-def package(dat):
+def package(dat, romfs):
     assets = ROOT / "target/assets"
-    build(dat, assets)
+    assets.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["cargo", "build", "--release", "--manifest-path", CONVERTER / "Cargo.toml"],
+        check=True,
+    )
+    tool = CONVERTER / "target/release" / CONVERTER.name
+    for sex in "mf":
+        subprocess.run(
+            [
+                tool, "great-sword-motions", dat,
+                *(["--female"] if sex == "f" else []),
+                "-o", assets / f"frontier_gs_{sex}.arc",
+            ],
+            check=True,
+        )
+    subprocess.run(
+        [tool, "great-sword-actions", dat, "-o", assets / "great_sword.fgsa"],
+        check=True,
+    )
+    sound = assets / "frontier_gs_sound.arc"
+    subprocess.run([tool, "great-sword-sound", dat, "-o", sound], check=True)
+    effects = assets / "effects"
+    subprocess.run(
+        [
+            tool, "great-sword-effects", dat,
+            "--gu-weapon", romfs / "nativeNX/arc/player/quest/w00.arc",
+            "-o", effects,
+        ],
+        check=True,
+    )
+    env = os.environ.copy()
+    env.pop("RUSTUP_TOOLCHAIN", None)
+    subprocess.run(
+        ["cargo", "forge", "build", "--release"], cwd=ROOT, env=env, check=True
+    )
+
     # Install private LMTs as loose resources: the game loads them by resource
     # class and path. No overlay of player/quest/w00.arc is necessary.
-    nx = ROOT / "dist/great-sword-extreme/romfs/nativeNX"
+    overlay = ROOT / "dist/great-sword-extreme"
+    nx = overlay / "romfs/nativeNX"
     for arc, prefix, types in [
         (
-            assets / "frontier_gs_sound.arc",
+            sound,
             "sound/se/pl/frontier_gs/",
             {0x1BCC4966: "srqr", 0x15D782FB: "sbkr", 0x79C47B59: "adpcm"},
         ),
         (
-            assets / "effects/geometry.arc",
+            effects / "geometry.arc",
             "effect/frontier_gs/",
             {
                 0x5A525C16: "pel",
@@ -83,19 +120,16 @@ def package(dat):
             data = zlib.decompress(arc[start : start + packed])
             assert len(data) == size & 0x1FFFFFFF and data.startswith(b"LMT\0C\0")
             (path / f"{stem}.lmt").write_bytes(data)
-    env = os.environ.copy()
-    env.pop("RUSTUP_TOOLCHAIN", None)
-    subprocess.run(
-        ["cargo", "forge", "build", "--release"], cwd=ROOT, env=env, check=True
-    )
     (nx / "plugins").mkdir(exist_ok=True)
     shutil.copy2(
         ROOT / "great_sword_extreme.nro", nx / "plugins/great_sword_extreme.nro"
     )
-    return nx.parents[1]
+    return overlay
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dat", type=Path)
-    print(package(parser.parse_args().dat))
+    parser.add_argument("romfs", type=Path)
+    arguments = parser.parse_args()
+    print(package(arguments.dat, arguments.romfs))

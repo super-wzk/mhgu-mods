@@ -93,9 +93,9 @@ python3 plugins/style-registry/package.py
 python3 plugins/switch-axe-extreme/package.py "${MHFZ_DAT:?}" "${MHGU_ROMFS:?}"
 ```
 
-将 `plugins/style-registry/dist/style-registry/` 和 `plugins/switch-axe-extreme/dist/switch-axe-extreme/` 作为两个模组安装到 MHGURecomp 的 `mods/` 下，保留各自的 `romfs/nativeNX/` 层级。本版两份模组需一起更新，注册器负责队员状态与特效回收。加载顺序为 Forge、style-registry、极之型斩斧。首次安装需要整个斩斧目录，动作、音效、特效、命中形状和槽条贴图都在 NRO 之外。
+将 `plugins/style-registry/dist/style-registry/` 和 `plugins/switch-axe-extreme/dist/switch-axe-extreme/` 作为两个模组安装到 MHGURecomp 的 `mods/` 下，保留各自的 `romfs/nativeNX/` 层级。本版两份模组需一起更新，斩斧通过 `registry::when_ready` 等待风格注册器就绪。首次安装需要整个斩斧目录，动作库、音效、特效、命中形状和槽条贴图都在 NRO 之外。
 
-离线回放需要可导入 `unicorn` 的 Python 环境、本地 `mhfz/eboot.bin.elf` 和 `mhgu/main.elf`，以及导出的 `MHGU_ROMFS`。`verify_port.py` 会加载四把武器检查预加载，先按[开发指引](../../docs/development.md)生成四把武器和注册器的构建产物。从仓库根目录运行以下用例。
+离线回放需要可导入 `unicorn` 的 Python 环境、本地 `mhfz/eboot.bin.elf` 和 `mhgu/main.elf`，以及导出的 `MHGU_ROMFS`。`verify_port.py` 还会调用共用武器验收，先按[开发指引](../../docs/development.md)生成所有极之型武器和风格注册器的安装包。从仓库根目录运行以下用例。
 
 ```sh
 python3 plugins/switch-axe-extreme/tests/verify_port.py

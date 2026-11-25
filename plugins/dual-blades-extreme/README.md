@@ -36,7 +36,7 @@ python3 plugins/style-registry/package.py
 python3 plugins/dual-blades-extreme/package.py "${MHFZ_DAT:?}" "${MHGU_ROMFS:?}"
 ```
 
-把两个插件的 `dist` 内对应目录装到 MHGURecomp 的 mods 目录。初始化顺序为 Forge、style-registry、极之型插件。双剑的刀轨通过注册器提交给 GU 粒子绘制入口。
+启用 Forge，把两个插件的 `dist` 内对应目录装到 MHGURecomp 的 mods 目录。双剑通过 `registry::when_ready` 等待风格注册器就绪，并通过注册器把刀轨提交给 GU 粒子绘制入口。
 
 男女动作、挥刀音效、磨刀粒子、鬼人刀身光效和极鬼人闪避粒子由本地 Frontier 数据生成，使用独立的 `frontier_db` 资源路径。真／极鬼人解放的爆光与地面粒子按片段 1448 的事件播放，地面粒子随落点选用干地或水面效果。普通鬼人的刀身光和刀轨为红色。未满火时，真鬼人为橙光橙轨，极鬼人为红光橙轨。真／极鬼人满火后，两者同时转为金色。刀身光与刀轨的 RGBA 分别取自边境双剑参数表的 +172 和 +176，均使用源 Alpha 加法混合。磨刀与鬼人刀轨使用 Frontier 刀带模型及其图集。插件以 30 Hz 采样左右手挂点，按原版曲线计算每条刀带的 24 对顶点。刀带沿刀轴的长度分别取自当前装备的两件刀模，交给 GU 粒子绘制。极鬼人回避的残影发射点随猎人朝向前移 130 单位。
 

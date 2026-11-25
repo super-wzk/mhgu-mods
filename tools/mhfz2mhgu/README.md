@@ -1,6 +1,8 @@
 # mhfz2mhgu
 
-从 Frontier 怪物 PAC 生成 Switch 版 MHGU 的带骨架模型（MOD 0xD4）和动作列表（LMT v67）。行为子命令从 Vita ELF 自动扫描脚本分组，可输出支持的指令或单招样本。可输出单独资源、带材质贴图的外观 ARC，或借用普通雌火龙任务槽的棘龙动作回放包。
+将 Frontier 怪物和猎人资源转换为 Switch 版 MHGU 格式。武器子命令提取动作程序并生成 GU 动作库、碰撞、音效和粒子等资源，六种极之型的成品由各插件的打包脚本组装。构建命令与本地输入见[开发指引](../../docs/development.md#本地输入和构建)。
+
+怪物子命令从 PAC 生成带骨架模型（MOD 0xD4）和动作列表（LMT v67），并从 Vita ELF 扫描脚本分组。支持输出单独资源、独立狩猎资源、带材质贴图的外观 ARC 和借用普通雌火龙资源的单招回放样本。
 
 棘龙插件的生成物统一在 [monster-espinas](../../plugins/monster-espinas/README.md) 下。插件的 `package.py` 用 `hunt` 生成完整狩猎资源，再调用 Forge 编译插件并组装安装包。下列单招导出命令只用于离线分析。
 

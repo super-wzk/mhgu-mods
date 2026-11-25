@@ -45,4 +45,6 @@ V1 注册服务同时提供攻击提交与格挡结果。GU 从武器动作组�
 
 构建注册器和[极型大剑](../great-sword-extreme/README.md)后，用装有 Unicorn 的 Python 运行 `plugins/great-sword-extreme/tests/verify_style.py` 和 `verify_menu.py`。后者执行 GU 的列表光标、确认框和原版装备写入，覆盖选择、取消、跨页、保存以及切回原版。使用内存文件和渲染替身，不接触玩家存档。
 
+按[开发指引](../../docs/development.md#验证范围)打包全部武器后，运行 `python3 plugins/style-registry/tests/verify_weapon_styles.py`。该入口覆盖注册器最后启动、猎人笔记与暂停菜单中的手册显示和返回，以及各武器的任务预读与粒子资源。手册文字随武器 NRO 更新。
+
 内容插件可通过 [StyleRulesV1](../../crates/mhgu-sdk/src/style/rules.rs) 登记格挡半角、公共动作结束条件、弹刀与镜头回调。注册器在 GU 近战解算后按猎人、动作槽和刀身的打击序号匹配 `Attack::DEFLECTABLE` 标记的命中，并用 GU 的斩味修正、心眼与相关豁免完成判定。动作控制器通过 `mhgu::BladeDeflectionV1` 取得结果。
