@@ -2,6 +2,8 @@
 
 本仓库为 MHGU Switch 1.4 提供 Rust 引擎绑定、Forge 注册插件和 Frontier 资源转换工具。
 
+[查看更新日志](CHANGELOG.md)
+
 ## 开发文档
 
 - [开发指引](docs/development.md)介绍仓库结构、本地输入、构建、安装和验证。
