@@ -4,7 +4,7 @@
 
 | 模块 | 职责 |
 | --- | --- |
-| [action](src/action.rs) | 按 Frontier 片段帧、混合与循环执行动作事件，缓冲派生请求。 |
+| [action](src/action.rs) | 按 Frontier 片段帧、混合与循环执行动作事件，缓冲派生请求。可用按下时的动作采样判断延后确认的指令。 |
 | [combat](src/combat.rs) | 按 Frontier SDT 计算命中延迟和剩余有效帧，提供弹刀阈值及 FZ 格挡、回避窗口的技能补正。 |
 | [camera](src/camera.rs) | 按 Frontier 震动类型计算振幅、距离衰减和时序。 |
 | [motion](src/motion.rs) | 把 Frontier 1000、1200、1400 三组片段映射到 GU 的 LMT 库及槽，支持任务初始化时统一预加载及持刀回避的左右派生。 |

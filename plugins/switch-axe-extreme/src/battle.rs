@@ -1011,7 +1011,8 @@ impl Battle {
                 let r = input.command(27);
                 // GU 27CA28 reads held X at 0x20. FZ commands 20..22 use it.
                 let held_x = read::<u16>(actor, 5108) & 0x20 != 0;
-                let evade = input.command(3) && has_evade_stamina(actor);
+                let evade =
+                    input.command(3) && movement::has_evade_stamina(actor, EVADE_STAMINA_COST);
                 let forward = degrees.is_some_and(|d| d.abs() <= 45);
                 // FZ command IDs from 8121B914. The cursor applies their priority.
                 let commands = [
@@ -1190,37 +1191,6 @@ impl Battle {
 
 unsafe fn is_forward_roll(actor: u32, current: (u16, u16)) -> bool {
     current == FORWARD_ROLL && unsafe { native!(0x53a058, actor) == 28 }
-}
-
-unsafe fn has_evade_stamina(actor: u32) -> bool {
-    unsafe {
-        if read::<f32>(actor, 10500) > 0. {
-            return true; // GU 2A3E50 waives stamina drain while this effect is active.
-        }
-        // FZ 8121B914 checks the cost before buffering B. Use the cost
-        // of the GU evade, with the skill tiers from GU 2A5EBC.
-        let has_skill = |skill| native!(0x2864c4, actor, skill) != 0;
-        let constitution = if [156, 275, 293].into_iter().any(has_skill) {
-            2
-        } else if [157, 286, 313].into_iter().any(has_skill) {
-            1
-        } else if has_skill(158) {
-            -1
-        } else if has_skill(159) {
-            -2
-        } else {
-            0
-        };
-        let food = i32::from(native!(0x2864d4, actor, 4) != 0);
-        let multiplier = match constitution + food {
-            2.. => 0.5,
-            1 => 0.75,
-            -1 => 1.2,
-            -2 => 1.35,
-            _ => 1.,
-        };
-        read::<f32>(actor, 5088) >= EVADE_STAMINA_COST * multiplier
-    }
 }
 
 unsafe fn scaled_gain(actor: u32, index: usize) -> u16 {

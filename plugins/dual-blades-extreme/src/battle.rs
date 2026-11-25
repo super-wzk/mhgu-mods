@@ -16,10 +16,10 @@ use core::{
     },
 };
 use mhfz_sdk::{
-    action::Cursor,
+    action::{Cursor, Time},
     combat::{DrawnEvade, HitWindow, bladescale_evade, evade_bonus_frames},
     sound::Clock,
-    sprint::{self, Flick, Resume, STICK_DEADZONE},
+    sprint::{self, Flick, Resume},
 };
 use mhgu_sdk::style::{
     ActionRequest, Input, NATIVE_ACTION, PASS,
@@ -28,7 +28,10 @@ use mhgu_sdk::style::{
         command::{BufferedCommand, CommandInput, CommandSet},
         melee::{self, BLADE_CONTACT_OFFSETS},
     },
-    input::{attack_chord_with_shoulder, attack_combo_pending},
+    input::{
+        attack_buttons_pressed, attack_chord_pressed, attack_chord_with_shoulder,
+        attack_combo_pending,
+    },
     movement::{self, CLIMBS, stamina},
 };
 
@@ -74,12 +77,34 @@ const A_BACK: u8 = 2;
 const X_AND_A: u8 = 11;
 const SPECIAL: u8 = 3;
 const X_PRESSED: u8 = 30;
+const PAD_X: u16 = 0x20;
+const PAD_A: u16 = 0x100;
+const EVADE_STAMINA_COST: f32 = 150.;
 
 const CMD_SPRINT: u16 = 1;
 const CMD_SLASH_DOWN: u16 = 2;
 const CMD_COMBO: u16 = 5;
 const CMD_SWEEP: u16 = 9;
 const CMD_SHOULDER_HELD: u16 = 18;
+
+fn single_attack_commands(buttons: u16, relative_yaw: u16) -> u32 {
+    let mut bits = 0;
+    if buttons & PAD_X != 0 {
+        bits |= 1 << CMD_SLASH_DOWN;
+        let direction = direction(relative_yaw);
+        if direction >= 2 {
+            bits |= 1 << (direction + 1);
+        }
+    }
+    if buttons & PAD_A != 0 {
+        bits |= 1 << CMD_SWEEP;
+        // FZ 811EE87C picks command 8 in stick sector 0x800, or 9 otherwise.
+        if (0xa000..0xe000).contains(&relative_yaw) {
+            bits |= 1 << 8;
+        }
+    }
+    bits
+}
 
 static PHASE: AtomicU32 = AtomicU32::new(0);
 static OWNER: AtomicU32 = AtomicU32::new(0);
@@ -132,12 +157,20 @@ struct Commands {
     bits: u32,
     direction: usize,
     relative_yaw: u16,
+    waiting_press: u16,
+    press_time: Option<Time>,
 }
 
 impl Commands {
     fn has(self, id: u16) -> bool {
         self.bits & (1 << id) != 0
     }
+}
+
+struct AttackPress {
+    buttons: u16,
+    yaw: u16,
+    time: Time,
 }
 
 #[derive(Default)]
@@ -150,6 +183,8 @@ struct Battle {
     flick: Flick,
     elapsed: f32,
     shoulder_used_by_chord: bool,
+    chord_pending: bool,
+    attack_press: Option<AttackPress>,
     activation_phase: u8,
     finish_window: f32,
     finish_requested: bool,
@@ -195,26 +230,31 @@ impl Battle {
 
     unsafe fn commands(&mut self, actor: u32, input: &Input) -> Commands {
         unsafe {
-            // GU's 27F678 also sets the target facing. Only sample the stick
-            // here, including while an attack or a native action is running.
-            let stick_yaw =
-                (input.stick_strength >= STICK_DEADZONE).then(|| native!(0x27f5d0, actor) as u16);
-            let facing = read::<u16>(actor, 4076);
-            let yaw = stick_yaw.unwrap_or(facing);
-            // Frontier 8172C2D4 measures the stick from the hunter as facing minus stick yaw.
-            let relative_yaw = facing.wrapping_sub(yaw);
+            let relative_yaw = movement::live_relative_stick_yaw(actor).unwrap_or(0);
             let direction = direction(relative_yaw);
             let mut bits = 0;
-            if input.command(3) && read::<f32>(actor, 5088) >= 150. {
+            if input.command(3) && movement::has_evade_stamina(actor, EVADE_STAMINA_COST) {
                 bits |= 1 | 1 << [22, 23, 24, 25][direction];
             }
             if self.flick.update(input, self.elapsed) && read::<f32>(actor, 5088) > 0. {
                 bits |= 1 << CMD_SPRINT;
             }
-            let chord = input.weapon_command(X_AND_A) || attack_chord_with_shoulder(actor);
+            let chord = input.weapon_command(X_AND_A)
+                || attack_chord_pressed(actor)
+                || attack_chord_with_shoulder(actor);
+            let pressed = attack_buttons_pressed(actor);
+            let waiting = attack_combo_pending(actor);
+            // A chord completed against an already-held button can still
+            // produce a delayed single-button command from GU.
+            let suppress_single = self.chord_pending && pressed == 0;
+            self.chord_pending = waiting && (chord || suppress_single);
+            let mut resolved = 0;
             let shoulder_held = input.command(27);
             self.shoulder_used_by_chord = shoulder_held && (chord || self.shoulder_used_by_chord);
-            if chord && shoulder_held && let Some(cursor) = &mut self.cursor {
+            if chord
+                && shoulder_held
+                && let Some(cursor) = &mut self.cursor
+            {
                 // R may have queued a higher-priority follow-up one tick before
                 // GU resolves it as part of X+A.
                 cursor.discard_pending_command(CMD_SHOULDER_HELD);
@@ -228,22 +268,29 @@ impl Battle {
                 }
             } else {
                 // Wait for 27CA28 to resolve X or X+A before changing attacks.
-                if input.weapon_command(X) {
-                    bits |= 1 << CMD_SLASH_DOWN;
-                    if direction >= 2 {
-                        bits |= 1 << (direction + 1);
+                if !suppress_single {
+                    if input.weapon_command(X) {
+                        resolved |= PAD_X;
                     }
-                }
-                if input.weapon_command(A) || input.weapon_command(A_BACK) {
-                    bits |= 1 << CMD_SWEEP;
-                    if direction != 2 {
-                        bits |= 1 << 8;
+                    if input.weapon_command(A) || input.weapon_command(A_BACK) {
+                        resolved |= PAD_A;
                     }
                 }
                 if input.weapon_command(SPECIAL) {
                     bits |= 1 << 13;
                 }
             }
+            let press = if resolved != 0 || !waiting || chord {
+                self.attack_press
+                    .take()
+                    .filter(|press| press.buttons & resolved != 0)
+            } else {
+                None
+            };
+            bits |= single_attack_commands(
+                resolved,
+                press.as_ref().map_or(relative_yaw, |press| press.yaw),
+            );
             if input.command(13) {
                 bits |= 1 << 10;
             }
@@ -265,12 +312,15 @@ impl Battle {
                 bits,
                 direction,
                 relative_yaw,
+                waiting_press: if waiting && !chord { pressed } else { 0 },
+                press_time: press.map(|press| press.time),
             }
         }
     }
 
     unsafe fn clear_action(&mut self, actor: u32) {
         self.cursor = None;
+        self.attack_press = None;
         self.effects.clear_action();
         self.resume_sprint.set(false);
         if self.peer_slot == 0 {
@@ -426,7 +476,7 @@ impl Battle {
                     }
                     8 => self.keep_evade = true,
                     9 if self.peer_slot == 0 => {
-                        stamina(actor, -150., false);
+                        stamina(actor, -EVADE_STAMINA_COST, false);
                         if matches!(state, 36..=40 | 73..=75 | 83..=88) {
                             // GU w11 11C17DC uses category 6 on entry to its demon step.
                             bladescale_evade(actor, DrawnEvade::DemonStep);
@@ -606,10 +656,36 @@ impl Battle {
                 }
             }
 
+            let cursor = self.cursor.as_mut().unwrap();
+            let finished = if step.op == 3 && step.until != 0 {
+                // The w06 side slide (1445) has an authored early exit at 46.
+                step.reached_frame(frame)
+            } else {
+                step.complete(cursor.time, sample, wrapped)
+            };
+            // 811EF80C advances the motion program before checking branches.
+            // Let an authored follow-up see the next clip on the transition tick.
+            let advance_before_input = finished
+                && program::step(state, cursor.time.step + 1)
+                    .is_some_and(|next| matches!(next.op, 3..=5));
+            if advance_before_input {
+                cursor.time.step += 1;
+                self.start_step(actor);
+            }
+            let Some(cursor) = &mut self.cursor else {
+                return true;
+            };
+            if commands.waiting_press != 0 {
+                self.attack_press = Some(AttackPress {
+                    buttons: commands.waiting_press,
+                    yaw: commands.relative_yaw,
+                    time: cursor.time,
+                });
+            }
+
             let mode = phase(actor);
             let vitality = read::<i16>(actor, 5078) > 1;
             let sustained = can_sustain(actor, mode);
-            let enough_stamina = read::<f32>(actor, 5088) >= 150.;
             let eligible = |id| match id {
                 0 | 1 | 15 => true,
                 2 => mode == 0,
@@ -626,14 +702,27 @@ impl Battle {
                 23 => self.hit,
                 _ => false,
             };
-            let cursor = self.cursor.as_mut().unwrap();
             if (cursor.art_window(eligible) || state == SPRINT)
                 && action::activate_hunter_art(actor)
             {
                 self.clear_action(actor);
                 return true;
             }
-            let target = cursor.branch(commands.bits, eligible);
+            let target =
+                cursor.branch_with_press_time(commands.bits, eligible, |command| match command {
+                    2..=4 | 8 | 9 | 27 => commands.press_time,
+                    _ => None,
+                });
+            // Keep a finished action alive while GU resolves a press that
+            // was still inside one of its input windows.
+            let wait_for_attack = finished
+                && self.attack_press.as_ref().is_some_and(|press| {
+                    cursor.press_window(
+                        single_attack_commands(press.buttons, press.yaw) | (1 << 27),
+                        press.time,
+                        eligible,
+                    )
+                });
             if matches!(cursor.pending_action(), Some(89 | 90)) {
                 self.evade_yaw.get_or_insert(commands.relative_yaw);
             } else {
@@ -647,8 +736,16 @@ impl Battle {
 
             if state == SPRINT {
                 let has_direction = movement::steer(actor);
+                // FZ 811F0C32 gives the forward evade priority over X and A.
+                if commands.has(0) {
+                    return match mode {
+                        0 | 1 => self.evade(actor, 0, false),
+                        2 => self.begin(actor, 40),
+                        _ => self.begin(actor, 84),
+                    };
+                }
                 let attack = if commands.has(CMD_SWEEP) {
-                    enough_stamina.then_some(AERIAL_DANCE)
+                    movement::has_evade_stamina(actor, EVADE_STAMINA_COST).then_some(AERIAL_DANCE)
                 } else if commands.has(CMD_SLASH_DOWN) {
                     Some(DASH_SLASH)
                 } else if commands.has(CMD_COMBO) {
@@ -660,9 +757,6 @@ impl Battle {
                 if let Some(next) = attack {
                     return self.begin(actor, next);
                 }
-                if commands.has(0) && enough_stamina {
-                    return self.evade(actor, commands.relative_yaw, false);
-                }
                 if commands.has(10) && action::transition_to(actor, 1, 2) {
                     self.clear_action(actor);
                     return true;
@@ -673,15 +767,8 @@ impl Battle {
                     return self.begin(actor, BRAKE);
                 }
             }
-            let cursor = self.cursor.as_mut().unwrap();
-            let finished = if step.op == 3 && step.until != 0 {
-                // The w06 side slide (1445) has an authored early exit at 46.
-                step.reached_frame(frame)
-            } else {
-                step.complete(cursor.time, sample, wrapped)
-            };
-            if finished {
-                cursor.time.step += 1;
+            if finished && !advance_before_input && !wait_for_attack {
+                self.cursor.as_mut().unwrap().time.step += 1;
                 self.start_step(actor);
             }
             true
@@ -729,6 +816,8 @@ impl Battle {
                 self.polish = sharpen::Polish::default();
                 sharpen::clear_active_level();
                 self.cursor = None;
+                self.attack_press = None;
+                self.chord_pending = false;
                 self.effects.clear_action();
                 return false;
             }
@@ -801,6 +890,7 @@ impl Battle {
                 read(actor, 1280),
                 None,
             );
+            self.attack_press = None;
             let ground = movement::ground_idle(current);
             let was_sprinting = self
                 .cursor
@@ -1015,7 +1105,10 @@ pub(super) unsafe extern "C" fn request(actor: u32, raw: *const ActionRequest) -
         let mode = phase(actor);
         if NATIVE_AERIAL_SLOTS.contains(&request.slot) {
             let buttons = read::<u32>(actor, 5156);
-            if buttons & (1 << X_AND_A) != 0 || attack_chord_with_shoulder(actor) {
+            if buttons & (1 << X_AND_A) != 0
+                || attack_chord_pressed(actor)
+                || attack_chord_with_shoulder(actor)
+            {
                 if mode == 3 {
                     return u32::from(AERIAL_DANCE);
                 }

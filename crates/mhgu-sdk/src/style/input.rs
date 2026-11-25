@@ -27,6 +27,14 @@ pub unsafe fn attack_combo_pending(actor: u32) -> bool {
     combo & COMBO_PENDING != 0 && (combo >> COMBO_BUTTON_SHIFT) & u32::from(ATTACK_BUTTONS) != 0
 }
 
+/// Fresh X and A edges from GU's filtered pad state.
+///
+/// # Safety
+/// The actor must be a live local quest hunter on the game thread.
+pub unsafe fn attack_buttons_pressed(actor: u32) -> u16 {
+    unsafe { ((actor + FILTERED_PRESSED) as *const u16).read() & ATTACK_BUTTONS }
+}
+
 /// Whether GU resolved X+A with the weapon shoulder pressed in the same combination.
 ///
 /// # Safety
@@ -42,7 +50,6 @@ pub unsafe fn attack_chord_with_shoulder(actor: u32) -> bool {
 pub unsafe fn attack_chord_pressed(actor: u32) -> bool {
     unsafe {
         let held = ((actor + FILTERED_HELD) as *const u16).read();
-        let pressed = ((actor + FILTERED_PRESSED) as *const u16).read();
-        held & ATTACK_BUTTONS == ATTACK_BUTTONS && pressed & ATTACK_BUTTONS != 0
+        held & ATTACK_BUTTONS == ATTACK_BUTTONS && attack_buttons_pressed(actor) != 0
     }
 }

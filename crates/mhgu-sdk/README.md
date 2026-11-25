@@ -62,7 +62,7 @@ fn spawn(resource: &DirectedShellResource<'_>, launch: ShellLaunch) -> bool {
 
 GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提供 GU 已解析的公共和武器指令，`request` 处理 GU 已接受的拔刀和武器切招请求。公共动作可返回 `PASS` 交给 GU。空输入通知插件结束，actor 为 0 时代表旧猎人已失效。
 
-[input](src/style/input.rs) 读取 GU 的组合键状态和当前附加肩键。通过 [movement](src/style/movement.rs) 查询摇杆方向、应用朝向和使用原生耐力入口。读取任务专用字段前，用 [hunter::is_quest](src/style/hunter.rs) 核对角色类型。
+[input](src/style/input.rs) 读取 GU 的组合键状态、过滤后的 X／A 按下沿和当前附加肩键。通过 [movement](src/style/movement.rs) 查询摇杆方向、应用朝向和使用原生耐力入口。回避准入复用 `has_evade_stamina` 检查体术、料理和免耗效果。读取任务专用字段前，用 [hunter::is_quest](src/style/hunter.rs) 核对角色类型。
 
 [preload](src/style/preload.rs) 登记本地风格在 GU 完成任务猎人初始化后执行的资源准备回调。动作库预加载后仍在首次播放时绑定运行时槽，私有 HTS 可通过 [CachedHitShape](src/combat/collision/shapes.rs) 复用已加载资源。
 

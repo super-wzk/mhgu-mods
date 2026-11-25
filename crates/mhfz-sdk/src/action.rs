@@ -90,11 +90,19 @@ impl Time {
             _ => false,
         }
     }
+
+    fn accepts(self, branch: &[u8]) -> bool {
+        self.reached(&branch[6..]) && !self.reached(&branch[14..])
+    }
+
+    fn accepts_and_live(self, branch: &[u8]) -> bool {
+        self.accepts(branch) && !self.reached(&branch[32..])
+    }
 }
 
 pub struct BranchRules {
     pub order: &'static [u16],
-    /// GU can resolve the chord after a plain X has already been queued.
+    /// GU can resolve a chord after a single attack has already been queued.
     pub combo_override: Option<(RangeInclusive<u16>, RangeInclusive<u16>)>,
     pub art_commands: u32,
 }
@@ -146,6 +154,27 @@ impl Cursor {
     }
 
     pub fn branch(&mut self, commands: u32, eligible: impl Fn(u16) -> bool) -> Option<u16> {
+        self.branch_with_press_time(commands, eligible, |_| None)
+    }
+
+    /// Whether an unresolved input can still belong to this action.
+    pub fn press_window(&self, commands: u32, time: Time, eligible: impl Fn(u16) -> bool) -> bool {
+        self.branches.chunks_exact(40).any(|row| {
+            commands.checked_shr(half(row, 4).into()).unwrap_or(0) & 1 != 0
+                && eligible(half(row, 2))
+                && time.accepts_and_live(row)
+        })
+    }
+
+    /// Check the press sample as well as the current sample for commands that
+    /// the engine confirms late. A late confirmation can execute once after
+    /// expiry if the original press was inside both windows.
+    pub fn branch_with_press_time(
+        &mut self,
+        commands: u32,
+        eligible: impl Fn(u16) -> bool,
+        press_time: impl Fn(u16) -> Option<Time>,
+    ) -> Option<u16> {
         let table = self.branches;
         self.pending = self
             .pending
@@ -153,10 +182,13 @@ impl Cursor {
         let previous = self
             .pending
             .map(|at| (half(table, at), half(table, at + 4)));
+        let mut confirmed_late = false;
         for &command in self.rules.order {
             if commands & (1 << command) == 0 {
                 continue;
             }
+            let pressed_in_time =
+                |row: &[u8]| press_time(command).is_some_and(|time| time.accepts_and_live(row));
             let candidate = table
                 .chunks_exact(40)
                 .enumerate()
@@ -168,23 +200,27 @@ impl Cursor {
                                 || (next == priority
                                     && self.rules.combo_override.as_ref().is_some_and(
                                         |(plain, chord)| {
-                                            plain.contains(&pending) && chord.contains(&command)
+                                            plain.contains(&pending)
+                                                && !chord.contains(&pending)
+                                                && chord.contains(&command)
                                         },
                                     ))
                         })
                         && eligible(half(row, 2))
-                        && self.time.reached(&row[6..])
-                        && !self.time.reached(&row[14..])
+                        && (self.time.accepts(row) || pressed_in_time(row))
                 })
                 .max_by_key(|(_, row)| half(row, 0));
-            if let Some((i, _)) = candidate {
+            if let Some((i, row)) = candidate {
                 self.pending = Some(i * 40);
+                confirmed_late = pressed_in_time(row);
                 break;
             }
         }
         let at = self.pending?;
         let row = &table[at..at + 40];
-        if eligible(half(row, 2)) && self.time.reached(&row[24..]) && !self.time.reached(&row[32..])
+        if eligible(half(row, 2))
+            && self.time.reached(&row[24..])
+            && (confirmed_late || !self.time.reached(&row[32..]))
         {
             // GU may defer the change during hitstop. The next action gets a
             // new cursor on acceptance, so keep this input until its window ends.

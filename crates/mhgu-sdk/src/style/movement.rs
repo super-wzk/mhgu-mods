@@ -28,6 +28,41 @@ pub unsafe fn stamina(actor: u32, amount: f32, continuous: bool) {
     unsafe { mhgu_style_stamina(actor, amount.to_bits(), entry(offset) as u32) }
 }
 
+/// Check the discrete evade cost after GU's Constitution and food modifiers.
+///
+/// # Safety
+/// The actor must be a live quest hunter on the game thread.
+pub unsafe fn has_evade_stamina(actor: u32, cost: f32) -> bool {
+    unsafe {
+        // GU 2A3E50 waives stamina drain while the stamina effect is active.
+        if ((actor + 10500) as *const f32).read() > 0. {
+            return true;
+        }
+        let has_skill = |id| crate::style::hunter::has_skill(actor, id);
+        let constitution = if [156, 275, 293].into_iter().any(has_skill) {
+            2
+        } else if [157, 286, 313].into_iter().any(has_skill) {
+            1
+        } else if has_skill(158) {
+            -1
+        } else if has_skill(159) {
+            -2
+        } else {
+            0
+        };
+        let food_skill: unsafe extern "C" fn(u32, u32) -> u32 =
+            core::mem::transmute(entry(0x2864d4));
+        let multiplier = match constitution + i32::from(food_skill(actor, 4) != 0) {
+            2.. => 0.5,
+            1 => 0.75,
+            -1 => 1.2,
+            -2 => 1.35,
+            _ => 1.,
+        };
+        ((actor + 5088) as *const f32).read() >= cost * multiplier
+    }
+}
+
 /// Defer natural stamina recovery through GU's countdown at 29DBDC.
 /// GU lets the timer expire on its own when the action stops refreshing it.
 ///

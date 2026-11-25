@@ -33,9 +33,12 @@
 
 ## 双剑
 
+双剑的地面 X／A 派生记录保留 FZ w06 的窗口。普通 X 连斩的状态 0 和 1 从第 10 帧接受 X，第 50 帧关闭，分别从第 32 和第 26 帧执行。GU `27CA28` 延后确认的单键可按按下时的片段帧进入窗口。有效输入在等候确认期间可保留原动作。重叠按键通过 GU 过滤后的按下沿补判 X+A。片段切换当帧按 FZ `811EF80C` 的顺序，以新片段检查派生。方向采样沿用 GU 死区和即时镜头朝向。见[双剑战斗控制](../plugins/dual-blades-extreme/src/battle.rs)及[原生输入回放](../plugins/style-registry/tests/verify_deflection.py)。
+
 | 改动 | 行为与回放 |
 | --- | --- |
 | 刃打层数 | 最多四层，每层增加 5% 刀身物理攻击。全停与减速命中停顿期间暂停更新。武器连段内计时到零时保留一刻，退出连段清层数，收刀同时清计时。站定刃打第 50 帧可接 A 对应招式。空舞连斩的冲刺入口为双推后按 A。见[刃打状态](../plugins/dual-blades-extreme/src/battle/sharpen.rs)和[弹刀与刃打回放](../plugins/style-registry/tests/verify_deflection.py)。 |
+| 分段取消 | FZ `81815F30` 的 w06 状态 21／片段 1414 在第 48 帧执行早段 A、B 或冲刺，第 116 帧开放后段 B 和冲刺。X+A 在真／极鬼人解放中派生状态 56，最早第 122 帧执行。状态 56 的片段 1430 在第 92 与 142 帧打开回避和冲刺窗口。回放还覆盖状态 8、20、43 第一片段预输入刃打、第二片段按各自时机执行。见[双剑取消回放](../plugins/style-registry/tests/verify_deflection.py)。 |
 | 回避、空舞与骑乘 | 持刀翻滚第 10 帧起可预输入 X，前滚第 44 帧、侧滚第 42 帧执行。极鬼人滞空的 X+A 及 R 加 X+A 都可接空舞连斩。空舞连斩及命中后 A 终结关闭模板的骑乘值，普通滞空 X 的空舞终结保留骑乘值。见[双剑战斗控制](../plugins/dual-blades-extreme/src/battle.rs)和[输入回放](../plugins/style-registry/tests/verify_deflection.py)。 |
 | 真鬼人、极鬼人与满火 | 片段 1448 分别触发解放爆光、刀光及干地／水面效果。左、右刀光路由使用各自旋转和关节，刀轨各自取装备刀模长度。真鬼人升极鬼人继承火焰槽，满火时切换颜色。见[双剑特效](../plugins/dual-blades-extreme/src/fx.rs)和[双手刀光回放](../plugins/style-registry/tests/verify_deflection.py)。 |
 | 兽魂附身【饿狼】 | 通过 GU 生成左右手延迟追击。每只手按追击接触序号，在首次有效怪物命中时回复 1 点体力。原挥击及重复接触无回血，狩技到期后停止生成新追击。见[饿狼追击](../plugins/dual-blades-extreme/src/battle/maw.rs)和[狩技回放](../plugins/style-registry/tests/verify_weapon_arts.py)。 |

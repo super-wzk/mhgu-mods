@@ -136,7 +136,7 @@ const ORDER: [u16; 28] = [
 
 static RULES: BranchRules = BranchRules {
     order: &ORDER,
-    combo_override: Some((2..=4, 5..=7)),
+    combo_override: Some((2..=9, 5..=7)),
     art_commands: 1 | 0xf << 22,
 };
 
