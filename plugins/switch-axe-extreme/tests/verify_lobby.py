@@ -2,6 +2,7 @@
 
 from verify_port import ROOT, REPO
 from verify_style import (
+    character_save,
     DISPATCH,
     ENCODE,
     boot,
@@ -12,7 +13,7 @@ from verify_style import (
 
 
 def replay():
-    g = boot((REPO / "mhgu/main.elf").read_bytes(), b"[Weapons]\n8=13\n", ("registry",))
+    g = boot((REPO / "mhgu/main.elf").read_bytes(), character_save({8: 13}), ("registry",))
     nx = ROOT / "dist/switch-axe-extreme/romfs/nativeNX"
     load_registered_style(g, nx / "plugins/switch_axe_extreme.nro")
     quest, equipment, _ = hunters(g)

@@ -1,12 +1,10 @@
 # MHGU SDK 运行时
 
-Forge 插件由 `mhgu-sdk-runtime` 构建，发布为 `mhgu-sdk.nro`。它提供武器风格和[怪物物种](monsters.md)两套注册服务。Rust 模组通过 [mhgu-sdk](../../crates/mhgu-sdk/README.md) 的类型和注册接口访问这两个服务。
+Forge 插件由 `mhgu-sdk-runtime` 构建，发布为 `mhgu-sdk.nro`。它提供武器风格注册和角色存档服务。Rust 模组通过 [mhgu-sdk](../../crates/mhgu-sdk/README.md) 注册风格。
 
 从仓库根目录运行 `python3 plugins/mhgu-sdk-runtime/package.py`，生成开发安装目录 `plugins/mhgu-sdk-runtime/dist/mhgu-sdk/`。武器整合包由仓库级工具组装，包内的 SDK 目录随附 `arc/frontier/common.arc`。见[整合包构建流程](../../docs/development.md#本地输入和构建)。
 
-游戏只需安装一份 SDK 模组。升级时移除旧的 `style-registry` 和 `monster-registry` 模组，安装新 SDK 及所需内容。安装了整合武器包时，棘龙也使用同一份 SDK。风格设置及物种计数继续读取原有存档文件。
-
-SDK 统一挂接 GU 的世界碰撞展开入口 `1696FC`。武器沿用按风格登记的回调。棘龙实现 [`world::Handler`](../../crates/mhgu-sdk/src/combat/collision/world.rs) 返回固定位置的球心和半径，由 SDK 校验并提交原生形状。升级时一并更新棘龙 NRO。
+游戏只需安装一份 SDK 模组。升级时更新 SDK 和武器模组。武器的固定位置碰撞继续使用 SDK 统一挂接的 GU 碰撞展开入口 `1696FC`。
 
 ## 武器风格
 
@@ -14,7 +12,7 @@ SDK 统一挂接 GU 的世界碰撞展开入口 `1696FC`。武器沿用按风格
 
 个人状态和队友状态的概要、详情使用实际装备对应的风格名称。队友名称随 GU 的装备资料同步，双方需要加载支持风格资料同步的 SDK，查看方需要安装对应风格。未收到可识别的风格编号时，界面使用 GU 原有名称。
 
-装备组合的概要和详情显示组合武器当前启用的风格。自定义风格继续按武器保存在 SDK 的 INI 中，同一武器的多个组合共用该选择。斗技场固定装备预览和公会名片的历史资料沿用 GU 记录。
+在装备箱登记或覆盖装备组合时，SDK 记录当时的风格。概要和详情显示该组合保存的风格，穿上组合后恢复。原版组合或缺少已记录插件时沿用组合的 GU 原版风格。调换组合时风格随组合移动，删除或覆盖时清除旧记录。斗技场固定装备预览和公会名片历史沿用 GU 记录。
 
 注册器启用后会屏蔽原版附加肩键的聊天快捷键（默认 ZR，随 GU 肩键设置交换）。仍可从原版菜单或触屏打开聊天，极型招式继续读取附加肩键。
 
@@ -22,14 +20,11 @@ SDK 统一挂接 GU 的世界碰撞展开入口 `1696FC`。武器沿用按风格
 
 手册是风格插件的可选项。风格登记成功后可调用 `mhgu_sdk::style::manual::bind(id, include_str!("manual.txt"))`。UTF-8 文件用空行分页。操作页首行为标题，以下每行用一个制表符分隔操作与招式，最多九行。说明页支持 GU 的 `<ICON>`、`<SIZE>` 和 `<COL>` 标记。两种页面均可写 `{X}`、`{A}`、`{B}`、`{Y}`、`{R}`、`{摇杆}` 显示原版按键图标。
 
-装备箱的选择立即生效并保存到 Forge 的 `savedata:/style_registry.ini`（MHGURecomp 通常为 `save/save_0/style_registry.ini`）。该设置在角色之间共享。INI 左侧是 GU 武器编号，右侧是自定义风格 ID 或 `native`。可以关闭游戏后手动编辑。
+## 角色存档
 
-```ini
-[Weapons]
-0 = 10
-8 = 13
-11 = native
-```
+装备箱的选择立即生效。GU 角色存档保存成功后，SDK 将各武器当前的风格和各装备组合的自定义风格写入该角色槽的 JSON。文件位于 Forge 的 `savedata:/mhgu-sdk-<角色槽>-<0或1>.json`。两份文件交替写入，加载时使用最新的有效世代。若两份都无法读取，本次沿用原版并保留文件。旧 `style_registry.ini` 已停用。
+
+JSON 版本 1 包含 `slot`、`generation` 和 `data`。其中 `weapons` 按 GU 武器编号排列，`null` 沿用 GU 原版。 `equipment_sets` 按装备组合槽记录自定义风格 ID、武器编号和用于核对 GU 装备组合的指纹。缺少自定义记录的组合沿用原版。
 
 | 风格 | GU 武器编号 | 自定义风格 ID |
 | --- | --- | --- |
@@ -40,9 +35,7 @@ SDK 统一挂接 GU 的世界碰撞展开入口 `1696FC`。武器沿用按风格
 | 极之型单手剑 | `1` | `14` |
 | 极之型铳枪 | `9` | `15` |
 
-`native` 沿用该武器当前装备的 GU 原版风格。缺项、未注册的编号、武器不匹配、格式错误、旧编号及旧字符串标识也按原版风格处理。读取时保留原文件。在装备箱重新确认一次风格后，注册器写入编号或 `native`。
-
-通过 [SDK 风格注册表](../../crates/mhgu-sdk/src/style/registry.rs) 声明常驻 `static Style`，填入配置和联机共用的全局唯一编号（10–65535）、GU 武器类型、动作及回调。内容插件在 Forge 入口调用 `registry::when_ready`，在回调中使用 `registry.register(&STYLE, name, description)` 登记一次。编号冲突返回 `Conflict`，保留先注册的声明。用 `registry.selected(weapon)` 查询启用的自定义编号，沿用原版时返回 `None`。更新时将 SDK 和武器 NRO 一起替换。
+通过 [SDK 风格注册表](../../crates/mhgu-sdk/src/style/registry.rs) 声明常驻 `static Style`，填入角色存档和联机共用的全局唯一编号（10–65535）、GU 武器类型、动作及回调。内容插件在 Forge 入口调用 `registry::when_ready`，在回调中使用 `registry.register(&STYLE, name, description)` 登记一次。编号冲突返回 `Conflict`，保留先注册的声明。用 `registry.selected(weapon)` 查询启用的自定义编号，沿用原版时返回 `None`。更新时将 SDK 和武器 NRO 一起替换。
 
 风格注册服务同时提供攻击提交与格挡结果。GU 从武器动作组派发已登记的 `0x8000..0x80ff` 槽位。风格根据 GU 已接受的拔刀或切招请求选择招式，并自行定义动作、派生窗口和格挡规则。注册器负责大剑切招、狩技接续、下一击强化与格挡收尾的原生对接。切出风格时用空输入通知控制器，actor 为 0 表示旧猎人已失效。
 
@@ -60,7 +53,7 @@ SDK 统一挂接 GU 的世界碰撞展开入口 `1696FC`。武器沿用按风格
 
 武器插件通过 [ParticleModelV1](../../crates/mhgu-sdk/src/style/particle.rs) 登记模型粒子绘制回调。注册器初始化共用的 FZ 模型粒子渲染器，负责保存和恢复 GU 的绘制状态，并派发粒子释放回调。
 
-构建注册器与武器模组后，用装有 Unicorn 的 Python 运行 `plugins/great-sword-extreme/tests/verify_style.py` 和 `verify_menu.py`。后者回放装备箱选择与保存、个人与队友状态、装备资料收发和装备组合的概要及详情。使用内存文件、渲染替身和传输替身。
+构建注册器与武器模组后，用装有 Unicorn 的 Python 运行 `plugins/great-sword-extreme/tests/verify_style.py` 和 `verify_menu.py`。后者回放装备箱选择、角色槽隔离、GU 保存失败、A/B 回退、装备组合保存和应用、概要及详情、个人与队友状态及装备资料收发。使用内存文件、渲染替身和传输替身。
 
 按[开发指引](../../docs/development.md#验证范围)打包全部武器后，运行 `python3 plugins/mhgu-sdk-runtime/tests/verify_weapon_styles.py`。该入口覆盖 SDK 最后启动、猎人笔记与暂停菜单中的手册显示和返回，以及各武器的任务预读与粒子资源。手册文字随武器 NRO 更新。
 

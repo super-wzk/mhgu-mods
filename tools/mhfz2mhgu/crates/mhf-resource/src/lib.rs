@@ -5,15 +5,11 @@
 
 use std::fmt;
 
-pub mod ai;
-pub mod combat;
 pub mod crypto;
 mod decoded;
-mod elf;
 pub mod fmod;
 pub mod fskl;
 pub mod jkr;
-pub mod monster;
 pub mod motion;
 pub mod pac;
 pub mod rig;

@@ -9,6 +9,7 @@ from unicorn.arm_const import UC_ARM_REG_SP
 PLUGINS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PLUGINS / "great-sword-extreme/tests"))
 from verify_style import (
+    character_save,
     STYLE_IDS,
     CHANGE_ACTION, COMMAND_UPDATE, DISPATCH, boot, hunters, load_registered_style,
     quest_entries, setup_controller,
@@ -16,7 +17,7 @@ from verify_style import (
 
 
 def replay(elf, row, weapon, plugin, vtable):
-    g = boot(elf, f"[Weapons]\n{weapon}={STYLE_IDS[plugin]}\n".encode(), ("registry",))
+    g = boot(elf, character_save({weapon: STYLE_IDS[plugin]}), ("registry",))
     nro = PLUGINS / plugin / "dist" / plugin / "romfs/nativeNX/plugins" / (
         plugin.replace("-", "_") + ".nro"
     )

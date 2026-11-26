@@ -7,10 +7,10 @@ ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parents[1]
 sys.path.insert(0, str(ROOT.parent / "great-sword-extreme/tests"))
 sys.path.insert(0, str(ROOT.parent / "mhgu-sdk-runtime/tests"))
-from verify_style import BLOCK, CHANGE_ACTION, api_for, boot, hunters, load_registered_style, service, setup_controller
+from verify_style import character_save, BLOCK, CHANGE_ACTION, api_for, boot, hunters, load_registered_style, service, setup_controller
 
 def main():
-    g = boot((REPO / "mhgu/main.elf").read_bytes(), b"[Weapons]\n8=13\n", ("registry",))
+    g = boot((REPO / "mhgu/main.elf").read_bytes(), character_save({8: 13}), ("registry",))
     desc = load_registered_style(g, ROOT / "dist/switch-axe-extreme/romfs/nativeNX/plugins/switch_axe_extreme.nro")
     _, selected = service(g)
     assert (g.get(desc), g.get(desc+4), g.run(selected,8), g.run(selected,7)) == (13,8,13,0)

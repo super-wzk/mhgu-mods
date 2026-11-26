@@ -13,7 +13,7 @@ def expand(text):
 
 
 def replay(repo, elf, cases):
-    g = boot(elf, b"[Weapons]\n", ("registry",))
+    g = boot(elf, None, ("registry",))
     close_native_manual = 0x65F7A4
     # Forge 1.5.1 copies both entry instructions without relocating the PC-relative LDR.
     assert g.originals[close_native_manual] == 0

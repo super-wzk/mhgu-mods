@@ -11,7 +11,8 @@ REPO = ROOT.parents[1]
 NX = ROOT / "dist/gunlance-extreme/romfs/nativeNX"
 sys.path.insert(0, str(REPO / "plugins/great-sword-extreme/tests"))
 from verify_native_fx import emit_model_layer, model_renderer
-from verify_style import (CHANGE_ACTION, DISPATCH, WEAPON_DISPATCH, api_for, boot,
+from verify_style import (
+    character_save,CHANGE_ACTION, DISPATCH, WEAPON_DISPATCH, api_for, boot,
                           hunters, load_registered_style, quest_arc, quest_entries, setup_controller)
 
 ADD_HEAT = 0x11AA480
@@ -56,7 +57,7 @@ def blade_point(tip, multiplier, accessory=False):
 
 
 def scene(selected=True):
-    config = b"[Weapons]\n9=15\n" if selected else b""
+    config = character_save({9: 15}) if selected else None
     g = boot((REPO / "mhgu/main.elf").read_bytes(), config, ("registry",))
     g.inline_hooks |= {ADD_HEAT, UPDATE_HEAT, HEAT_HUD, DRAW, AA_WYVERN}
     desc = load_registered_style(g, NX / "plugins/gunlance_extreme.nro")

@@ -17,7 +17,7 @@
 | 现象 | 已有案例与排查方法 |
 | --- | --- |
 | Switch 装备箱只出现部分极之型 | Forge 的插件初始化顺序可能随环境变化。武器入口通过 `registry::when_ready` 登记完整初始化函数。用[整合包启动回放](../plugins/mhgu-sdk-runtime/tests/verify_weapon_styles.py)验证按 NRO 文件名排序和注册器最后启动两种情况。 |
-| 装备箱没显示自定义风格 | 检查注册器和当前武器的 NRO 是否都已加载、`when_ready` 回调是否执行、自定义风格编号是否冲突。注册器按当前 GU 武器筛选列表。旧编号、旧字符串标识、未注册的编号及武器不匹配时会沿用原版，可在装备箱重新选择。详细配置见[注册器 README](../plugins/mhgu-sdk-runtime/README.md)。 |
+| 装备箱没显示自定义风格 | 检查注册器和当前武器的 NRO 是否都已加载、`when_ready` 回调是否执行、自定义风格编号是否冲突。注册器按当前 GU 武器筛选列表。未注册的编号或武器不匹配时会沿用原版。更新后在装备箱重新选择，并在 GU 保存游戏。详细配置见[注册器 README](../plugins/mhgu-sdk-runtime/README.md)。 |
 | 队友状态仍显示原版风格 | 核对双方 SDK 是否支持装备资料同步，以及查看方是否已注册对方的编号和武器。用 `verify_menu.py` 回放 `netPlData` 收发和状态页。GU 的装备风格字节始终保留原版值。 |
 | 装备箱能选极之型，但操作指南缺页或找不到该风格 | 检查该武器 NRO 是否带有最新的 `src/manual.txt` 并成功调用 `manual::bind`。核对空行分页、操作页的制表符和行数。用同一套安装包分别走猎人笔记和暂停菜单。见[手册格式](../plugins/mhgu-sdk-runtime/README.md)及[手册回放](../plugins/mhgu-sdk-runtime/tests/verify_manual.py)。 |
 | 选中极之型还出现勇气纳刀或勇气槽 | 核对 `independent`、实际选中的本地武器风格，以及引擎的内部表索引。菜单预览、状态页、实际动作和已创建的 HUD 有不同的查询点。自定义 ID 由注册器保存，GU 装备里的原版风格字段仍供原版路径使用。 |

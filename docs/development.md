@@ -6,9 +6,8 @@
 | --- | --- |
 | [crates/mhgu-sdk](../crates/mhgu-sdk/README.md) | GU 1.4 引擎绑定，包括原生输入和转向、动作、碰撞、资源与注册接口。 |
 | [crates/mhfz-sdk](../crates/mhfz-sdk/README.md) | 极型武器共用的 Frontier 动作程序、动作库预加载、技能帧数补正、弹刀、镜头震动和表现时序。 |
-| [plugins/mhgu-sdk-runtime](../plugins/mhgu-sdk-runtime/README.md) | 构建共享 Forge 插件 `mhgu-sdk.nro`，提供武器风格与怪物物种注册服务，管理 GU 共用钩子和持久化。 |
+| [plugins/mhgu-sdk-runtime](../plugins/mhgu-sdk-runtime/README.md) | 构建共享 Forge 插件 `mhgu-sdk.nro`，提供武器风格注册和角色存档服务，管理 GU 共用钩子和持久化。 |
 | [极之型大剑](../plugins/great-sword-extreme/README.md)、[极之型双剑](../plugins/dual-blades-extreme/README.md)、[极之型太刀](../plugins/long-sword-extreme/README.md)、[极之型斩斧F](../plugins/switch-axe-extreme/README.md)、[极之型单手剑](../plugins/sword-shield-extreme/README.md)、[极之型铳枪](../plugins/gunlance-extreme/README.md) | 各武器的动作编号、派生优先级、精准防御规则、槽、专属狩技及表现资源。 |
-| [plugins/monster-espinas](../plugins/monster-espinas/README.md) | 独立物种、任务和怪物行为的接入实例。 |
 | [tools/mhfz2mhgu](../tools/mhfz2mhgu/README.md) | 宿主资源转换 CLI。`mhf-resource` 读 FZ 格式，`mhgu-resource` 读写 GU 格式，`src/hunter.rs` 等负责具体移植映射。 |
 | [tools/package_weapon_styles.py](../tools/package_weapon_styles.py) | 组装 SDK 和六个武器的安装产物，在仓库根目录生成极之型整合包。 |
 
@@ -22,7 +21,7 @@
 
 ## 本地输入和构建
 
-准备 Rust、插件目录声明的 nightly 和 `rust-src`、`cargo forge` 以及 Python 3。Forge 插件使用 ARM32 小端自定义目标。直接执行 `cargo forge build` 时从插件目录启动，让 Cargo 发现该目录的 `.cargo/config.toml`。棘龙及其注册器的输入与命令见[棘龙插件说明](../plugins/monster-espinas/README.md)。
+准备 Rust、插件目录声明的 nightly 和 `rust-src`、`cargo forge` 以及 Python 3。Forge 插件使用 ARM32 小端自定义目标。直接执行 `cargo forge build` 时从插件目录启动，让 Cargo 发现该目录的 `.cargo/config.toml`。
 
 | 输入 | 用途 |
 | --- | --- |
@@ -68,15 +67,15 @@ python3 tools/package_weapon_styles.py
 
 新增 SDK 接口优先接收值类型或经 SDK 验证的借用句柄，并在 SDK 内完成原生指针读写与调用。碰撞展开等时机敏感的接口可接收模组返回的形状参数，由 SDK 在原生回调内校验并提交。直接挂接原生回调时，原始地址到借用句柄的转换仍须确认对象、线程和生命周期。
 
-运行时通过版本化函数表向内容 NRO 提供服务。模组在 Cargo 中依赖 `crates/mhgu-sdk`，可在各自的 Forge 入口用 `style::registry::when_ready` 或 `monster::species::registry::when_ready` 登记初始化函数。修改共用接口后，一起重建并安装运行时和使用该接口的插件。
+运行时通过版本化函数表向内容 NRO 提供服务。模组在 Cargo 中依赖 `crates/mhgu-sdk`，可在各自的 Forge 入口用 `style::registry::when_ready` 登记初始化函数。修改共用接口后，一起重建并安装运行时和使用该接口的插件。
 
 ## 安装和确认
 
-启用 Forge 后，把 `dist/weapon-styles/` 下的 `mhgu-sdk/` 和所需武器目录分别装入 MHGURecomp 的模组目录，保留完整的 `romfs/nativeNX` 层级。开发散文件版或只安装棘龙时，可以使用 `plugins/mhgu-sdk-runtime/dist/mhgu-sdk/`。同一游戏只需一份 SDK，武器与棘龙均可在 SDK 前后加载。升级时移除旧的 `style-registry` 和 `monster-registry`，保留原有存档。共用钩子或资源布局变化时，整目录更新 SDK 和关联内容模组，保证 NRO、`common.arc` 和武器 ARC 来自同一包。仅修改代码且资源匹配时可以只更新对应的 NRO。
+启用 Forge 后，把 `dist/weapon-styles/` 下的 `mhgu-sdk/` 和所需武器目录分别装入 MHGURecomp 的模组目录，保留完整的 `romfs/nativeNX` 层级。使用开发散文件版时，可以使用 `plugins/mhgu-sdk-runtime/dist/mhgu-sdk/`。同一游戏只需一份 SDK，武器可在 SDK 前后加载。升级时移除旧的 `style-registry`，保留原有存档。共用钩子或资源布局变化时，整目录更新 SDK 和关联内容模组，保证 NRO、`common.arc` 和武器 ARC 来自同一包。仅修改代码且资源匹配时可以只更新对应的 NRO。
 
 完整极之型合包包含 SDK 和当前六个武器模组目录。归档前核对每个目录的 NRO 和配套资源。已有合包的命名格式为 `mhgu边境风格-YYYYMMDDHHMM.7z`。
 
-重启游戏后，在原版装备箱按当前武器选风格。配置保存在 Forge 的 `savedata:/style_registry.ini`，`[Weapons]` 下用 GU 武器编号作键，值为自定义风格 ID（如大剑的 `10`）或 `native`。旧编号和旧字符串标识按原版风格读取，更新 SDK 和全部武器 NRO 后可在装备箱重新选择。查错误时依次确认 **安装包的 NRO 和资源、Forge 初始化和钩子日志、装备箱选择、任务内执行路径**。看到模组被列出或 NRO 被加载，只能确认到了加载阶段。
+重启游戏后，在原版装备箱按当前武器选风格。风格和装备组合随 GU 角色存档写入 [SDK 的 A/B JSON](../plugins/mhgu-sdk-runtime/README.md#角色存档)。升级后可在装备箱重新选择并保存游戏。查错误时依次确认 **安装包的 NRO 和资源、Forge 初始化和钩子日志、装备箱选择、任务内执行路径**。看到模组被列出或 NRO 被加载，只能确认到了加载阶段。
 
 ## 验证范围
 
@@ -90,7 +89,6 @@ python3 tools/package_weapon_styles.py
 | 动作、音效、特效与材质 | 对照输出槽位、事件帧、挂点或材质字段。参考[资源检查](../plugins/great-sword-extreme/tests/verify_assets.py)、[原生粒子](../plugins/great-sword-extreme/tests/verify_native_fx.py)和[材质绘制](../plugins/great-sword-extreme/tests/verify_native_material.py)。 |
 | 注册顺序、手册、预加载和角色交接 | [共用武器验收](../plugins/mhgu-sdk-runtime/tests/verify_weapon_styles.py)覆盖六种武器、注册器最后启动、两个手册入口、任务预读和成品粒子路径。[斩斧集会所回放](../plugins/switch-axe-extreme/tests/verify_lobby.py)核对任务角色与集会所角色交接。 |
 | 联机动作与伤害归属 | [大剑与双剑](../plugins/mhgu-sdk-runtime/tests/verify_gs_db_multiplayer.py)、[太刀](../plugins/long-sword-extreme/tests/verify_multiplayer.py)、[片手与铳枪](../plugins/mhgu-sdk-runtime/tests/verify_sns_gl_multiplayer.py)和[斩斧](../plugins/switch-axe-extreme/tests/verify_port.py)覆盖 GU 原生动作包和队员命中。实机另查双方的动作、特效和结算。 |
-| 独立怪物、任务与结算 | 按[棘龙插件说明](../plugins/monster-espinas/README.md)生成两个安装包，运行[任务注册与结算](../plugins/mhgu-sdk-runtime/tests/verify_espinas_quest.py)及对应的出场、音效和碰撞检查。 |
 
 从仓库根目录使用可导入 `unicorn` 的 Python 运行离线脚本。准备相应的本地 ELF，并保留打包生成的 `target/assets` 和 `dist`。涉及 GU 原版武器 ARC 的脚本还需要导出 `MHGU_ROMFS`。共用武器验收需要已构建的注册器和所有武器风格的 `dist`。
 

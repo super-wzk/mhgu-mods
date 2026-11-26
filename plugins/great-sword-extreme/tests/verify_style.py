@@ -1,5 +1,6 @@
-"""Exercise both packaged NROs, Forge INI selection and the original GU motion path."""
+"""Exercise both packaged NROs, Forge character data and the original GU motion path."""
 
+import json
 import math
 import os
 import struct
@@ -12,13 +13,13 @@ from unicorn import UC_HOOK_CODE
 ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parents[1]
 sys.path.insert(0, str(REPO / "plugins/mhgu-sdk-runtime/tests"))
-from verify_espinas_quest import Game, MANAGER
-from verify_espinas_quest import SDK_NRO as PROVIDER
+from gu_replay import Game, MANAGER
+from gu_replay import SDK_NRO as PROVIDER
 
 NX = ROOT / "dist/great-sword-extreme/romfs/nativeNX"
 PROVIDER_BASE = 0x9000000
 CONTENT = NX / "plugins/great_sword_extreme.nro"
-CONFIG = "savedata:/style_registry.ini"
+SAVE = "savedata:/mhgu-sdk-0-1.json"
 STYLE_IDS = {
     "great-sword-extreme": 10,
     "dual-blades-extreme": 11,
@@ -30,7 +31,7 @@ STYLE_IDS = {
 ENCODE, DECODE = 0x27C6A0, 0x27C6D4
 MENU_OPEN, MENU_UPDATE = 0x548B7C, 0x5490FC
 STATUS_STYLE, STATUS_STYLE_SMALL = 0x62FB78, 0x633450
-SET_STYLE_HOOKS = {0x72D3D8, 0x58A3DC, 0x58A44C, 0x5D96F8}
+SET_STYLE_HOOKS = {0x72D3D8, 0x58A3DC, 0x58A44C, 0x5D96F8, 0x146CB8, 0x146560, 0x147250, 0x1480B4}
 PROFILE_HOOKS = {0x202640, 0x202764, 0x202894, 0x274400, 0x2776D4, 0x273BE0}
 HIT_ROW = 0x2A8A88
 DISPATCH, BLOCK = 0x282DA8, 0x2F2BA0
@@ -135,6 +136,29 @@ def style_descriptor(g, ident, weapon, encode=0, art_slots=0):
     return descriptor
 
 
+def character_save(weapons, *, slot=0, generation=1, sets=None):
+    return json.dumps({
+        "version": 1, "slot": slot, "generation": generation,
+        "data": {
+            "weapons": [weapons.get(weapon) for weapon in range(15)],
+            "equipment_sets": {} if sets is None else sets,
+        },
+    }).encode()
+
+
+def select_character(g, slot):
+    g.put(MANAGER + 60, 14)
+    g.put(MANAGER + 64, slot)
+    g.run(g.hooks[0x3E21B8], MANAGER)
+
+
+def save_character(g, slot=0, *, success=True):
+    g.write_success = success
+    g.run(g.hooks[0x3E0980], MANAGER, slot)
+    g.put(MANAGER + 60, 21)
+    g.run(g.hooks[0x3E1308], MANAGER)
+
+
 def boot(elf, config, order=("registry", "sword"), mount_ok=True):
     g = Game(elf)
     # The fixture starts after class registration. Populate the real weapon
@@ -185,17 +209,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
 
     g.hook = hook
     if config is not None:
-        g.files[CONFIG] = config
-
-    # Model sequential MtFile writes: Forge's stock INI writer emits a line in parts.
-    def append(obj, p, n, _):
-        assert g.io_mount and g.opened[obj] == CONFIG
-        g.files[CONFIG] += bytes(g.cpu.mem_read(p, n))
-        return n
-
-    slot = g.alloc(4)
-    g.stub(slot, append)
-    g.put(g.files_vt + 12 * 4, slot)
+        g.files[SAVE] = config
     for name in order:
         path, base = (
             (PROVIDER, PROVIDER_BASE) if name == "registry" else (CONTENT, 0x9200000)
@@ -247,10 +261,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             GUARD_REACTION,
             DRAW_MODEL,
             SUBMIT_MODEL,
-            # The same NRO also provides the monster layout, records and save hooks.
-            0x50B64, 0x523104, 0x526D94, 0x526DD4, 0x526E00, 0x526E44,
-            0x526EB0, 0x526EF8, 0x526F48, 0x39F2B0, 0x3A75C8, 0x3A3930,
-            0x38D990, 0x3E21B8, 0x3E0980, 0x3E1308,
+            0x3DFAFC, 0x3E21B8, 0x3E0980, 0x3E1308,
         }
         if "registry" in order
         else set()
@@ -262,8 +273,10 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         [hex(addr) for addr in sorted(expected - actual)],
         [hex(addr) for addr in sorted(actual - expected)],
     )
+    if "registry" in order:
+        select_character(g, 0)
     if config is not None:
-        assert g.files[CONFIG] == config
+        assert g.files[SAVE] == config
     return g
 
 
@@ -2437,7 +2450,7 @@ def verify_jump_slash(g, p, tick, neutral):
 
 def verify_sdk_registration(elf):
     # Exercise the actual SDK caller in the great-sword NRO, not only the raw ABI.
-    config = b"[Weapons]\r\n0 = 10\r\n1 = 10\r\n"
+    config = character_save({0: 10, 1: 10})
     for case in ("ready", "conflict", "worker"):
         g = boot(elf, config, ("registry",))
         register, selected = service(g)
@@ -2460,7 +2473,7 @@ def verify_sdk_registration(elf):
 
 
 def verify_peer_callbacks(elf):
-    g = boot(elf, b"[Weapons]\n8=42\n", ("registry",))
+    g = boot(elf, character_save({8: 42}), ("registry",))
     local, equipment, peer = hunters(g)
     g.cpu.mem_write(equipment + 1236, b"\x08")
     g.put(g.get(0x1885B58) + 32, peer)
@@ -2504,7 +2517,7 @@ def verify_peer_callbacks(elf):
 
 def verify():
     elf = (REPO / "mhgu/main.elf").read_bytes()
-    on = b"[Weapons]\r\n0 = 10\r\n"
+    on = character_save({0: 10})
     verify_action_lifecycle(elf, on)
     verify_sdk_registration(elf)
     verify_peer_callbacks(elf)
@@ -2514,32 +2527,25 @@ def verify():
     g = boot(elf, on, ("sword", "registry"))
     assert g.run(service(g)[1], 0) == 10
     g = boot(elf, on, ("sword",))
-    assert not g.hooks and g.files == {CONFIG: on}
+    assert not g.hooks and g.files == {SAVE: on}
     g = boot(elf, on, ("registry",))
     assert g.run(service(g)[1], 0) == 0
-    for cfg in [
-        None,
-        b"[Weapons]\n0=native",
-        b"[Weapons]\n0=0",
-        b"[Weapons]\n0=1",
-        b"[Weapons]\n0=great-sword-extreme",
-        b"1",
-        b"[Weapons]\n0=-2",
-        b"[Weapons]\n0=65535",
-        b"[Weapons]\n0=65536",
-        b"[Weapons]\n0=10\n0=native",
-        b"[General]\nstyle=1",
-    ]:
+    for cfg in [None, character_save({}), character_save({0: 1}),
+                character_save({0: 65535}), character_save({0: 65536}), on[:-1]]:
         g = boot(elf, cfg)
         assert g.run(service(g)[1], 0) == 0
         actor, _, _ = hunters(g)
         assert g.run(g.hooks.get(ENCODE, ENCODE), actor, 5001) == 0x501
-        assert g.files == ({} if cfg is None else {CONFIG: cfg})
+        assert g.files == ({} if cfg is None else {SAVE: cfg})
+    g = boot(elf, None)
+    g.files["savedata:/style_registry.ini"] = b"[Weapons]\n0=10"
+    select_character(g, 0)
+    assert g.run(service(g)[1], 0) == 0 and len(g.files) == 1
     g = boot(elf, None, mount_ok=False)
     assert not g.files and g.run(service(g)[1], 0) == 0
 
     # A second plugin may register after config load. Its ID applies only to its weapon.
-    g = boot(elf, b"[Weapons]\n0=10\n1=42\n8=42")
+    g = boot(elf, character_save({0: 10, 1: 42, 8: 42}))
     register, selected = service(g)
     actor, eq, remote = hunters(g)
 
@@ -2559,7 +2565,7 @@ def verify():
     assert g.run(g.hooks[ENCODE], actor, 5101) == 0x565
     assert g.run(g.hooks[DECODE], actor, 0x801) == 8001
     print(
-        "Forge INI create/read/fallback; independent style IDs, init-only registration, late provider registration and missing provider fallback: passed"
+        "Forge character JSON read/fallback; independent style IDs, init-only registration, late provider registration and missing provider fallback: passed"
     )
     print(
         "GU local male/female great sword: occupied banks, motion roundtrip, weapon switch and native equipment preservation: passed"

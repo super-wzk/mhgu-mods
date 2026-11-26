@@ -32,7 +32,7 @@ python3 plugins/great-sword-extreme/package.py "${MHFZ_DAT:?请指定 FZ 的 dat
 
 发布整合包时使用 [ARC 打包流程](../../docs/development.md#本地输入和构建)。正式发布目录中，本武器的资源放在一个 ARC，NRO 独立，通用素材随 SDK 安装。下文的单武器打包和回放使用开发目录。
 
-将 SDK 的 `dist/mhgu-sdk/` 和大剑的 `dist/great-sword-extreme/` 安装到 mods 目录。大剑通过 `registry::when_ready` 等待风格注册器就绪。菜单选择立即生效，由注册器写入 Forge 的 `savedata:/style_registry.ini`。要切回原版，在同一页确认任一原版风格即可。
+将 SDK 的 `dist/mhgu-sdk/` 和大剑的 `dist/great-sword-extreme/` 安装到 mods 目录。大剑通过 `registry::when_ready` 等待风格注册器就绪。菜单选择立即生效，随 GU 保存写入 [SDK 角色存档](../mhgu-sdk-runtime/README.md#角色存档)。要切回原版，在同一页确认任一原版风格即可。
 
 打包后运行 `tests/verify_assets.py`、`tests/verify_style.py`、`tests/verify_menu.py`，需要 Unicorn、本机 Vita/GU ELF 和 GU 的大剑资源包。提取的动作和指令表在 `target/assets`。安装包将男女共用的三个 LMT 放在独立的 `player/mot/frontier_gs` 路径，保留组内槽号与空槽；不覆盖 GU 的 `w00.arc`。
 

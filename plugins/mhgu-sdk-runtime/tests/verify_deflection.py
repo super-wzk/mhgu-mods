@@ -10,6 +10,7 @@ PLUGINS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PLUGINS / "great-sword-extreme/tests"))
 from verify_assets import Machine, MEM, STOP
 from verify_style import (
+    character_save,
     STYLE_IDS,
     CHANGE_ACTION, COMMAND_UPDATE, DB_DRAW_ROUTE, DISPATCH, ENCODE, WEAPON_DISPATCH, api_for, boot, hunters,
     load_registered_style, quest_entries, setup_controller,
@@ -120,7 +121,7 @@ def replay(weapon, plugin, recoil, recoil_clip):
     elf = (PLUGINS.parent / "mhgu/main.elf").read_bytes()
     dual = weapon == 11
     order = ("registry", "sword") if dual else ("registry",)
-    g = boot(elf, f"[Weapons]\n{weapon}={STYLE_IDS[plugin]}\n".encode(), order)
+    g = boot(elf, character_save({weapon: STYLE_IDS[plugin]}), order)
     dist = PLUGINS / plugin / "dist" / plugin / "romfs/nativeNX/plugins"
     trails = {}
     if dual:

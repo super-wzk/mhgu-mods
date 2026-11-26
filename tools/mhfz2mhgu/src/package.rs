@@ -1,4 +1,4 @@
-use crate::{Monster, model, motion, read};
+use crate::{ModelArchive, model, motion, read};
 use anyhow::{Context, Result, ensure};
 use mhf_resource::{fmod::Fmod, image, pac};
 use mhgu_resource::{
@@ -25,12 +25,12 @@ fn template(path: &Path) -> Result<Vec<u8>> {
                     .rsplit_once("\\mod\\")
                     .is_some_and(|(_, name)| name == stem)
         })
-        .context("could not find the monster model MRL in the template ARC")?;
+        .context("could not find the model MRL in the template ARC")?;
     m.unpack()
 }
 
 pub fn build(
-    monster: &Monster,
+    source: &ModelArchive,
     template_path: &Path,
     name: &str,
     texture_member: usize,
@@ -50,7 +50,7 @@ pub fn build(
     );
     let base = format!("enemy\\{species}\\{name}");
     let model_path = format!("{base}\\mod\\{name}");
-    let (pac, pair, rig) = monster.open()?;
+    let (pac, pair, rig) = source.open()?;
     let source = pac::member(&pair, 0)?;
     let f = Fmod::parse(&source)?;
     let images = pac::member(&pac, texture_member)?;

@@ -3,7 +3,7 @@ import math
 import struct
 from typing import NamedTuple
 from unicorn import UC_HOOK_CODE, arm_const as arm
-from verify_style import Game, REPO, NX, boot, effect_routes, hunters, DRAW_ROUTE, SUBMIT_MODEL
+from verify_style import character_save, Game, REPO, NX, boot, effect_routes, hunters, DRAW_ROUTE, SUBMIT_MODEL
 
 
 def resources(g):
@@ -454,6 +454,6 @@ if __name__ == "__main__":
     resources(Game(elf))
     binding_stack(boot(elf, None))
     print("GU draw at binding stack depths 4 and 5 preserves live and outer bindings")
-    emission(boot(elf, b"[Weapons]\n0=10\n"))
+    emission(boot(elf, character_save({0: 10})))
     soft_particles(boot(elf, None))
-    draw(boot(elf, b"[Weapons]\n0=10\n"))
+    draw(boot(elf, character_save({0: 10})))

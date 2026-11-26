@@ -140,12 +140,4 @@ impl<'a> ShapeGroups<'a> {
         }
         unsafe { Object::at(self.slots.get(Field::at(4 * usize::from(index)))) }
     }
-
-    pub(super) fn shape_count(self, index: u8) -> Option<u32> {
-        Some(self.group(index)?.get(Field::at(4)))
-    }
-
-    pub(crate) fn belongs_to(self, resource: Object) -> bool {
-        self.resource.addr() == resource.addr()
-    }
 }

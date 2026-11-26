@@ -9,7 +9,7 @@ from unicorn import UC_HOOK_MEM_WRITE, arm_const as arm
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "plugins/great-sword-extreme/tests"))
-from verify_style import STYLE_IDS, api_for, boot, hunters, load_registered_style, quest_entries, setup_controller
+from verify_style import character_save, STYLE_IDS, api_for, boot, hunters, load_registered_style, quest_entries, setup_controller
 
 
 def float_bits(value):
@@ -19,7 +19,7 @@ def float_bits(value):
 class Scene:
     def __init__(self, weapon, name, vtable):
         g = self.g = boot((REPO / "mhgu/main.elf").read_bytes(),
-                          f"[Weapons]\n{weapon}={STYLE_IDS[name + '-extreme']}\n".encode(), ("registry",))
+                          character_save({weapon: STYLE_IDS[name + '-extreme']}), ("registry",))
         g.inline_hooks = g.inline_hooks | {0x2B4E7C, 0x11A4D8C}
         if weapon == 1:
             g.inline_hooks |= {0x116D464}

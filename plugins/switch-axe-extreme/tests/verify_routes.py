@@ -6,6 +6,7 @@ import struct
 import zlib
 from unicorn.arm_const import UC_ARM_REG_S1
 from verify_style import (
+    character_save,
     DISPATCH,
     SA_DRAW_ROUTE,
     boot,
@@ -17,7 +18,7 @@ from verify_style import (
 
 
 def replay(repo, root):
-    g = boot((repo / "mhgu/main.elf").read_bytes(), b"[Weapons]\n8=13\n", ("registry",))
+    g = boot((repo / "mhgu/main.elf").read_bytes(), character_save({8: 13}), ("registry",))
     g.inline_hooks = g.inline_hooks | {0x308B3C}
     desc = load_registered_style(
         g,

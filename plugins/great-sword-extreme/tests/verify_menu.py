@@ -1,10 +1,11 @@
 """Run the packaged equipment-box hooks with GU's actual cursor and controller."""
 
+import json
 import struct
 
 from unicorn.arm_const import UC_ARM_REG_SP
 
-from verify_style import CONFIG, MENU_OPEN, MENU_UPDATE, REPO, boot, hunters, load_registered_style, service, style_descriptor
+from verify_style import MANAGER, SAVE, character_save, save_character, select_character, MENU_OPEN, MENU_UPDATE, REPO, boot, hunters, load_registered_style, service, style_descriptor
 
 MANUAL_HINT = "详见猎人笔记的武器操作指南。"
 GREAT_SWORD_DETAILS = (
@@ -127,9 +128,35 @@ def verify_status(g):
 
 
 def verify_set_styles(g):
-    preview, summary, detail, my_set = (g.alloc(n) for n in (5000, 128, 128, 160))
-    equipment = preview + 3052
+    preview, summary, detail = (g.alloc(n) for n in (5000, 128, 128))
+    save = 0x7110000
+    g.put(0x1856FE8, save)
+    my_set = save + 254028
+    stock_set = my_set + 136
+    g.cpu.mem_write(my_set + 42, struct.pack("<H", 7))
     g.cpu.mem_write(my_set + 130, b"\x05")
+    g.cpu.mem_write(stock_set + 42, struct.pack("<H", 8))
+    g.cpu.mem_write(stock_set + 130, b"\x04")
+    _, worn, _ = hunters(g)
+    g.stub(0x3F8398, lambda *_: 0)
+    g.stub(0xE100C, lambda _, __, *rest: g.half(worn + 4))
+    g.stub(g.originals[0x146CB8], lambda _, slot, *rest: int(slot < 40))
+
+    def apply_native(_, slot, *rest):
+        record = my_set + slot * 136
+        g.cpu.mem_write(worn + 4, bytes(g.cpu.mem_read(record + 42, 2)))
+        g.cpu.mem_write(worn + 1241, bytes(g.cpu.mem_read(record + 130, 1)))
+
+    g.stub(g.originals[0x146560], apply_native)
+    assert g.run(g.hooks[0x146CB8], save, 0) == 1
+    # An old native set has no SDK metadata. It must disable the custom style.
+    g.run(g.hooks[0x146560], save, 1)
+    selected = service(g)[1]
+    assert g.run(selected, 0) == 0 and g.half(worn + 4) == 8
+    assert g.run(g.hooks[0x146CB8], save, 1) == 1
+    g.run(g.hooks[0x146560], save, 0)
+    assert g.run(selected, 0) == 10 and g.half(worn + 4) == 7
+    equipment = preview + 3052
     g.cpu.mem_write(equipment + 1241, b"\x05")
     msg = g.alloc(16)
     g.cpu.mem_write(msg, b"GU text\0")
@@ -145,11 +172,17 @@ def verify_set_styles(g):
     g.stub(0x56FD7C, formatted)
     for addr in (0x550354, g.originals[0x2778AC], 0x4CF2D0, 0x56E530, 0xE79C8):
         g.stub(addr, lambda *_: 0)
-    g.stub(0x146408, lambda *_: my_set)
-    g.stub(0x146BA0, lambda _, __, slot, _unused: slot == 0)
+    g.stub(0x146408, lambda _, slot, *rest: my_set + slot * 136)
+    g.stub(0x146BA0, lambda _, __, slot, _unused: slot < 2)
     g.stub(0x65CBE8, lambda _, panel, *rest: {21: detail, 22: summary}.get(panel, 0))
     g.stub(0x65CC0C, lambda *_: 0)
     g.stub(0x72D0F8, lambda *_: 0)
+    save_character(g)
+    assert json.loads(g.files["savedata:/mhgu-sdk-0-0.json"])["data"]["equipment_sets"]["0"]["id"] == 10
+    select_character(g, 1)
+    assert g.run(selected, 0) == 0
+    select_character(g, 0)
+    assert g.run(selected, 0) == 10
     g.run(0x72D3D8, preview, 0)
     g.run(0x58A434, summary)
     assert labels[0, 3] == "极之型大剑"
@@ -164,10 +197,54 @@ def verify_set_styles(g):
     g.run(0x5D96F8, detail, equipment)
     assert labels[2, 3] == "GU text"
 
+    # Run the original swap and delete with the game's string copy stubbed.
+    def copy_name(dest, src, n, _):
+        raw = bytes(g.cpu.mem_read(src, n))
+        g.cpu.mem_write(dest, raw.split(b"\0", 1)[0].ljust(n, b"\0"))
+        return dest
+
+    g.stub(0x13EFE3C, copy_name)
+    g.run(g.hooks[0x1480B4], save, 0, 0, 1)
+    g.run(g.hooks[0x146560], save, 0)
+    assert g.run(selected, 0) == 0
+    g.run(g.hooks[0x146560], save, 1)
+    assert g.run(selected, 0) == 10
+
+    # Overwriting a custom combination with stock clears its record.
+    g.run(g.hooks[0x146560], save, 0)
+    assert g.run(g.hooks[0x146CB8], save, 1) == 1
+    g.run(g.hooks[0x146560], save, 1)
+    assert g.run(selected, 0) == 0
+    g.run(g.hooks[0x147250], save, 1)
+    assert g.half(stock_set + 42) == 0xFFFF
+    save_character(g, success=False)
+    select_character(g, 0)
+    assert g.run(selected, 0) == 10
+    g.run(g.hooks[0x147250], save, 0)
+    assert g.half(my_set + 42) == 0xFFFF
+    # A GU edit or mismatched restored record cannot supply the old custom style.
+    g.cpu.mem_write(stock_set + 42, struct.pack("<H", 9))
+    g.run(g.hooks[0x146560], save, 1)
+    assert g.run(selected, 0) == 0
+    save_character(g)
+    assert json.loads(g.files[SAVE])["generation"] == 3
+    g.files[SAVE] = g.files[SAVE][:-1]  # Interrupted write; generation 2 survives.
+    select_character(g, 0)
+    assert g.run(selected, 0) == 10
+    g.stub(g.originals[0x3DFAFC], lambda mgr, *rest: (
+        g.put(mgr + 60, 9), g.cpu.mem_write(mgr + 108, b"\x01")
+    ) and 1)
+    g.put(MANAGER + 60, 6)
+    g.run(g.hooks[0x3DFAFC], MANAGER)
+    select_character(g, 0)
+    assert g.run(selected, 0) == 0
+    assert all(json.loads(data)["data"]["equipment_sets"] == {} for data in g.files.values())
+
 
 def verify():
     elf = (REPO / "mhgu/main.elf").read_bytes()
-    g = boot(elf, b"[Weapons]\n0 = native\n11 = 11\n")
+    config = character_save({11: 11})
+    g = boot(elf, config)
     _, eq, _ = hunters(g)
     network = g.alloc(0x16280)
     g.put(0x18843F0, network)
@@ -253,7 +330,7 @@ def verify():
     assert press(0x2000) == 1 and row() == 6 and g.run(selected, 0) == 0
     assert press(0x2000) == 2 and press(0x2000) == 5
     assert g.cpu.mem_read(network + 0x1625A, 1) == b"\x01"
-    assert g.run(selected, 0) == 10 and g.files[CONFIG] == b"[Weapons]\n0 = 10\n11 = 11\n"
+    assert g.run(selected, 0) == 10 and g.files[SAVE] == config
     assert g.cpu.mem_read(eq + 1241, 1) == b"\x05"  # custom selection preserves Valor
     g.cpu.mem_write(eq + 576, struct.pack("<3H", 4, 5, 0))
     g.run(0x557D90, ui + 12, 2)
@@ -269,13 +346,15 @@ def verify():
     assert row() == 0 and press(0x2000) == 2
     assert press(0x2000) == 3 and press(0) == 4
     assert g.run(selected, 0) == 0 and g.cpu.mem_read(eq + 1241, 1) == b"\0"
-    assert g.files[CONFIG] == b"[Weapons]\n0 = native\n11 = 11\n"
+    assert g.files[SAVE] == config
     # GU accepts reselecting its currently equipped native style without opening a dialog.
     open_box()
     press(0x10)  # up from Guild wraps to the custom row
     assert row() == 6 and press(0x2000) == 2 and press(0x2000) == 5
-    saved = g.files[CONFIG]
-    restarted = boot(elf, saved)
+    save_character(g)
+    saved = json.loads(g.files["savedata:/mhgu-sdk-0-0.json"])
+    assert saved["data"]["weapons"][0] == 10
+    restarted = boot(elf, character_save({0: 10, 11: 11}))
     assert restarted.run(service(restarted)[1], 0) == 10
     verify_status(restarted)
     verify_set_styles(restarted)
@@ -284,7 +363,7 @@ def verify():
     g.cpu.mem_write(network + 0x1625A, b"\0")
     assert row() == 0 and press(0x2000) == 5
     assert g.cpu.mem_read(network + 0x1625A, 1) == b"\x01"
-    assert g.run(selected, 0) == 0 and g.files[CONFIG] == b"[Weapons]\n0 = native\n11 = 11\n"
+    assert g.run(selected, 0) == 0 and g.files[SAVE] == config
     # More than two extra styles: the next native page uses the same eight widgets.
     for id_ in (40, 41):
         assert g.run(register, style_descriptor(g, id_, 0), 0, 0) == 0
@@ -329,7 +408,7 @@ def verify():
         assert all(effect in details for effect in effects)
 
     print(
-        "GU equipment box, local and peer status, native equipment packets, and My Set style previews passed"
+        "GU equipment box, status, equipment packets, My Set store/apply/swap/delete, character saves and A/B fallback passed"
     )
 
 

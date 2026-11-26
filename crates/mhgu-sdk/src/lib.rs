@@ -8,10 +8,7 @@ pub mod combat;
 pub mod geometry;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 mod memory;
-pub mod monster;
 pub mod motion;
-#[cfg(all(target_arch = "arm", target_endian = "little"))]
-pub mod quest;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 #[doc(hidden)]
 pub mod service;

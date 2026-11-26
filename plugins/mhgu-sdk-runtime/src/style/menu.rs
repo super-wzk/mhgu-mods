@@ -1,6 +1,6 @@
 //! GU 1.4 equipment-box Change Style controller. Its list has eight real row widgets
 //! (6376BC); 5490FC and 548E24, however, only have six native style records.
-use super::{Entry, active, choose, entries, native_menu, profile, selected};
+use super::{Entry, choose, entries, native_menu, profile, selected, sets};
 use mhgu_sdk::sync::Shared;
 
 const STOCK: usize = 6;
@@ -273,19 +273,22 @@ unsafe fn status_style_small(ui: u32) -> u32 {
 
 // The My Set overview stores only the native style in its label widget.
 // Keep the preview weapon with that widget until the next refresh or initialization.
-static SET_PREVIEW: Shared<Option<(u32, u32)>> = Shared::new(None);
+static SET_PREVIEW: Shared<Option<(u32, u32, u32)>> = Shared::new(None);
+static DETAIL_SET: Shared<Option<u32>> = Shared::new(None);
 
 #[forge::hook(offset = 0x72d3d8)]
 unsafe fn load_set_preview(ui: u32, slot: u32) -> u32 {
     SET_PREVIEW.with(|preview| *preview = None);
+    let previous = DETAIL_SET.with(|current| current.replace(slot));
     let out = original!(ui, slot);
+    DETAIL_SET.with(|current| *current = previous);
     unsafe {
         let save: u32 = read(forge::mem::text_addr(), 0x1856fe8);
         if read::<u32>(ui, 840) == 0 && gu!(0x146ba0, save, 0, slot) == 1 {
             let pane = gu!(0x65cbe8, ui, 22);
             if pane != 0 {
                 let weapon = profile::equipment_weapon(ui + 3052);
-                SET_PREVIEW.with(|preview| *preview = Some((pane, weapon)));
+                SET_PREVIEW.with(|preview| *preview = Some((pane, slot, weapon)));
             }
         }
     }
@@ -295,7 +298,7 @@ unsafe fn load_set_preview(ui: u32, slot: u32) -> u32 {
 #[forge::hook(offset = 0x58a3dc)]
 unsafe fn init_set_label(ui: u32) -> u32 {
     SET_PREVIEW.with(|preview| {
-        if preview.is_some_and(|(pane, _)| pane == ui) {
+        if preview.is_some_and(|(pane, _, _)| pane == ui) {
             *preview = None;
         }
     });
@@ -307,10 +310,10 @@ unsafe fn draw_set_label(ui: u32) -> u32 {
     let out = original!(ui);
     let preview = SET_PREVIEW.with(|preview| *preview);
     unsafe {
-        if let Some((pane, weapon)) = preview
+        if let Some((pane, slot, weapon)) = preview
             && ui == pane
             && read::<u32>(ui, 76) < 6
-            && let Some(entry) = active(weapon)
+            && let Some(entry) = sets::preview(slot, weapon)
         {
             gu!(0x56ea08, ui, 0, 3, entry.name.as_ptr() as u32);
         }
@@ -323,7 +326,8 @@ unsafe fn draw_set_details(ui: u32, equipment: u32) -> u32 {
     let out = original!(ui, equipment);
     unsafe {
         if equipment != 0
-            && let Some(entry) = active(profile::equipment_weapon(equipment))
+            && let Some(slot) = DETAIL_SET.with(|current| *current)
+            && let Some(entry) = sets::preview(slot, profile::equipment_weapon(equipment))
         {
             let catalog: u32 = read(forge::mem::text_addr(), 0x1899220);
             let format = gu!(0x55bc4c, catalog, 1, 15);

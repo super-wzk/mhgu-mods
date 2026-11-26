@@ -13,16 +13,11 @@ const CONTACT_GROUP: Field<u32> = Field::at(136);
 const CONTACT_FLAGS: Field<u32> = Field::at(48);
 
 mod shapes;
-pub mod world;
 pub use shapes::{CachedHitShape, HitShape, ShapeGroup, ShapeGroups};
 
 #[derive(Clone, Copy)]
 pub struct Contact<'a>(pub(crate) Object<'a>);
 impl<'a> Contact<'a> {
-    pub(crate) fn add_flags(self, flags: u32) {
-        self.0.set(CONTACT_FLAGS, self.0.get(CONTACT_FLAGS) | flags);
-    }
-
     /// # Safety
     /// The callback must supply a live GU contact on its owning thread for the duration of 'a.
     pub unsafe fn from_raw(addr: u32) -> Option<Self> {

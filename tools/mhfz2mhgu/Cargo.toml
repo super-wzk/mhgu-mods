@@ -18,5 +18,4 @@ clap = { version = "4", features = ["derive"] }
 glam.workspace = true
 mhf-resource = { path = "crates/mhf-resource" }
 mhgu-resource = { path = "crates/mhgu-resource" }
-espinas-behavior = { path = "../../plugins/monster-espinas/behavior" }
 lewton = "0.10"

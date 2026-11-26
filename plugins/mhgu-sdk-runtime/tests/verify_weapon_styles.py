@@ -8,8 +8,9 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "plugins/great-sword-extreme/tests"))
 from verify_native_fx import binding_stack
 from verify_style import (
+    character_save,
     ENCODE, GAME_STYLE, INIT_HUNTER, MANAGER, PROVIDER, SUBMIT_MODEL, api_for, boot, hunters,
-    load_registered_style, service, setup_controller,
+    load_registered_style, select_character, service, setup_controller,
 )
 
 
@@ -66,7 +67,7 @@ def verify_effects(g, nx, tag):
 
 
 def replay_style(repo, elf, name, weapon_id, style, hunter_vtable, clip, tag, audio, shapes, hud):
-    config = f"[Weapons]\n{weapon_id}={style}\n".encode()
+    config = character_save({weapon_id: style})
     g = boot(elf, config, ("registry",))
     plugin = name + "-extreme"
     nx = repo / "plugins" / plugin / "dist" / plugin / "romfs/nativeNX"
@@ -287,7 +288,7 @@ def check_case_coverage(repo):
 
 
 def replay_load_order(repo, elf):
-    config = b"[Weapons]\n" + b"".join(f"{weapon}={style}\n".encode() for _, weapon, style, *_ in CASES)
+    config = character_save({weapon: style for _, weapon, style, *_ in CASES})
     modules = [PROVIDER]
     for name, *_ in CASES:
         mod = name + "-extreme"
@@ -300,6 +301,7 @@ def replay_load_order(repo, elf):
             for callback in ("forge_onLoad", "forge_onInit"):
                 g.run(exports[callback], MANAGER)
         _, selected = service(g)
+        select_character(g, 0)
         found = [name for name, weapon, style, *_ in CASES if g.run(selected, weapon) == style]
         assert len(found) == len(CASES), found
     print("All six weapon styles registered in filename order and with the registry last.")

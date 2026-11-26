@@ -18,6 +18,7 @@ mod menu;
 mod multiplayer;
 mod physical;
 mod profile;
+mod sets;
 mod weapon;
 mod world_contact;
 use mhgu_sdk::style::{
@@ -46,9 +47,19 @@ struct Entry {
 
 // Published entries live until exit. Omitted and native preferences skip the list.
 static HEAD: AtomicPtr<Entry> = AtomicPtr::new(ptr::null_mut());
-const UNSPECIFIED: u32 = u32::MAX;
-static REQUESTED: [AtomicU32; crate::config::WEAPONS] =
-    [const { AtomicU32::new(UNSPECIFIED) }; crate::config::WEAPONS];
+static PREFERENCES: mhgu_sdk::sync::Shared<crate::save::Styles> =
+    mhgu_sdk::sync::Shared::new(crate::save::Styles {
+        weapons: [None; crate::save::WEAPONS],
+        equipment_sets: alloc::collections::BTreeMap::new(),
+    });
+
+pub(super) fn load_character(styles: crate::save::Styles) {
+    PREFERENCES.with(|current| *current = styles);
+}
+
+pub(super) fn snapshot() -> crate::save::Styles {
+    PREFERENCES.with(|current| current.clone())
+}
 
 unsafe extern "C" fn register(
     raw: *const Style,
@@ -58,8 +69,8 @@ unsafe extern "C" fn register(
     let Some(style) = (unsafe { raw.as_ref() }) else {
         return 1;
     };
-    if crate::config::custom_id(style.id).is_none()
-        || style.weapon as usize >= REQUESTED.len()
+    if crate::save::custom_id(style.id).is_none()
+        || style.weapon as usize >= crate::save::WEAPONS
         || style.art_slots > 3
     {
         return 1;
@@ -124,26 +135,21 @@ fn entries(weapon: u32) -> impl Iterator<Item = &'static Entry> {
 }
 
 fn choose(weapon: u32, entry: Option<&Entry>) {
-    let weapon = weapon as usize;
-    let Some(requested) = REQUESTED.get(weapon) else {
-        return;
-    };
-    let id = entry.map_or(0, |e| e.style.id);
-    let previous = requested.swap(id, Ordering::AcqRel);
-    if previous != id && (id != 0 || previous != UNSPECIFIED) {
+    let id = entry.and_then(|entry| crate::save::custom_id(entry.style.id));
+    let changed = PREFERENCES.with(|prefs| {
+        prefs
+            .weapons
+            .get_mut(weapon as usize)
+            .is_some_and(|current| core::mem::replace(current, id) != id)
+    });
+    if changed {
         profile::selection_changed();
-    }
-    let selection =
-        core::array::from_fn(|i| u16::try_from(REQUESTED[i].load(Ordering::Acquire)).ok());
-    if !crate::config::save(selection) {
-        forge::log::prelude::warn!("Could not save the style selection for weapon {}", weapon);
     }
 }
 
 fn active(weapon: u32) -> Option<&'static Entry> {
-    let id = REQUESTED.get(weapon as usize)?.load(Ordering::Acquire);
-    crate::config::custom_id(id)?;
-    entries(weapon).find(|entry| entry.style.id == id)
+    let id = PREFERENCES.with(|prefs| prefs.weapons.get(weapon as usize).copied().flatten())?;
+    entries(weapon).find(|entry| entry.style.id == u32::from(id))
 }
 
 extern "C" fn selected(weapon: u32) -> u32 {
@@ -555,9 +561,6 @@ pub(super) fn install(base: u32) {
     if !unsafe { registry::publish(&API) } {
         return;
     }
-    for (requested, id) in REQUESTED.iter().zip(crate::config::load()) {
-        requested.store(id.map_or(UNSPECIFIED, u32::from), Ordering::Release);
-    }
     static RULES: rules::Service = rules::Service(bind_rules);
     unsafe { rules::publish(&RULES) };
     archive::install(base);
@@ -587,5 +590,6 @@ pub(super) fn install(base: u32) {
     weapon::install(base);
     menu::install(base);
     profile::install(base);
+    sets::install(base);
     manual::install(base);
 }

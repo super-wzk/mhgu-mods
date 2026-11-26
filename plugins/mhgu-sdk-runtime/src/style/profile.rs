@@ -52,7 +52,7 @@ pub(super) unsafe fn status_entry(equipment: u32) -> Option<&'static Entry> {
             return active(weapon);
         }
         let actor = local_hunter();
-        if actor != 0 && equipment == read(actor + 5060) {
+        if actor != 0 && equipment == read::<u32>(actor + 5060) {
             return active(weapon);
         }
 

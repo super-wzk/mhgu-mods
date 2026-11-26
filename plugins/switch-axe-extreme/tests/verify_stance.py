@@ -6,6 +6,7 @@ import zlib
 from unicorn import arm_const as arm
 
 from verify_style import (
+    character_save,
     BLOCK, CHANGE_ACTION, COMMAND_BIND, COMMAND_UPDATE, DISPATCH, ENCODE, WEAPON_DISPATCH,
     boot, hunters, load_registered_style,
     quest_entries, setup_controller,
@@ -144,7 +145,7 @@ def roll_chains(g, actor, set_action, form):
 
 
 def replay(repo, root):
-    g = boot((repo / "mhgu/main.elf").read_bytes(), b"[Weapons]\n8=13\n", ("registry",))
+    g = boot((repo / "mhgu/main.elf").read_bytes(), character_save({8: 13}), ("registry",))
     plugin = root / "dist/switch-axe-extreme/romfs/nativeNX/plugins/switch_axe_extreme.nro"
     desc = load_registered_style(g, plugin)
     actor, eq, _ = hunters(g)

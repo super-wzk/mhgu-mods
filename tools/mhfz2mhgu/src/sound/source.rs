@@ -144,7 +144,7 @@ impl Bank {
                     + i16::from(sample[9] as i8);
                 ensure!(
                     voices.insert(cue, Voice { wave, gain, cents }).is_none(),
-                    "layered Espinas voice"
+                    "layered Frontier voice"
                 );
             }
         }

@@ -3,17 +3,29 @@ from collections import Counter
 from pathlib import Path
 import struct
 import sys
+import zlib
 
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
 from package_weapon_styles import KINDS, PLUGINS, RELEASE_DIR, REPO, WEAPONS
 
 sys.path.insert(0, str(PLUGINS / "great-sword-extreme/tests"))
-sys.path.insert(0, str(PLUGINS / "monster-espinas/tests"))
 sys.path.insert(0, str(PLUGINS / "mhgu-sdk-runtime/tests"))
-from game_files import assets
-from verify_espinas_quest import SDK_NRO
+from gu_replay import SDK_NRO
 from verify_style import boot
+
+def assets(path):
+    b = path.read_bytes()
+    assert b[:6] == b"ARC\0\x11\0"
+    result = {}
+    for i in range(struct.unpack_from("<H", b, 6)[0]):
+        name, k, cs, ds, p = struct.unpack_from("<64s4I", b, 12 + 80 * i)
+        key = name.rstrip(b"\0").decode(), k
+        v = zlib.decompress(b[p : p + cs])
+        assert len(v) == ds & 0x1FFFFFFF and key not in result
+        result[key] = v
+    return result
+
 
 LOAD = 0xBCAD18
 PARSE = 0xB39F58
@@ -87,7 +99,7 @@ def verify_payloads(release):
 
 def verify_hooks():
     elf = (REPO / "mhgu/main.elf").read_bytes()
-    g = boot(elf, b"[Weapons]\n", ("registry",))
+    g = boot(elf, None, ("registry",))
     manager = g.alloc(32)
     archive_class = 0x2124DF0
     calls = []
@@ -147,7 +159,7 @@ def verify_native_directory(release):
     # largest private bundle. The child-loading callback substitutes resource
     # creation and GPU/audio services, retaining the native directory order.
     elf = (REPO / "mhgu/main.elf").read_bytes()
-    g = boot(elf, b"[Weapons]\n", ("registry",))
+    g = boot(elf, None, ("registry",))
     heap, heap_vt = g.alloc(4), g.alloc(56)
     g.put(heap, heap_vt)
     g.put(0x18A6308, heap)

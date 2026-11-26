@@ -9,7 +9,7 @@ from verify_style import quest_arc
 
 
 def replay():
-    g = boot((REPO / "mhgu/main.elf").read_bytes(), b"[Weapons]\n", ("registry",))
+    g = boot((REPO / "mhgu/main.elf").read_bytes(), None, ("registry",))
     load_registered_style(g, NX / "plugins/long_sword_extreme.nro")
     w07 = 0x174CF64
 

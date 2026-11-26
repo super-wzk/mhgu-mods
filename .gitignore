@@ -10,3 +10,6 @@ __pycache__/
 /plugins/style-registry/style_registry.nro
 /plugins/monster-registry/dist/
 /plugins/monster-registry/monster_registry.nro
+
+/plugins/monster-espinas/dist/
+/plugins/monster-espinas/monster_espinas.nro

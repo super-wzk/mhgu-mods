@@ -6,12 +6,12 @@ import sys
 PLUGINS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PLUGINS / "great-sword-extreme/tests"))
 from unicorn.arm_const import UC_ARM_REG_S0
-from verify_style import STYLE_IDS, DECODE, DISPATCH, ENCODE, boot, hunters, load_registered_style, setup_controller
+from verify_style import character_save, STYLE_IDS, DECODE, DISPATCH, ENCODE, boot, hunters, load_registered_style, setup_controller
 
 
 def replay(weapon, plugin, vt, sprint=None, recoveries=()):
     elf = (PLUGINS.parent / "mhgu/main.elf").read_bytes()
-    g = boot(elf, f"[Weapons]\n{weapon}={STYLE_IDS[plugin]}\n".encode(), ("registry",))
+    g = boot(elf, character_save({weapon: STYLE_IDS[plugin]}), ("registry",))
     dist = PLUGINS / plugin / "dist" / plugin / "romfs/nativeNX"
     desc = load_registered_style(g, dist / "plugins" / (plugin.replace("-", "_") + ".nro"))
     actor, eq, _ = hunters(g)
