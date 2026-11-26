@@ -73,8 +73,18 @@ def verify_payloads(release, *, include_magnet_spike=False):
         refs = material_refs(resources[model, KINDS[".mrl"]])
         assert len(refs) == 2 and all((ref, KINDS[".tex"]) in resources for ref in refs)
         motion_keys = [key for key in resources if key[1] == KINDS[".lmt"]]
-        visual_keys = [key for key in resources if key[1] != KINDS[".lmt"]]
+        visual_keys = [key for key in resources if key[1] in
+                       (KINDS[".mod"], KINDS[".mrl"], KINDS[".tex"])]
         assert visual_keys[-2:] == [(model, KINDS[".mrl"]), (model, KINDS[".mod"])]
+        anchors = [(0x4005, 0x4007), (0x4004,), (0x4005, 0x4007), (0x4004,)] + [(255,)] * 4
+        for selector, joints in enumerate(anchors, 1):
+            hts = resources[rf"player\hit\frontier_ms\melee_{selector}", KINDS[".hts"]]
+            assert hts[:4] == b"HTS\0"
+            assert struct.unpack_from("<3I", hts, 8) == (1, 0, len(joints))
+            assert struct.unpack_from("<I", hts, 20) == (24,)
+            assert len(hts) == 24 + 48 * len(joints)
+            for i, joint in enumerate(joints):
+                assert struct.unpack_from("<3H", hts, 24 + 48 * i) == (joint, 0, 1)
         expected = {rf"player\mot\frontier_ms\{g}": (128 + n, None)
                     for g, n in ((0, 85), (2, 25), (4, 100))}
         expected.update({rf"weapon\frontier\magnet_spike\mot\{g}": (n, live)

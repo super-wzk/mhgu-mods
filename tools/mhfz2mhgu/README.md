@@ -16,4 +16,4 @@ cargo test --workspace --manifest-path tools/mhfz2mhgu/Cargo.toml
 
 `magnet-spike-icon "$MHFZ_DAT" -o OUTPUT.tex` 从本地 MHF-Z 的 `mhf.bin` 原版武器图集读取磁斩锤图标，保留 64×64 像素和透明度，编码为 GU TEX。
 
-`magnet-spike-battle "$MHFZ_DAT" -o OUTPUT_DIR` 将 `motion/w13.mot` 的猎人动作和 `motion/w13w.mot` 的武器部件动作写入 `motions.arc`。部件按 `wk451.bin` 中的 11 骨骼模型转换，保留源槽位、空槽和循环起点。传入 `--material-template` 时，输出包含模型、材质、贴图和动作的 `magnet_spike.arc`。`magnet_spike.fmsa` 包含 `mhfdat.bin` 中的 165 个动作状态及 `mhfsdt.bin` 中判定族 120、121 的记录与形状。`MSHT` 段按选择器保留完整的原始形状列表，`MSPR` 段保存武器参数和状态形态分类。
+`magnet-spike-battle "$MHFZ_DAT" -o OUTPUT_DIR` 将 `motion/w13.mot` 的猎人动作、`motion/w13w.mot` 的武器部件动作与近战 HTS 写入 `motions.arc`。部件按 `wk451.bin` 中的 11 骨骼模型转换，保留源槽位、空槽和循环起点。近战 HTS 对应判定族 120 的选择器 1 至 8，保留胶囊的半径、端点和挂点。传入 `--material-template` 时，输出同时包含模型、材质和贴图，文件名为 `magnet_spike.arc`。`magnet_spike.fmsa` 包含 `mhfdat.bin` 中的 165 个动作状态及 `mhfsdt.bin` 中判定族 120、121 的记录与形状。`MSHT` 段按选择器保留完整的原始形状列表，`MSPR` 段保存武器参数和状态形态分类。

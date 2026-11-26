@@ -94,8 +94,28 @@ unsafe fn bind(part: u32, args: *const [u32; 10]) -> u32 {
     }
 }
 
+#[forge::hook(offset = 0x53aad8)]
+unsafe fn hit_joint(actor: u32, joint: i32) -> u32 {
+    if !(0x4000..0x40ff).contains(&joint) {
+        return original!(actor, joint);
+    }
+    unsafe {
+        // HTS primary weapon joints are in a separate namespace from the
+        // hunter skeleton. Only the geometry lookup changes owners.
+        if actor == 0 || !hunter::is_quest(actor) {
+            return 0;
+        }
+        let part = read(actor + 9120);
+        if part == 0 || read(part + 48) != actor || read(part + 240) == 0 {
+            return 0;
+        }
+        mhgu_sdk::weapon::style::particle::joint_matrix(part, joint as u32 & 0xff).unwrap_or(0)
+    }
+}
+
 pub(super) fn install(base: u32) {
     forge::install_hook!(base, bind);
     forge::install_hook!(base, update_preview_weapon);
+    forge::install_hook!(base, hit_joint);
     part_motion::install(base);
 }

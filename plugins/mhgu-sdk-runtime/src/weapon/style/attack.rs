@@ -2,7 +2,10 @@ use core::{
     ptr,
     sync::atomic::{AtomicPtr, Ordering},
 };
-use mhgu_sdk::weapon::style::action::{self, Attack, melee::BLADE_CONTACT_OFFSETS};
+use mhgu_sdk::weapon::style::action::{
+    self, Attack,
+    melee::{self, BLADE_CONTACT_OFFSETS, Strike},
+};
 
 struct HitData {
     actor: u32,
@@ -23,42 +26,87 @@ unsafe fn weapon_row(actor: u32, index: u32) -> u32 {
 }
 
 pub(super) unsafe extern "C" fn submit(actor: u32, attack: *const Attack) -> u32 {
-    unsafe { submit_row(actor, attack, None) }
+    unsafe { submit_row(actor, attack, None, None) }
 }
 
 unsafe extern "C" fn submit_stun(actor: u32, attack: *const Attack, stun: u8) -> u32 {
-    unsafe { submit_row(actor, attack, Some(stun)) }
+    unsafe { submit_row(actor, attack, Some(stun), None) }
 }
 
-unsafe fn submit_row(actor: u32, attack: *const Attack, stun: Option<u8>) -> u32 {
+unsafe extern "C" fn submit_melee(actor: u32, strike: *const Strike, shape: u32) -> u32 {
+    let Some(strike) = (unsafe { strike.as_ref() }) else {
+        return 0;
+    };
+    if shape == 0
+        || !strike.delay.is_finite()
+        || strike.delay < 0.
+        || !strike.duration.is_finite()
+        || strike.duration <= 0.
+    {
+        return 0;
+    }
+    // GU's 56-byte HDP data for a basic player melee contact.
+    let mut row = [0u32; 14];
+    row[2] = 1 | (30 << 16);
+    row[3] = strike.damage as u32;
+    row[4] = 2;
+    row[8] = 255 << 24; // No repeating hit interval.
+    row[9] = 255 | (u32::from(strike.hitstop) << 8);
+    row[10] = 1f32.to_bits();
+    row[11] = 1f32.to_bits();
+    row[12] = u32::from(strike.power);
+    let attack = Attack {
+        template: 0,
+        power: strike.power,
+        delay: strike.delay,
+        duration: strike.duration,
+        // Bits 1 and 2 apply weapon attributes and critical hits. Bit 0
+        // also applies retail spirit and shield-strengthening modifiers.
+        flags: (Attack::WEAPON_MODIFIERS & !1) | Attack::PUNISHING_DRAW,
+        shape,
+        no_sharpness_cost: 0,
+    };
+    let stun = (strike.stun != 0).then_some(strike.stun);
+    unsafe { submit_row(actor, &attack, stun, Some(row)) }
+}
+
+unsafe fn submit_row(
+    actor: u32,
+    attack: *const Attack,
+    stun: Option<u8>,
+    registered: Option<[u32; 14]>,
+) -> u32 {
     unsafe {
         let Some(attack) = attack.as_ref() else {
             return 0;
         };
+        // The public strike API accepts identities. Validate membership
+        // against the live local hunter or peer roster before reading actor.
         let Some(style) = super::playback_style(actor) else {
             return 0;
         };
         let (group, slot) = action::current(actor);
-        if !action::custom(group, slot) {
+        if !action::custom(group, slot) || registered.is_some() && !style.independent {
             return 0;
         }
         let hit_shape = (actor + 12700) as *mut u32;
         let shape = hit_shape.read();
-        if shape == 0 {
+        if shape == 0 && registered.is_none() {
             return 0;
         }
         let index = u32::from(attack.template);
         let base = forge::mem::text_addr();
-        let lookup: unsafe extern "C" fn(u32, u32) -> *const [u32; 14] =
-            core::mem::transmute(base + 0x2a8a88);
-        let Some(original) = lookup(actor, index).as_ref() else {
-            return 0;
+        let row = if let Some(row) = registered {
+            row
+        } else {
+            let lookup: unsafe extern "C" fn(u32, u32) -> *const [u32; 14] =
+                core::mem::transmute(base + 0x2a8a88);
+            let Some(original) = lookup(actor, index).as_ref() else {
+                return 0;
+            };
+            *original
         };
-        let mut data = HitData {
-            actor,
-            index,
-            row: *original,
-        };
+        let mut data = HitData { actor, index, row };
         // The event has already reached the registered motion frame.
         // Feed power to the constructor before GU applies weapon modifiers.
         data.row[0] = 1 << 16;
@@ -91,8 +139,21 @@ unsafe fn submit_row(actor: u32, attack: *const Attack, stun: Option<u8>) -> u32
             data.row[8] &= !0xff;
             hit_shape.write(attack.shape);
         }
-        let previous = HIT_DATA.swap(ptr::from_mut(&mut data), Ordering::AcqRel);
-        let hand = usize::from(attack.flags & Attack::SECONDARY != 0);
+        let hand = if registered.is_some() {
+            let decode: unsafe extern "C" fn(u32) -> u32 = core::mem::transmute(base + 0x53a058);
+            let motion = decode(actor);
+            BLADE_CONTACT_OFFSETS
+                .iter()
+                .position(|offset| {
+                    let hit = actor + offset;
+                    ((hit + 5) as *const u8).read() == 0
+                        || ((hit + 96) as *const f32).read() <= 0.
+                        || ((hit + 116) as *const u32).read() != motion
+                })
+                .unwrap_or(0)
+        } else {
+            usize::from(attack.flags & Attack::SECONDARY != 0)
+        };
         let hit = actor + BLADE_CONTACT_OFFSETS[hand];
         let draw_ko_flags = if attack.flags & Attack::PUNISHING_DRAW != 0 {
             Attack::DRAW_KO_MASK
@@ -108,6 +169,7 @@ unsafe fn submit_row(actor: u32, attack: *const Attack, stun: Option<u8>) -> u32
         if draw {
             flags |= 0x10;
         }
+        let previous = HIT_DATA.swap(ptr::from_mut(&mut data), Ordering::AcqRel);
         super::routes::strike(actor, style, flags, |flags| {
             // 2B7240 supplies a fixed flags-table row to the same constructor
             // and weapon virtual. A style attack can specify its own flags.
@@ -123,12 +185,22 @@ unsafe fn submit_row(actor: u32, attack: *const Attack, stun: Option<u8>) -> u32
                 let hit_flags = (hit + 48) as *mut u32;
                 hit_flags.write(hit_flags.read() | 0x08000000);
             }
-            let vtable = (actor as *const *const u32).read();
-            let adjust = vtable.add(1992 / 4).read();
-            if adjust != 0 {
-                let adjust: unsafe extern "C" fn(u32, u32, u32, u32, u32) -> u32 =
-                    core::mem::transmute(adjust);
-                adjust(actor, hit, 1, index, flags);
+            if let Some(row) = registered {
+                // 168960 treats factor 1 as zero. Explicit Frontier hitstop
+                // retains the authored factor, as in Attack::submit_with_hitstop.
+                ((hit + 108) as *mut u8).write((row[9] >> 8) as u8);
+                // 169548 reads the computed melee attack only with bit 0x20.
+                // Set it after 2B76CC, without enabling retail weapon bonuses.
+                let hit_flags = (hit + 48) as *mut u32;
+                hit_flags.write(hit_flags.read() & !0x800 | 0x20);
+            } else {
+                let vtable = (actor as *const *const u32).read();
+                let adjust = vtable.add(1992 / 4).read();
+                if adjust != 0 {
+                    let adjust: unsafe extern "C" fn(u32, u32, u32, u32, u32) -> u32 =
+                        core::mem::transmute(adjust);
+                    adjust(actor, hit, 1, index, flags);
+                }
             }
         });
         // Recoil decisions belong to the sender. A remote swing must not
@@ -145,6 +217,8 @@ unsafe fn submit_row(actor: u32, attack: *const Attack, stun: Option<u8>) -> u32
 pub(super) fn install(base: u32) {
     use mhgu_sdk::weapon::style::action::stun;
     static SERVICE: stun::Service = stun::Service(submit_stun);
+    static MELEE: melee::StrikeService = melee::StrikeService(submit_melee);
     unsafe { stun::publish(&SERVICE) };
+    unsafe { melee::publish_strike(&MELEE) };
     forge::install_hook!(base, weapon_row);
 }

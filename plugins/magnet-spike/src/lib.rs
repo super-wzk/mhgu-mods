@@ -2,6 +2,7 @@
 #![no_std]
 
 mod battle;
+mod combat;
 mod motion;
 mod program;
 

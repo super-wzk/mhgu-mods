@@ -1,12 +1,14 @@
 """Replay the packaged Magnet Spike through GU's normal hunter dispatcher."""
 
 import json
+import math
 import struct
 import sys
 
 from unicorn.arm_const import UC_ARM_REG_S0, UC_ARM_REG_S1
 
 from verify_magnet_spike import PLUGIN, REPO
+from damage_target import damage_target
 from verify_style import (
     CHANGE_ACTION, DECODE, DISPATCH, ENCODE, INIT_HUNTER, MANAGER, SAVE,
     WEAPON_DISPATCH, boot, character_save, select_character, setup_controller,
@@ -160,9 +162,27 @@ def replay():
     # slot headers and rebase the pointers as GU does while loading rMotionList.
     g.put(actor + 5060, equipment)
     resources = assets(PLUGIN.parents[1] / "arc/frontier/magnet_spike.arc")
-    res_manager, res_vtable, load = (g.alloc(n) for n in (128, 52, 4))
+    shapes = {}
+    for address in (0x7AF37C, 0x7AF3A0):
+        g.stub(address, g.alloc)
+    getter = g.alloc(4)
+    g.stub(getter, lambda shape, index, *_: g.get(g.get(shape + 104) + 4 * index))
+    for (name, kind), data in resources.items():
+        if kind != 0x5653C1B0:
+            continue
+        obj, raw, vt = (g.alloc(n) for n in (112, len(data), 72))
+        g.cpu.mem_write(raw, data)
+        g.put(obj, vt)
+        g.put(vt + 68, getter)
+        g.put(obj + 80, 1)
+        g.put(obj + 100, raw)
+        assert g.run(0x16A1D8, obj) == 1
+        shapes[name] = obj
+    res_manager, res_vtable, load, release = (g.alloc(n) for n in (128, 64, 4, 4))
     g.put(res_manager, res_vtable)
     g.put(res_vtable + 48, load)
+    g.put(res_vtable + 60, release)
+    g.stub(release, lambda *_: 0)  # Fixture resources live through the replay.
     g.put(0x2126A64, res_manager)
     paths = []
 
@@ -170,6 +190,8 @@ def replay():
         assert flags == 1
         name = g.string(path)
         paths.append(name)
+        if kind == 0x1857810:
+            return shapes[name]
         obj = g.alloc(176)
         g.put(obj + 80, 1)
         if kind == 0x2124DF0:
@@ -194,7 +216,9 @@ def replay():
     g.stub(load, resource)
     g.stub(g.originals[INIT_HUNTER], lambda *_: 7)
     assert g.run(g.hooks[INIT_HUNTER], actor) == 7
-    assert paths == [r"arc\frontier\magnet_spike"] + [rf"player\mot\frontier_ms\{g}" for g in (0, 2, 4)]
+    assert paths == ([r"arc\frontier\magnet_spike"]
+                     + [rf"player\mot\frontier_ms\{g}" for g in (0, 2, 4)]
+                     + [rf"player\hit\frontier_ms\melee_{i}" for i in range(1, 9)])
     packed = g.run(ENCODE, actor, PRIVATE | 1440)
     assert packed & 255 == 40 and g.run(DECODE, actor, packed) == PRIVATE | 1440
 
@@ -235,8 +259,104 @@ def replay():
     g.cpu.mem_write(actor + 1280, struct.pack("<f", 100.))
     g.run(update_part, part, actor, WEAPON)
     assert tracks[-1] == (0, 35, 2., 61.), tracks
+    verify_melee(g, actor, vtable, part, shapes, set_action, tick)
+
+
+def verify_melee(g, actor, vtable, part, shapes, set_action, tick):
+    def byte(address):
+        return g.cpu.mem_read(address, 1)[0]
+
+    # Keep the native HDP constructor and collision expansion. Supply the
+    # matrices GU would have evaluated from the two moving blade joints.
+    monster, status, _, _, collision, credit = damage_target(g, vtable)
+    dti = g.run(g.get(vtable + 20))
+    g.put(0x1898674, g.get(dti + 4))
+    g.stub(0x13EFDC4, lambda ptr, size, *_: g.cpu.mem_write(ptr, bytes(size)))
+    for address in (0x2AD288, 0x27B918, g.get(vtable + 348), g.get(vtable + 508)):
+        g.stub(address, lambda *_: 0)
+    for address, fn in ((0x13EFDE8, math.sin), (0x13EFDF4, math.cos)):
+        def trig(*_, fn=fn):
+            angle, = struct.unpack("<f", struct.pack("<I", g.cpu.reg_read(UC_ARM_REG_S0)))
+            bits, = struct.unpack("<I", struct.pack("<f", fn(angle)))
+            g.cpu.reg_write(UC_ARM_REG_S0, bits)
+        g.stub(address, trig)
+
+    mapping, matrices = g.alloc(256), g.alloc(3 * 160)
+    g.put(part + 1172, matrices)
+    g.put(part + 1176, mapping)
+    joints = bytearray([255] * 256)
+    joints[4], joints[5], joints[7] = 0, 1, 2
+    g.cpu.mem_write(mapping, bytes(joints))
+    rotation = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0)
+    for i, x in enumerate((60., 100., 240.)):
+        g.cpu.mem_write(matrices + 16 + i * 160, struct.pack("<16f", *rotation, x, 90., 120., 1.))
+    hit, second = actor + 12320, actor + 12504
+    for contact in (hit, second):
+        g.run(0x1687A8, contact)
+    assert g.get(actor + 12696) == g.get(actor + 12700) == 0
+    set_action(1, 0)
+    g.cpu.mem_write(actor + 10057, b"\0")
+    tick(X, native_pad=True)
+    assert g.half(actor + 9482) == 0x8000 + 78
+    tick(frame=60., ended=True)
+    assert g.half(actor + 9482) == 0x8000 + 78
+    tick(frame=39.)
+    assert byte(hit + 5) == 0
+    tick(frame=42.)
+    assert byte(hit + 5) == 1 and g.get(hit + 12) == g.get(hit + 112) == actor
+    actual = g.half(hit + 56), byte(hit + 86), byte(hit + 108)
+    assert actual == (43, 0, 1), actual
+    assert struct.unpack("<2f", g.cpu.mem_read(hit + 92, 8)) == (0., 12.)
+    assert g.get(hit + 132) == shapes[r"player\hit\frontier_ms\melee_1"]
+    assert g.get(actor + 12700) == 0
+    serial = g.half(hit + 52)
+    tick(frame=42.)
+    assert g.half(hit + 52) == serial and byte(second + 5) == 0
+
+    for x in (240., 300.):
+        g.cpu.mem_write(matrices + 2 * 160 + 64, struct.pack("<f", x))
+        g.put(collision + 10288, 0)
+        assert g.run(0x1696FC, hit) == 2
+        first = struct.unpack("<B3x7f", g.cpu.mem_read(collision + 8240, 32))
+        other = struct.unpack("<B3x7f", g.cpu.mem_read(collision + 8272, 32))
+        assert first == (2, 50., 60., 90., 120., 100., 90., 300.), first
+        assert other == (2, 50., x + 40., 90., 120., x, 90., 300.), other
+
+    # 169548 must scale by the effective melee attack from the equipment
+    # calculation. It would otherwise return a constant 1.0.
+    equipment = g.get(actor + 5060)
+    g.cpu.mem_write(equipment + 800, struct.pack("<h", 150))
+    g.run(0x169548, hit)
+    assert struct.unpack("<f", struct.pack("<I", g.cpu.reg_read(UC_ARM_REG_S0))) == (1.5,)
+    xyz = g.cpu.mem_read(collision + 8248, 12)
+    g.cpu.mem_write(collision + 28, struct.pack("<B3xf", 1, 2.) + bytes(xyz))
+    g.run(0x16C0C0, collision, hit, monster)
+    damage = g.half(status + 1160)
+    assert damage > 0 and credit[-1] == (0, 0, damage), credit
+    g.run(0x97DDC, monster)
+    assert g.get(status + 880) == 1000 - damage
+
+    # The scene clock advances by two frames at playback speed 1.0.
+    g.cpu.mem_write(actor + 1292, struct.pack("<f", 1.))
+    for _ in range(6):
+        g.run(0x16919C, hit)
+        assert byte(hit + 5) == 1
+    g.run(0x16919C, hit)
+    assert byte(hit + 5) == 0
+    set_action(1, 0)
+    tick(0x1000, native_pad=True)
+    tick(frame=99., ended=True)
+    tick(X | A, native_pad=True)
+    assert g.half(actor + 9482) == 0x8000 + 26
+    tick(frame=120., ended=True)
+    tick(frame=88.)
+    tick(frame=102.)
+    assert (g.half(hit + 56), g.half(second + 56)) == (96, 121)
+    assert (byte(hit + 86), byte(second + 86)) == (50, 65)
+    assert g.get(hit + 64) & 3 == g.get(second + 64) & 3 == 1
+    assert g.half(hit + 52) != g.half(second + 52)
 
 
 if __name__ == "__main__":
     replay()
-    print("Magnet Spike native dispatch: draw, buffered slash, mode, fallback isolation and part playback passed")
+    print("Magnet Spike: dispatch, part playback, compound melee, overlap and GU damage passed")

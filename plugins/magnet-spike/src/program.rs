@@ -39,6 +39,14 @@ pub fn step(state: u8, index: u8) -> Option<Step> {
     Step::read(records(state, 0, 12), index)
 }
 
+pub fn melee_row(id: u16) -> Option<&'static [u8; 40]> {
+    if usize::from(id) >= word(8) {
+        return None;
+    }
+    let at = word(12) + usize::from(id) * 40;
+    DATA[at..at + 40].try_into().ok()
+}
+
 pub fn step_complete(step: Step, time: Time, sample: MotionFrame, wrapped: bool) -> bool {
     // FZ 81815D60 gates op 4 on the cycle count and 817332B0's frame check.
     if step.op == 4 && step.loops != 0 {

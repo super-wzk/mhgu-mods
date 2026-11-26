@@ -59,6 +59,7 @@ pub unsafe extern "C" fn preload(_actor: u32) {
     for clip in [1002, 1201, 1440] {
         unsafe { BANKS.preload(clip) };
     }
+    unsafe { crate::combat::preload() };
 }
 
 pub unsafe extern "C" fn encode(actor: u32, request: u32) -> u32 {

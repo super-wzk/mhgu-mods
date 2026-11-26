@@ -1,5 +1,6 @@
 //! GU blade contacts and the style registry's deflection service.
 use crate::{
+    combat::collision::HitShape,
     memory::{Field, Object},
     service,
 };
@@ -9,6 +10,48 @@ pub const BLADE_CONTACT_OFFSETS: [u32; 2] = [12320, 12504];
 
 const FULL_HITSTOP: u32 = 10156;
 const SLOW_HITSTOP: u32 = 10160;
+
+#[repr(u8)]
+#[derive(Clone, Copy)]
+pub enum DamageKind {
+    Slash = 2,
+    Impact = 1,
+}
+
+/// A melee strike authored for an independent weapon.
+#[repr(C)]
+pub struct Strike {
+    pub delay: f32,
+    pub duration: f32,
+    pub power: u16,
+    pub damage: DamageKind,
+    pub stun: u8,
+    pub hitstop: u8,
+}
+
+impl Strike {
+    /// Submit a compound shape through GU's hit constructor.
+    /// The game-thread service validates the hunter identity and current weapon action.
+    pub fn submit(&self, actor: u32, shape: &HitShape) -> bool {
+        service::on_game_thread()
+            && unsafe { service::find::<StrikeService>(STRIKE, STRIKE_MAGIC) }
+                .is_some_and(|api| unsafe { (api.0)(actor, self, shape.as_raw()) != 0 })
+    }
+}
+
+const STRIKE: &core::ffi::CStr = c"mhgu::IndependentMeleeV1";
+const STRIKE_MAGIC: u32 = u32::from_le_bytes(*b"IML1");
+
+#[doc(hidden)]
+#[repr(C)]
+pub struct StrikeService(pub unsafe extern "C" fn(u32, *const Strike, u32) -> u32);
+
+/// # Safety
+/// Publish once at registry initialization on GU's game thread.
+#[doc(hidden)]
+pub unsafe fn publish_strike(api: &'static StrikeService) -> bool {
+    unsafe { service::publish(STRIKE, STRIKE_MAGIC, api) }
+}
 
 /// Whether GU's full-stop or slow-hit timer is active (29BEF4).
 ///

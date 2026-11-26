@@ -205,6 +205,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         DISPATCH,
         WEAPON_DISPATCH,
         HIT_ROW,
+        0x53AAD8,
         0x169548,
     } | PROFILE_HOOKS | SET_STYLE_HOOKS
     g.originals = {}
@@ -248,6 +249,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             DISPATCH,
             INIT_HUNTER,
             0x3078B8,  # Registered weapon part tracks after native attachment.
+            0x53AAD8,  # Registered weapon part joints in native HTS.
             0xBCAD18, 0xB39F58,  # Private release ARC lookup and dependency order.
             WEAPON_DISPATCH,
             HIT_ROW,

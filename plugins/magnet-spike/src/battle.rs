@@ -1,4 +1,4 @@
-use crate::{motion, program};
+use crate::{combat, motion, program};
 use mhfz_sdk::action::Cursor;
 use mhgu_sdk::{
     sync::Shared,
@@ -69,10 +69,13 @@ impl Battle {
     }
 
     unsafe fn events(actor: u32, cursor: &mut Cursor) {
-        while let Some((event, value, _late)) = cursor.next_event() {
-            if event == 2 {
+        while let Some((event, value, late)) = cursor.next_event() {
+            match event {
                 // FZ 81225C5C writes the drawn byte used by 8121DA12.
-                unsafe { action::set_weapon_drawn(actor, value != 0) };
+                2 => unsafe { action::set_weapon_drawn(actor, value != 0) },
+                // FZ 81225C60 spawns a single family-120 contact.
+                3 => unsafe { combat::strike(actor, value, cursor.time.frame, late) },
+                _ => {}
             }
         }
     }

@@ -292,6 +292,7 @@ pub(crate) fn motion_assets(dat: &Path, weapon: Weapon) -> Result<Vec<arc::Asset
     }
     if weapon == Weapon::MagnetSpike {
         assets.extend(magnet_spike_weapon_tracks(dat)?);
+        assets.extend(magnet_spike_melee_shapes(dat)?);
     }
     Ok(assets)
 }
@@ -833,16 +834,59 @@ fn append_magnet_spike_shapes(sdt: &[u8], out: &mut Vec<u8>) -> Result<()> {
             }
             // A selector may contain multiple shapes attached to different
             // weapon bones. Keep the original part/bone and coordinates.
-            let records = sdt.get(start..).context("missing w13 shape list")?;
-            let count = records
-                .chunks_exact(40)
-                .position(|row| row[..2] == [0xff, 0xff])
-                .context("unterminated w13 shape list")?;
-            out.extend(u16::try_from(count)?.to_le_bytes());
-            out.extend(&records[..count * 40]);
+            let records = shape_records(sdt, start)?;
+            out.extend(u16::try_from(records.len() / 40)?.to_le_bytes());
+            out.extend(records);
         }
     }
     Ok(())
+}
+
+fn shape_records(sdt: &[u8], start: usize) -> Result<&[u8]> {
+    let records = sdt.get(start..).context("missing FZ shape list")?;
+    let count = records
+        .chunks_exact(40)
+        .position(|row| row[..2] == [0xff, 0xff])
+        .context("unterminated FZ shape list")?;
+    Ok(&records[..count * 40])
+}
+
+fn magnet_spike_melee_shapes(dat: &Path) -> Result<Vec<arc::Asset>> {
+    use mhgu_resource::hts::ShapeGroups;
+
+    let sdt = pac::decode(read(&dat.join("mhfsdt.bin"))?)?;
+    let bank = 9 * 28;
+    ensure!(
+        word(&sdt, bank)? == 120 << 16 && word(&sdt, bank + 4)? >> 16 == 9,
+        "unexpected w13 melee shape directory"
+    );
+    let directory = word(&sdt, bank + 16)?;
+    (1..9)
+        .map(|selector| {
+            let start = word(&sdt, directory + selector * 32)?;
+            let mut shapes = Vec::new();
+            for row in shape_records(&sdt, start)?.chunks_exact(40) {
+                ensure!(row[1..4] == [0, 1, 0], "unsupported w13 melee shape");
+                let joint: u16 = match (word(row, 8)?, row[0]) {
+                    (8, joint @ 4..=7) => 0x4000 | u16::from(joint),
+                    (0, 0) => 255, // GU hunter root relative to its position and yaw.
+                    _ => anyhow::bail!("unsupported w13 melee anchor"),
+                };
+                let mut shape = [0u8; 48];
+                shape[..2].copy_from_slice(&joint.to_le_bytes());
+                shape[4] = 1; // Both endpoints use the same joint.
+                shape[12..28].copy_from_slice(&row[12..28]);
+                shape[32..44].copy_from_slice(&row[28..40]);
+                shapes.push(shape);
+            }
+            ensure!(!shapes.is_empty(), "empty w13 melee selector {selector}");
+            Ok(arc::Asset {
+                name: format!("player\\hit\\frontier_ms\\melee_{selector}"),
+                kind: 0x5653c1b0, // rHitShape
+                data: ShapeGroups::new(vec![shapes]).encode()?,
+            })
+        })
+        .collect()
 }
 
 pub fn switch_axe_shapes(dat: &Path, output: &Path) -> Result<()> {
