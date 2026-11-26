@@ -4,7 +4,21 @@ use mhgu_sdk::weapon::style::action::{Actions, MotionFrame};
 const DATA: &[u8] = include_bytes!("../target/assets/magnet_spike.fmsa");
 const STATES: u8 = 165;
 const PARAMETERS: usize = DATA.len() - (4 + 83 * 2 + STATES as usize);
+const COSTS: usize = PARAMETERS - (4 + STATES as usize);
 const MODES: usize = PARAMETERS + 4 + 83 * 2;
+const EFFECTS: usize = {
+    // The exporter appends the state arrays in descriptor order.
+    let mut index = STATES as usize * 3;
+    loop {
+        index -= 1;
+        let descriptor = 16 + index * 8;
+        let count = word(descriptor);
+        if count != 0 {
+            let stride = if index % 3 == 1 { 40 } else { 12 };
+            break word(descriptor + 4) + count * stride;
+        }
+    }
+};
 
 const fn half(at: usize) -> u16 {
     u16::from_le_bytes([DATA[at], DATA[at + 1]])
@@ -16,7 +30,8 @@ const fn word(at: usize) -> usize {
 
 pub const ACTIONS: Actions = {
     assert!(word(0) == u32::from_le_bytes(*b"FMSA") as usize);
-    assert!(half(4) == 3 && half(6) == STATES as u16);
+    assert!(half(4) == 4 && half(6) == STATES as u16);
+    assert!(word(COSTS) == u32::from_le_bytes(*b"MSCT") as usize);
     assert!(word(PARAMETERS) == u32::from_le_bytes(*b"MSPR") as usize);
     let mut actions = Actions::new(0);
     let mut id = 0;
@@ -46,6 +61,40 @@ pub fn melee_row(id: u16) -> Option<&'static [u8; 40]> {
     let at = word(12) + usize::from(id) * 40;
     DATA[at..at + 40].try_into().ok()
 }
+
+pub const fn parameter(id: usize) -> u16 {
+    assert!(id < 83);
+    half(PARAMETERS + 4 + id * 2)
+}
+
+pub fn cost(state: u8) -> u8 {
+    DATA[COSTS + 4 + usize::from(state)]
+}
+
+/// Family 121, row/shape selector 1 is the magnetic shot.
+pub const SHOT: (f32, f32) = {
+    assert!(word(EFFECTS) == u32::from_le_bytes(*b"MSFX") as usize);
+    let shot = EFFECTS + 8 + 40;
+    assert!(half(shot) == 0 && half(shot + 2) != 0);
+    let duration = half(shot + 2) as f32;
+    let mut shape = EFFECTS + 8 + word(EFFECTS + 4) * 40;
+    assert!(word(shape) == u32::from_le_bytes(*b"MSHT") as usize);
+    shape += 4;
+    assert!(half(shape) == 120);
+    let selectors = half(shape + 2);
+    shape += 4;
+    let mut selector = 0;
+    while selector < selectors {
+        shape += 2 + half(shape) as usize * 40;
+        selector += 1;
+    }
+    assert!(half(shape) == 121 && half(shape + 2) > 1);
+    shape += 4;
+    shape += 2 + half(shape) as usize * 40;
+    assert!(half(shape) == 1 && half(shape + 2) == 126 && half(shape + 6) == 0);
+    let radius = f32::from_bits(word(shape + 2 + 12) as u32);
+    (duration, radius)
+};
 
 pub fn step_complete(step: Step, time: Time, sample: MotionFrame, wrapped: bool) -> bool {
     // FZ 81815D60 gates op 4 on the cycle count and 817332B0's frame check.
@@ -96,10 +145,14 @@ impl Mode {
             (Self::Slash, 3, true) => Some(6),
             (Self::Slash, 4, true) => Some(2),
             (Self::Slash, 5, true) => Some(90),
+            (Self::Slash, 9, true) => Some(12),
+            (Self::Slash, 19, true) => Some(82),
             (Self::Impact, 2, true) => Some(18),
             (Self::Impact, 3, true) => Some(32),
             (Self::Impact, 4, true) => Some(26),
             (Self::Impact, 5, true) => Some(91),
+            (Self::Impact, 9, true) => Some(38),
+            (Self::Impact, 19, true) => Some(84),
             _ => None,
         }
     }

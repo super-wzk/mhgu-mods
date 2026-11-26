@@ -537,7 +537,7 @@ pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
     let mut out = magic.to_vec();
     let version = match kind {
         Weapon::SwitchAxe => 4u16,
-        Weapon::MagnetSpike => 3,
+        Weapon::MagnetSpike => 4,
         _ => 2,
     };
     out.extend(version.to_le_bytes());
@@ -607,7 +607,7 @@ pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
         out.extend(count.to_le_bytes());
         out.extend(rows);
         append_magnet_spike_shapes(&sdt, &mut out)?;
-        append_magnet_spike_modes(data, n, &mut out)?;
+        append_magnet_spike_parameters(data, n, &mut out)?;
         return Ok(out);
     }
     if kind == Weapon::SwitchAxe {
@@ -785,7 +785,7 @@ pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn append_magnet_spike_modes(data: &[u8], states: usize, out: &mut Vec<u8>) -> Result<()> {
+fn append_magnet_spike_parameters(data: &[u8], states: usize, out: &mut Vec<u8>) -> Result<()> {
     // PC DAT 0xb90 is the Vita MAGNET directory at +0xb8c. 8121DA12
     // initializes the state-to-mode map from the three type lists.
     let directory = word(data, 0xb90)?;
@@ -806,6 +806,22 @@ fn append_magnet_spike_modes(data: &[u8], states: usize, out: &mut Vec<u8>) -> R
             }
         }
     }
+    // FZ 8121E820 validates these costs. 8121F010 applies them on entry.
+    let count = word(data, directory + 8)? & 0xffff;
+    let start = word(data, directory + 36)?;
+    let rows = data
+        .get(start..start + 4 * count)
+        .context("short w13 magnetic cost table")?;
+    let mut costs = vec![0; states];
+    for row in rows.chunks_exact(4) {
+        let state = usize::from(u16::from_le_bytes([row[0], row[1]]));
+        let cost = u16::from_le_bytes([row[2], row[3]]);
+        if let Some(slot) = costs.get_mut(state) {
+            *slot = u8::try_from(cost)?;
+        }
+    }
+    out.extend(b"MSCT");
+    out.extend(costs);
     out.extend(b"MSPR");
     out.extend(parameters);
     out.extend(modes);

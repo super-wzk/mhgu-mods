@@ -1,5 +1,5 @@
 //! Optional world-space shape expansion for contacts owned by a registered style.
-use crate::service;
+use crate::{combat::collision::hurt::HurtScene, service};
 
 const NAME: &core::ffi::CStr = c"mhgu::StyleWorldContactV1";
 const MAGIC: u32 = u32::from_le_bytes(*b"SWC1");
@@ -57,4 +57,26 @@ pub unsafe fn bind_pass(id: u32, pass: CollisionPass) -> bool {
         return true;
     }
     false
+}
+
+/// Observe monster hurt volumes in the active local style's collision pass.
+pub type HurtPass = extern "C" fn(&HurtScene<'_>);
+const HURT_NAME: &core::ffi::CStr = c"mhgu::StyleHurtPassV1";
+const HURT_MAGIC: u32 = u32::from_le_bytes(*b"SHP1");
+
+#[doc(hidden)]
+#[repr(C)]
+pub struct HurtService(pub extern "C" fn(u32, HurtPass) -> bool);
+
+/// # Safety
+/// Called once by the registry during Forge initialization.
+#[doc(hidden)]
+pub unsafe fn publish_hurt(api: &'static HurtService) -> bool {
+    unsafe { service::publish(HURT_NAME, HURT_MAGIC, api) }
+}
+
+pub fn bind_hurt(id: u32, pass: HurtPass) -> bool {
+    service::on_game_thread()
+        && unsafe { service::find::<HurtService>(HURT_NAME, HURT_MAGIC) }
+            .is_some_and(|api| (api.0)(id, pass))
 }

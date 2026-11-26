@@ -35,16 +35,30 @@ impl Strike {
     pub fn submit(&self, actor: u32, shape: &HitShape) -> bool {
         service::on_game_thread()
             && unsafe { service::find::<StrikeService>(STRIKE, STRIKE_MAGIC) }
-                .is_some_and(|api| unsafe { (api.0)(actor, self, shape.as_raw()) != 0 })
+                .is_some_and(|api| unsafe { (api.submit)(actor, self, shape.as_raw()) != 0 })
     }
 }
 
-const STRIKE: &core::ffi::CStr = c"mhgu::IndependentMeleeV1";
-const STRIKE_MAGIC: u32 = u32::from_le_bytes(*b"IML1");
+const STRIKE: &core::ffi::CStr = c"mhgu::IndependentMeleeV2";
+const STRIKE_MAGIC: u32 = u32::from_le_bytes(*b"IML2");
+
+/// Called for a registered strike after it reaches native monster damage
+/// calculation. The second argument is the authored motion power.
+pub type StrikeContact = extern "C" fn(actor: u32, power: u16);
 
 #[doc(hidden)]
 #[repr(C)]
-pub struct StrikeService(pub unsafe extern "C" fn(u32, *const Strike, u32) -> u32);
+pub struct StrikeService {
+    pub submit: unsafe extern "C" fn(u32, *const Strike, u32) -> u32,
+    pub bind: extern "C" fn(u32, StrikeContact) -> bool,
+}
+
+/// Observe monster contacts from this style's independent strikes.
+pub fn bind_strike_contact(id: u32, callback: StrikeContact) -> bool {
+    service::on_game_thread()
+        && unsafe { service::find::<StrikeService>(STRIKE, STRIKE_MAGIC) }
+            .is_some_and(|api| (api.bind)(id, callback))
+}
 
 /// # Safety
 /// Publish once at registry initialization on GU's game thread.

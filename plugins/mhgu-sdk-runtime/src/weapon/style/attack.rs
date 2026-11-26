@@ -2,9 +2,12 @@ use core::{
     ptr,
     sync::atomic::{AtomicPtr, Ordering},
 };
-use mhgu_sdk::weapon::style::action::{
-    self, Attack,
-    melee::{self, BLADE_CONTACT_OFFSETS, Strike},
+use mhgu_sdk::{
+    sync::Shared,
+    weapon::style::action::{
+        self, Attack,
+        melee::{self, BLADE_CONTACT_OFFSETS, Strike, StrikeContact},
+    },
 };
 
 struct HitData {
@@ -14,6 +17,62 @@ struct HitData {
 }
 
 static HIT_DATA: AtomicPtr<HitData> = AtomicPtr::new(ptr::null_mut());
+
+#[derive(Clone, Copy)]
+struct RegisteredStrike {
+    actor: u32,
+    style: u32,
+    serial: u16,
+    power: u16,
+}
+
+static LOCAL_STRIKES: Shared<[Option<RegisteredStrike>; 2]> = Shared::new([None; 2]);
+
+pub(super) fn clear(actor: u32) {
+    LOCAL_STRIKES.with(|strikes| {
+        for strike in strikes {
+            strike.take_if(|contact| contact.actor == actor);
+        }
+    });
+}
+
+extern "C" fn bind_contact(id: u32, callback: StrikeContact) -> bool {
+    let Some(entry) = super::registered_entry(id).filter(|entry| entry.style.independent) else {
+        return false;
+    };
+    entry
+        .strike_contact
+        .store(callback as *mut (), Ordering::Release);
+    true
+}
+
+pub(super) unsafe fn notify_contact(actor: u32, hit: u32, target: u32) {
+    if actor == 0 || target == 0 || actor != unsafe { super::local_hunter() } {
+        return;
+    }
+    let Some(hand) = BLADE_CONTACT_OFFSETS
+        .iter()
+        .position(|&offset| offset == hit.wrapping_sub(actor))
+    else {
+        return;
+    };
+    let strike = LOCAL_STRIKES.with(|strikes| strikes[hand]);
+    let Some(strike) = strike.filter(|strike| {
+        strike.actor == actor && strike.serial == unsafe { super::deflection::contact_serial(hit) }
+    }) else {
+        return;
+    };
+    let Some(entry) =
+        (unsafe { super::local_entry(actor) }).filter(|entry| entry.style.id == strike.style)
+    else {
+        return;
+    };
+    let callback = entry.strike_contact.load(Ordering::Acquire);
+    if !callback.is_null() {
+        let notify: StrikeContact = unsafe { core::mem::transmute(callback) };
+        notify(actor, strike.power);
+    }
+}
 
 #[forge::hook(offset = 0x2a8a88)]
 unsafe fn weapon_row(actor: u32, index: u32) -> u32 {
@@ -206,6 +265,14 @@ unsafe fn submit_row(
         // Recoil decisions belong to the sender. A remote swing must not
         // displace a pending hit in the local hunter's deflection window.
         if super::local_hunter() == actor {
+            LOCAL_STRIKES.with(|strikes| {
+                strikes[hand] = registered.map(|_| RegisteredStrike {
+                    actor,
+                    style: style.id,
+                    serial: super::deflection::contact_serial(hit),
+                    power: attack.power,
+                });
+            });
             let serial = (attack.flags & Attack::DEFLECTABLE != 0)
                 .then(|| super::deflection::contact_serial(hit));
             super::deflection::submitted(actor, slot, hand, serial);
@@ -217,7 +284,10 @@ unsafe fn submit_row(
 pub(super) fn install(base: u32) {
     use mhgu_sdk::weapon::style::action::stun;
     static SERVICE: stun::Service = stun::Service(submit_stun);
-    static MELEE: melee::StrikeService = melee::StrikeService(submit_melee);
+    static MELEE: melee::StrikeService = melee::StrikeService {
+        submit: submit_melee,
+        bind: bind_contact,
+    };
     unsafe { stun::publish(&SERVICE) };
     unsafe { melee::publish_strike(&MELEE) };
     forge::install_hook!(base, weapon_row);

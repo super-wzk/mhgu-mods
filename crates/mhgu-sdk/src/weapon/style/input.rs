@@ -18,6 +18,15 @@ pub unsafe fn auxiliary_shoulder_mask() -> u32 {
     unsafe { resolve() }
 }
 
+/// Whether the resolved auxiliary shoulder is held in GU's filtered state.
+///
+/// # Safety
+/// The actor must be a live local quest hunter on the game thread.
+pub unsafe fn auxiliary_shoulder_held(actor: u32) -> bool {
+    let held = unsafe { ((actor + FILTERED_HELD) as *const u16).read() };
+    u32::from(held) & unsafe { auxiliary_shoulder_mask() } != 0
+}
+
 /// Whether GU is waiting for the rest of a combination involving X or A.
 ///
 /// # Safety

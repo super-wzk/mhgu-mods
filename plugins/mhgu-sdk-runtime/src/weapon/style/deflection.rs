@@ -164,6 +164,7 @@ unsafe fn hunter(
 ) -> u32 {
     let result = original!(manager, hit, target, part, point, actor, factor, element);
     unsafe {
+        crate::weapon::style::attack::notify_contact(actor, hit, target);
         notify_contact(actor, hit, target);
         record(actor, hit, target, part, factor)
     };
@@ -183,6 +184,7 @@ unsafe fn alternate(
 ) -> u32 {
     let result = original!(manager, hit, target, part, point, actor, factor, element);
     unsafe {
+        crate::weapon::style::attack::notify_contact(actor, hit, target);
         notify_contact(actor, hit, target);
         record(actor, hit, target, part, factor)
     };

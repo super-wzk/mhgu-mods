@@ -458,6 +458,13 @@ pub unsafe fn joint_matrix(actor: u32, joint: u32) -> Option<u32> {
     }
 }
 
+/// # Safety
+/// The actor must be a live GU hunter with its model initialized.
+pub unsafe fn joint_position(actor: u32, joint: u32) -> Option<[f32; 3]> {
+    let matrix = unsafe { Object::at(joint_matrix(actor, joint)?) }?;
+    Some(matrix.get(Field::at(48)))
+}
+
 /// Query the floor and highest special surface at the supplied world position.
 ///
 /// # Safety

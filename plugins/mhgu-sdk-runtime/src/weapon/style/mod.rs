@@ -42,7 +42,9 @@ pub(super) struct Entry {
     physical: AtomicPtr<mhgu_sdk::weapon::style::physical::Rule>,
     world_contact: AtomicPtr<()>,
     collision_pass: AtomicPtr<()>,
+    hurt_pass: AtomicPtr<()>,
     blade_contact: AtomicPtr<()>,
+    strike_contact: AtomicPtr<()>,
     particle_release: AtomicPtr<()>,
     prepare: AtomicPtr<()>,
     pub(super) part_motion: AtomicPtr<part_motion::Motions>,
@@ -112,7 +114,9 @@ pub(super) unsafe fn register_entry(
             physical: AtomicPtr::new(ptr::null_mut()),
             world_contact: AtomicPtr::new(ptr::null_mut()),
             collision_pass: AtomicPtr::new(ptr::null_mut()),
+            hurt_pass: AtomicPtr::new(ptr::null_mut()),
             blade_contact: AtomicPtr::new(ptr::null_mut()),
+            strike_contact: AtomicPtr::new(ptr::null_mut()),
             particle_release: AtomicPtr::new(ptr::null_mut()),
             prepare: AtomicPtr::new(ptr::null_mut()),
             part_motion: AtomicPtr::new(ptr::null_mut()),
@@ -366,6 +370,7 @@ unsafe fn controller_frame(actor: u32, custom_id: Option<u8>) -> u32 {
         let owner = LAST_ACTOR.swap(actor, Ordering::Relaxed);
         if prev != entry || actor != owner {
             deflection::clear(owner);
+            attack::clear(owner);
             guard::clear(owner);
             if let Some(stop) = prev.as_ref().and_then(|e| e.style.controller) {
                 // A previous scene's actor may already have been destroyed.

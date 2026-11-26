@@ -20,6 +20,12 @@ pub unsafe fn local() -> Option<u32> {
 
 /// # Safety
 /// The actor must be a live GU hunter on the game thread.
+pub unsafe fn area(actor: u32) -> u8 {
+    unsafe { ((actor + 4180) as *const u8).read() }
+}
+
+/// # Safety
+/// The actor must be a live GU hunter on the game thread.
 pub unsafe fn equipped_weapon(actor: u32) -> Option<u8> {
     unsafe {
         let equipment = ((actor + 5060) as *const u32).read();

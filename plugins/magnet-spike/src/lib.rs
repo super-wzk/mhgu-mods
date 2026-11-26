@@ -3,13 +3,14 @@
 
 mod battle;
 mod combat;
+mod magnet;
 mod motion;
 mod program;
 
 use mhgu_sdk::weapon::{
     Element, EquipmentId, EquipmentLevel, EquipmentModel, Weapon, WeaponEquipment, WeaponId,
     registry::{self, WeaponRegistry},
-    style::{RegisterError, Style, part_motion},
+    style::{RegisterError, Style, manual, part_motion, world_contact},
     trade::{self, Material, Recipe},
 };
 
@@ -96,7 +97,14 @@ fn register_weapon() -> Result<(), RegisterError> {
     if !unsafe { mhgu_sdk::weapon::style::preload::bind(STYLE.id, motion::preload) } {
         return Err(RegisterError::Invalid);
     }
-    if !part_motion::bind(STYLE.id, &motion::PARTS) {
+    if !part_motion::bind(STYLE.id, &motion::PARTS)
+        || !world_contact::bind_hurt(STYLE.id, magnet::update)
+        || !mhgu_sdk::weapon::style::action::melee::bind_strike_contact(
+            STYLE.id,
+            magnet::melee_contact,
+        )
+        || !manual::bind(STYLE.id, include_str!("manual.txt"))
+    {
         return Err(RegisterError::Invalid);
     }
     trade::register_purchase(TRIAL_SPIKE.id, 100)?;

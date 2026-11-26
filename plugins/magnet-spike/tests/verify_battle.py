@@ -5,7 +5,7 @@ import math
 import struct
 import sys
 
-from unicorn.arm_const import UC_ARM_REG_S0, UC_ARM_REG_S1
+from unicorn.arm_const import UC_ARM_REG_S0, UC_ARM_REG_S1, UC_ARM_REG_SP
 
 from verify_magnet_spike import PLUGIN, REPO
 from damage_target import damage_target
@@ -87,14 +87,14 @@ def replay():
     for address in (0x27D5C4, 0x3A5ED0, 0x5584A0, 0x27FE18):
         g.stub(address, lambda *_: 0)
 
-    def tick(buttons=0, *, common=0, frame=0., ended=False, fallback=0, native_pad=False):
+    def tick(buttons=0, *, held=0, common=0, frame=0., ended=False, fallback=0, native_pad=False):
         g.put(actor + 5112, buttons)
         g.put(actor + 5140, common)
         g.put(actor + 5156, fallback)
         g.cpu.mem_write(actor + 1280, struct.pack("<f", frame))
         g.cpu.mem_write(actor + 1206, bytes([4 * ended]))
         if native_pad:
-            g.cpu.mem_write(actor + 5108, struct.pack("<3H", buttons, 0, buttons))
+            g.cpu.mem_write(actor + 5108, struct.pack("<3H", held | buttons, 0, buttons))
             g.put(actor + 5188, 0)
             g.run(0x27CA28, actor)
         g.run(DISPATCH, actor)
@@ -268,7 +268,7 @@ def verify_melee(g, actor, vtable, part, shapes, set_action, tick):
 
     # Keep the native HDP constructor and collision expansion. Supply the
     # matrices GU would have evaluated from the two moving blade joints.
-    monster, status, _, _, collision, credit = damage_target(g, vtable)
+    monster, status, monster_vt, hurt, collision, credit = damage_target(g, vtable)
     dti = g.run(g.get(vtable + 20))
     g.put(0x1898674, g.get(dti + 4))
     g.stub(0x13EFDC4, lambda ptr, size, *_: g.cpu.mem_write(ptr, bytes(size)))
@@ -355,8 +355,207 @@ def verify_melee(g, actor, vtable, part, shapes, set_action, tick):
     assert (byte(hit + 86), byte(second + 86)) == (50, 65)
     assert g.get(hit + 64) & 3 == g.get(second + 64) & 3 == 1
     assert g.half(hit + 52) != g.half(second + 52)
+    verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, set_action, tick)
+    verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick)
+
+
+def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, set_action, tick):
+    def put_vec(address, *vec):
+        g.cpu.mem_write(address, struct.pack(f"<{len(vec)}f", *vec))
+
+    def position(address):
+        return struct.unpack("<3f", g.cpu.mem_read(address, 12))
+
+    def matrix(address, x, y, z):
+        put_vec(address, 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., x, y, z, 1.)
+
+    mapping, matrices = g.alloc(256), g.alloc(160)
+    g.put(actor + 1172, matrices)
+    g.put(actor + 1176, mapping)
+    g.cpu.mem_write(mapping, bytes([255] * 12 + [0] + [255] * 243))
+    matrix(matrices + 16, 25., 100., 50.)
+    camera_manager, camera = g.alloc(128), g.alloc(128)
+    g.put(0x2126504, camera_manager)
+    g.put(camera_manager + 84, camera)
+    put_vec(camera + 64, 0., 0., 0.)
+    put_vec(camera + 96, 0., 0., 1000.)
+
+    # Keep the engine's monster and joint lookup, sphere expansion and
+    # sphere/capsule intersection. Isolate background and scene scheduling.
+    # GU may still be settling a melee hit. Geometric marks are independent.
+    roster = g.alloc(80)
+    g.put(0x1851FE0, roster)
+    g.put(roster + 28, monster)
+    for address in (monster + 46585, monster + 30290, status + 416):
+        g.cpu.mem_write(address, b"\1")
+    put_vec(status + 428, 1., 1.)
+    pose, resolve_joint = g.alloc(64), g.alloc(4)
+    matrix(pose, 25., 100., 1100.)
+    joints = []
+    g.put(monster_vt + 208, resolve_joint)
+    def part_joint(owner, bone, *_):
+        joints.append((owner, bone))
+        return pose
+    g.stub(resolve_joint, part_joint)
+    g.cpu.mem_write(hurt, struct.pack("<7H", 5, 0, 0, 0, 0, 0, 3))
+    put_vec(hurt + 16, 65., 0., 0., 0.)
+
+    rays = []
+    wall = False
+    water = None
+    g.put(0x21270E0, g.alloc(4))
+    def terrain(owner, start, end, area, *_):
+        assert owner == actor and area == 0
+        rays.append((position(start), position(end)))
+        return wall
+    g.stub(0x49C0C, terrain)
+    def surface(_, owner, point, previous):
+        assert owner == actor and position(point) == position(previous)
+        if water is None:
+            return 0
+        sp = g.cpu.reg_read(UC_ARM_REG_SP)
+        assert g.get(sp) == 0
+        put_vec(g.get(sp + 4), -100.)
+        put_vec(g.get(sp + 8) + 20, water)
+        return 1
+    g.stub(0x18192C, surface)
+    g.stub(g.originals[0x16ABAC], lambda *_: 3)
+
+    def update():
+        assert g.run(g.hooks[0x16ABAC], collision) == 3
+
+    hp, credit_count = g.get(status + 880), len(credit)
+    held = 0x800
+    set_action(1, 0)
+    tick(A, held=held, native_pad=True)
+    assert g.half(actor + 9482) == 0x8000 + 84
+    tick(frame=6.)  # Snapshots the camera direction even if it moves before release.
+    put_vec(camera + 96, 1000., 0., 0.)
+    tick(frame=11.)
+    update()
+    assert not rays and not joints
+    tick(frame=12.)
+    update()
+    assert rays == [((25., 100., 50.), (25., 100., 550.))], rays
+    update()
+    assert rays[-1] == ((25., 100., 550.), (25., 100., 1050.)), rays
+    assert joints.count((monster, 5)) == 3, joints  # Test per sweep, then attach.
+    rays.clear()
+    joints.clear()
+    matrix(pose, 100., 95., 1150.)
+    update()
+    assert not rays and joints == [(monster, 5)]
+    g.put(status + 880, 0)
+    joints.clear()
+    update()
+    g.put(status + 880, hp)
+    update()
+    assert not joints
+
+    set_action(1, 0)
+    tick(common=1 << 8)
+    tick(frame=99., ended=True)
+    tick(A, held=held, native_pad=True)
+    assert g.half(actor + 9482) == 0x8000 + 82
+    tick(frame=13.)
+    update()
+    assert not rays
+    tick(frame=14.)
+    wall = True
+    update()
+    assert rays == [((25., 100., 50.), (525., 100., 50.))], rays
+    update()
+    assert len(rays) == 1 and not joints
+    assert g.get(status + 880) == hp and len(credit) == credit_count
+
+    # A stopped scene freezes flight and marks. A live mark lasts 9000 FZ
+    # simulation ticks, and the scene clock counts 60 Hz frames.
+    wall = False
+    rays.clear()
+    matrix(pose, 500., 100., 50.)
+    tick(frame=60., ended=True)
+    tick(A, held=held, native_pad=True)
+    tick(frame=14.)
+    clock = g.get(0x2126764) + 104
+    put_vec(clock, 0.)
+    update()
+    assert not rays and not joints
+    put_vec(clock, 2.)
+    update()
+    assert len(rays) == 1 and joints == [(monster, 5), (monster, 5)]
+    rays.clear()
+    joints.clear()
+    put_vec(clock, 17998.)
+    update()
+    assert not rays and joints == [(monster, 5)]
+    joints.clear()
+    put_vec(clock, 2.)
+    update()
+    assert not rays and not joints
+
+    water = 110.
+    tick(frame=60., ended=True)
+    tick(A, held=held, native_pad=True)
+    tick(frame=14.)
+    update()
+    assert len(rays) == 1 and not joints
+    update()
+    assert len(rays) == 1 and not joints
+
+
+def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick):
+    def charge_attack():
+        set_action(1, 0)
+        tick(X, held=0x800, native_pad=True)
+        return g.half(actor + 9482)
+
+    def number(address, value):
+        g.cpu.mem_write(address, struct.pack("<f", value))
+
+    # Switch shape in place. Entering the same action from neutral spends only
+    # once, and having no native stamina rejects it before spending charge.
+    number(actor + 5088, 0.)
+    assert charge_attack() == 0
+    number(actor + 5088, 1000.)
+    for _ in range(5):
+        assert charge_attack() == 0x8000 + 12
+        tick(frame=20., ended=True)
+    assert charge_attack() == 0
+
+    # Nine FZ recharge intervals recover 1800 units, just below one segment.
+    clock = g.get(0x2126764) + 104
+    number(clock, 540.)
+    g.run(g.hooks[0x16_ABAC], collision)
+    number(clock, 2.)
+    assert charge_attack() == 0
+
+    # Swinging does not give charge. Only the monster-damage hook for the
+    # native serial submitted by the source event can credit these 43 x 6 units.
+    g.cpu.mem_write(actor + 10057, b"\0")
+    tick(X, native_pad=True)
+    assert g.half(actor + 9482) == 0x8000 + 78
+    tick(frame=60., ended=True)
+    tick(frame=40.)
+    hit = next(actor + at for at in (12320, 12504) if g.half(actor + at + 56) == 43)
+    serial = g.half(hit + 52)
+    args = (0, hit, monster, hurt, hurt, actor, g.alloc(4), g.alloc(4))
+    g.cpu.mem_write(hit + 52, struct.pack("<H", serial ^ 1))
+    g.run(g.hooks[0x178030], *args)
+    assert charge_attack() == 0
+    g.cpu.mem_write(hit + 52, struct.pack("<H", serial))
+    g.run(g.hooks[0x178030], *args)
+    assert charge_attack() == 0x8000 + 12
+    assert charge_attack() == 0
+
+    # The other form uses a distinct original action and spends the same amount.
+    number(clock, 600.)
+    g.run(g.hooks[0x16_ABAC], collision)
+    number(clock, 2.)
+    tick(common=1 << 8)
+    tick(frame=99., ended=True)
+    assert charge_attack() == 0x8000 + 38
 
 
 if __name__ == "__main__":
     replay()
-    print("Magnet Spike: dispatch, part playback, compound melee, overlap and GU damage passed")
+    print("Magnet Spike: dispatch, native melee, magnetic shot and charge passed")

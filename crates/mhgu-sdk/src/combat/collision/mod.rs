@@ -14,6 +14,7 @@ const CONTACT_FLAGS: Field<u32> = Field::at(48);
 
 mod shapes;
 pub use shapes::{CachedHitShape, HitShape, ShapeGroup, ShapeGroups};
+pub mod hurt;
 
 #[derive(Clone, Copy)]
 pub struct Contact<'a>(pub(crate) Object<'a>);

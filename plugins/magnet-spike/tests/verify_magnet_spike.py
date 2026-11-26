@@ -36,6 +36,28 @@ def attach_details(g, facility):
     return values
 
 
+def verify_manual(g):
+    panel, dialog = g.alloc(100), g.alloc(128)
+    guide = []
+    g.stub(0x65E580, lambda *_: 0)
+    g.stub(0x65EFD0, lambda *_: dialog)
+
+    def open_guide(_, body, *_args):
+        guide.append(g.string(body))
+        return 1
+
+    g.stub(0x65F190, open_guide)
+    pressed = g.get(0x188C670) + 27644
+    g.put(pressed, 0x2000)
+    g.run(g.hooks[0x5CB780], panel)
+    assert len(guide) == 1 and guide[0].startswith("极之型磁斩锤")
+    assert "沿镜头方向发射磁力弹" in guide[0]
+    g.stub(0x64C600, lambda *_: 0)
+    g.put(pressed, 0x4000)
+    g.run(g.hooks[0x5CB780], panel)
+    g.put(pressed, 0)
+
+
 def verify(sdk_last):
     g = boot((REPO / "mhgu/main.elf").read_bytes(), None, order=())
     paths = (PLUGIN, PROVIDER) if sdk_last else (PROVIDER, PLUGIN)
@@ -56,6 +78,7 @@ def verify(sdk_last):
     instance = g.get(api + 16)
     out = g.alloc(8)
     g.put(0x188C670, g.alloc(27704))
+    verify_manual(g)
     wallet = g.get(0x1897F78)
     g.put(wallet + 36, 200)
     pouch, _, _ = setup_items(g)
@@ -345,4 +368,4 @@ def verify_equipment(g, api):
 if __name__ == "__main__":
     verify(sdk_last=False)
     verify(sdk_last=True)
-    print("Magnet Spike NRO: icons, native trade, stats, skills and model binding for local, peer and guild previews passed")
+    print("Magnet Spike NRO: icons, native trade, stats, skills, pause manual and model binding passed")

@@ -63,6 +63,12 @@ pub unsafe fn has_evade_stamina(actor: u32, cost: f32) -> bool {
     }
 }
 
+/// # Safety
+/// The actor must be a live local quest hunter on the game thread.
+pub unsafe fn has_stamina(actor: u32) -> bool {
+    unsafe { ((actor + 5088) as *const f32).read() > 0. }
+}
+
 /// Defer natural stamina recovery through GU's countdown at 29DBDC.
 /// GU lets the timer expire on its own when the action stops refreshing it.
 ///
@@ -109,12 +115,31 @@ pub unsafe fn relative_stick_yaw(actor: u32) -> Option<u16> {
     }
 }
 
+fn camera_view() -> Option<[f32; 3]> {
+    use crate::memory::{Field, Object, singleton};
+    unsafe {
+        let camera = Object::at(singleton(0x2126504)?.get(Field::at(84)))?;
+        let eye = camera.get::<[f32; 3]>(Field::at(64));
+        let target = camera.get::<[f32; 3]>(Field::at(96));
+        Some(core::array::from_fn(|i| target[i] - eye[i]))
+    }
+}
+
+/// The active world camera's normalized look direction.
+///
+/// # Safety
+/// Call on GU's game thread while controlling the local hunter.
+pub unsafe fn camera_direction() -> Option<[f32; 3]> {
+    let view = camera_view()?;
+    let length = libm::sqrtf(view.into_iter().map(|x| x * x).sum());
+    (length.is_finite() && length > 0.).then(|| view.map(|x| x / length))
+}
+
 /// Relative stick direction using the current camera azimuth during a held input.
 ///
 /// # Safety
 /// The actor must be a live local hunter on the game thread.
 pub unsafe fn live_relative_stick_yaw(actor: u32) -> Option<u16> {
-    use crate::memory::{Field, Object, singleton};
     unsafe {
         let relative = relative_stick_yaw(actor)?;
         if ((actor + 11990) as *const u8).read() != 1 {
@@ -123,14 +148,9 @@ pub unsafe fn live_relative_stick_yaw(actor: u32) -> Option<u16> {
         // 2A79CC saves the camera azimuth at +12016 until the held-input
         // lock clears. Replace that term of 27F5D0 without clearing GU's lock.
         let locked_yaw = ((actor + 12016) as *const u16).read();
-        let camera =
-            singleton(0x2126504).and_then(|manager| Object::at(manager.get(Field::at(84))));
-        let live_yaw = camera.map_or(0, |camera| {
-            let [eye_x, _, eye_z] = camera.get::<[f32; 3]>(Field::at(64));
-            let [target_x, _, target_z] = camera.get::<[f32; 3]>(Field::at(96));
+        let live_yaw = camera_view().map_or(0, |[x, _, z]| {
             // Same argument order, scale and truncation as GU 27F5D0.
-            (libm::atan2f(target_x - eye_x, target_z - eye_z) * f32::from_bits(0x4622f983) + 0.5)
-                as i32 as u16
+            (libm::atan2f(x, z) * f32::from_bits(0x4622f983) + 0.5) as i32 as u16
         });
         Some(relative.wrapping_add(locked_yaw).wrapping_sub(live_yaw))
     }

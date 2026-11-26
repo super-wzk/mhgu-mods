@@ -248,6 +248,7 @@ fn all_pages() -> impl Iterator<Item = (&'static Entry, usize, &'static CStr)> {
     WEAPONS
         .into_iter()
         .flat_map(entries)
+        .chain(registered_entries().filter(|entry| entry.kind.is_some()))
         .filter_map(book)
         .flat_map(|(e, pages)| {
             pages
