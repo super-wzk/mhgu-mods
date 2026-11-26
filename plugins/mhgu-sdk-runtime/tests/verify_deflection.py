@@ -10,6 +10,7 @@ PLUGINS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PLUGINS / "great-sword-extreme/tests"))
 from verify_assets import Machine, MEM, STOP
 from verify_style import (
+    STYLE_IDS,
     CHANGE_ACTION, COMMAND_UPDATE, DB_DRAW_ROUTE, DISPATCH, ENCODE, WEAPON_DISPATCH, api_for, boot, hunters,
     load_registered_style, quest_entries, setup_controller,
 )
@@ -115,11 +116,11 @@ def source():
     print("FZ w06: free-state forward evade selects the roll or demon slash by phase")
 
 
-def replay(weapon, style, plugin, recoil, recoil_clip):
+def replay(weapon, plugin, recoil, recoil_clip):
     elf = (PLUGINS.parent / "mhgu/main.elf").read_bytes()
     dual = weapon == 11
     order = ("registry", "sword") if dual else ("registry",)
-    g = boot(elf, f"[Weapons]\n{weapon}={style}\n".encode(), order)
+    g = boot(elf, f"[Weapons]\n{weapon}={STYLE_IDS[plugin]}\n".encode(), order)
     dist = PLUGINS / plugin / "dist" / plugin / "romfs/nativeNX/plugins"
     trails = {}
     if dual:
@@ -928,5 +929,5 @@ def demon_effects(g, actor, inputs, vtable, begin, tick):
 
 if __name__ == "__main__":
     source()
-    replay(0, 1, "great-sword-extreme", 3, 1404)
-    replay(11, 2, "dual-blades-extreme", 11, 1408)
+    replay(0, "great-sword-extreme", 3, 1404)
+    replay(11, "dual-blades-extreme", 11, 1408)

@@ -74,7 +74,7 @@ pub struct ActionRequest {
 /// weapon request, or PASS to decline. A declined draw route stays with GU.
 pub type Request = unsafe extern "C" fn(u32, *const ActionRequest) -> u32;
 
-/// Immutable process-lifetime descriptor. IDs are global across all weapons.
+/// Immutable process-lifetime descriptor. Custom IDs are global and range from 10 to 65535.
 /// `weapon` uses GU's equipment byte.
 #[repr(C)]
 pub struct Style {
@@ -104,6 +104,6 @@ pub mod registry;
 pub mod manual;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 #[doc(hidden)]
-pub use registry::{ServiceV1, publish};
+pub use registry::{ServiceV3, publish};
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub use registry::{StyleRegistry, selected};

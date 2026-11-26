@@ -56,7 +56,7 @@ def blade_point(tip, multiplier, accessory=False):
 
 
 def scene(selected=True):
-    config = b"[Weapons]\n9=6\n" if selected else b""
+    config = b"[Weapons]\n9=15\n" if selected else b""
     g = boot((REPO / "mhgu/main.elf").read_bytes(), config, ("registry",))
     g.inline_hooks |= {ADD_HEAT, UPDATE_HEAT, HEAT_HUD, DRAW, AA_WYVERN}
     desc = load_registered_style(g, NX / "plugins/gunlance_extreme.nro")
@@ -372,7 +372,7 @@ def verify_actions():
     g.cpu.mem_write(equipment + 800 + 2 * 28, struct.pack("<h", 3))
 
     attacks = []
-    api = api_for(g, b"mhgu::StyleRegistryV1", b"SRG1")
+    api = api_for(g, b"mhgu::StyleRegistryV3", b"SRG3")
     g.stub(g.get(api + 8), lambda _, hit, *__: attacks.append(
         struct.unpack("<HHffIII", g.cpu.mem_read(hit, 24))) or 1)
     def dispatch():

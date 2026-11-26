@@ -66,7 +66,7 @@ fn spawn(resource: &DirectedShellResource<'_>, launch: ShellLaunch) -> bool {
 
 [mhfz-sdk](../mhfz-sdk/README.md) 在本 SDK 的 GU 接口上提供极型武器共用的 Frontier 动作、输入及表现逻辑。
 
-[StyleRegistry](src/style/registry.rs) 在 GU 游戏线程访问风格注册器。内容插件在 Forge 入口调用 `registry::when_ready`，在回调中执行一次 `registry.register(&STYLE, name, description)`。一个 V1 描述符提供动作编号、狩技槽位数及可选的请求、更新和防御规则。用 `style::selected(weapon)` 查询当前风格，返回 0 时使用 GU 原版风格。实际用法见[极型大剑](../../plugins/great-sword-extreme/src/lib.rs)。
+[StyleRegistry](src/style/registry.rs) 在 GU 游戏线程访问风格注册器。内容插件在 Forge 入口调用 `registry::when_ready`，在回调中执行一次 `registry.register(&STYLE, name, description)`。常驻的 `Style` 描述符提供动作编号、狩技槽位数及可选的请求、更新和防御规则。`Style.id` 是从 10 起分配的自定义风格编号，INI 和联机共用。用 `style::selected(weapon)` 查询启用的自定义风格，返回 `None` 时沿用 GU 原版。实际用法见[极型大剑](../../plugins/great-sword-extreme/src/lib.rs)。
 
 GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提供 GU 已解析的公共和武器指令，`request` 处理 GU 已接受的拔刀和武器切招请求。公共动作可返回 `PASS` 交给 GU。空输入通知插件结束，actor 为 0 时代表旧猎人已失效。
 

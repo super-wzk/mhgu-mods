@@ -186,7 +186,7 @@ def replay_style(repo, elf, name, weapon_id, style, hunter_vtable, clip, tag, au
     assert g.run(g.hooks[ENCODE], actor, 0x10000 | clip) == 0xE00 | (clip % 100)
     assert g.get(banks + 6 * 4) == resources[attack_bank]
     strikes = []
-    attack = g.get(api_for(g, b"mhgu::StyleRegistryV1", b"SRG1") + 8)
+    attack = g.get(api_for(g, b"mhgu::StyleRegistryV3", b"SRG3") + 8)
     g.stub(attack, lambda _, data, *__: strikes.append(g.get(data + 16)) or 1)
     g.cpu.mem_write(actor + 5078, struct.pack("<h", 100))
 
@@ -262,15 +262,15 @@ def replay_style(repo, elf, name, weapon_id, style, hunter_vtable, clip, tag, au
 
 
 CASES = (
-    ("great-sword", 0, 1, 0x1749A88, 1410, "gs", ("iron", "blade", "common"),
+    ("great-sword", 0, 10, 0x1749A88, 1410, "gs", ("iron", "blade", "common"),
      ("guard_counter", "radiance"), None),
-    ("dual-blades", 11, 2, 0x174F2B4, 1413, "db", ("blade", "common", "weapon"), (), "gauge"),
-    ("sword-shield", 1, 5, 0x174A354, 1405, "sns", ("blade", "common", "weapon"),
+    ("dual-blades", 11, 11, 0x174F2B4, 1413, "db", ("blade", "common", "weapon"), (), "gauge"),
+    ("sword-shield", 1, 14, 0x174A354, 1405, "sns", ("blade", "common", "weapon"),
      ("blade_6", "blade_7", "blade_23", "blade_28", "blade_29", "round_force"), None),
-    ("long-sword", 7, 3, 0x174CF64, 1415, "ls", ("weapon", "common", "blade"),
+    ("long-sword", 7, 12, 0x174CF64, 1415, "ls", ("weapon", "common", "blade"),
      ("blade_0", "blade_32", "blade_33", "discharge", "instant", "release"), "gauge"),
-    ("gunlance", 9, 6, 0x174E110, 1405, "gl", ("blade", "common", "weapon"), (), None),
-    ("switch-axe", 8, 4, 0x174D838, 1412, "sa", ("weapon", "blade", "common"),
+    ("gunlance", 9, 15, 0x174E110, 1405, "gl", ("blade", "common", "weapon"), (), None),
+    ("switch-axe", 8, 13, 0x174D838, 1412, "sa", ("weapon", "blade", "common"),
      tuple(f"hit_{family}_{group}" for family, count in ((106, 7), (107, 4)) for group in range(count)), "gauge"),
 )
 

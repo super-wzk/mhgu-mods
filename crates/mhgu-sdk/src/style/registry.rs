@@ -5,15 +5,16 @@ use crate::service::{self, Init, Startup};
 use core::{
     ffi::{CStr, c_char},
     marker::PhantomData,
+    num::NonZeroU32,
 };
 
-const NAME: &CStr = c"mhgu::StyleRegistryV1";
-const MAGIC: u32 = u32::from_le_bytes(*b"SRG1");
+const NAME: &CStr = c"mhgu::StyleRegistryV3";
+const MAGIC: u32 = u32::from_le_bytes(*b"SRG3");
 
 /// The process-lifetime style registry ABI.
 #[doc(hidden)]
 #[repr(C)]
-pub struct ServiceV1 {
+pub struct ServiceV3 {
     pub register: unsafe extern "C" fn(*const Style, *const c_char, *const c_char) -> u32,
     pub selected: extern "C" fn(u32) -> u32,
     pub attack: unsafe extern "C" fn(u32, *const Attack) -> u32,
@@ -23,14 +24,14 @@ pub struct ServiceV1 {
 /// # Safety
 /// Provider only, on the serialized Forge init thread. NROs must remain loaded.
 #[doc(hidden)]
-pub unsafe fn publish(api: &'static ServiceV1) -> bool {
+pub unsafe fn publish(api: &'static ServiceV3) -> bool {
     unsafe { service::publish(NAME, MAGIC, api) }
 }
 
 // Forge can initialize content before the registry. The first such NRO hosts
 // the process-wide queue and owns its allocation until startup completes.
-const STARTUP: &CStr = c"mhgu::StyleStartupV1";
-const STARTUP_MAGIC: u32 = u32::from_le_bytes(*b"SSI1");
+const STARTUP: &CStr = c"mhgu::StyleStartupV3";
+const STARTUP_MAGIC: u32 = u32::from_le_bytes(*b"SSI3");
 
 static WAITING: crate::sync::Shared<alloc::vec::Vec<Init>> =
     crate::sync::Shared::new(alloc::vec::Vec::new());
@@ -66,12 +67,12 @@ pub unsafe fn finish_startup() {
 }
 
 // Callers check the game thread before accessing the MT table.
-fn provider() -> Option<&'static ServiceV1> {
+fn provider() -> Option<&'static ServiceV3> {
     unsafe { service::find(NAME, MAGIC) }
 }
 
 /// A handle to the published registry, restricted to GU's initialized game thread.
-pub struct StyleRegistry(&'static ServiceV1, PhantomData<*const ()>);
+pub struct StyleRegistry(&'static ServiceV3, PhantomData<*const ()>);
 
 impl StyleRegistry {
     pub fn current() -> Option<Self> {
@@ -81,7 +82,7 @@ impl StyleRegistry {
         Some(Self(provider()?, PhantomData))
     }
 
-    /// Register a process-lifetime definition with UTF-8 equipment-box labels.
+    /// Register a process-lifetime definition with UTF-8 labels.
     pub fn register(
         &self,
         style: &'static Style,
@@ -95,9 +96,9 @@ impl StyleRegistry {
         }
     }
 
-    /// Effective custom ID for this weapon. Zero keeps the selected retail style.
-    pub fn selected(&self, weapon: u8) -> u32 {
-        (self.0.selected)(weapon.into())
+    /// Effective custom ID for this weapon, if one is active.
+    pub fn selected(&self, weapon: u8) -> Option<u32> {
+        NonZeroU32::new((self.0.selected)(weapon.into())).map(NonZeroU32::get)
     }
 }
 
@@ -110,6 +111,6 @@ pub(super) unsafe fn take_guard(actor: u32) -> u32 {
     StyleRegistry::current().map_or(0, |registry| unsafe { (registry.0.take_guard)(actor) })
 }
 
-pub fn selected(weapon: u8) -> u32 {
-    StyleRegistry::current().map_or(0, |registry| registry.selected(weapon))
+pub fn selected(weapon: u8) -> Option<u32> {
+    StyleRegistry::current()?.selected(weapon)
 }

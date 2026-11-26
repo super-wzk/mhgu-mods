@@ -1,5 +1,5 @@
 """Exercise both manual readers with the registered NROs and GU menu objects."""
-from verify_style import MANAGER, boot, style_descriptor, service
+from verify_style import MANAGER, boot, service, style_descriptor
 
 
 def expand(text):

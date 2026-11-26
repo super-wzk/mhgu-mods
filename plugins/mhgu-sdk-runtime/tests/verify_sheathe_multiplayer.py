@@ -8,18 +8,18 @@ SPRINT = 1 << 21
 SHEATHE_MASK = PRESENT | SPRINT
 
 CASES = (
-    (0, 1, "great-sword", 0x1749A88, (200,), 201, 1032),
-    (11, 2, "dual-blades", 0x174F2B4, (89,), 90, 1032),
-    (7, 3, "long-sword", 0x174CF64, (85,), 86, 1412),
-    (8, 4, "switch-axe", 0x174D838, (103, 148, 178, 179), 105, 1499),
-    (1, 5, "sword-shield", 0x174A354, (53,), 54, 1450),
-    (9, 6, "gunlance", 0x174E110, (82,), 83, 1032),
+    (0, "great-sword", 0x1749A88, (200,), 201, 1032),
+    (11, "dual-blades", 0x174F2B4, (89,), 90, 1032),
+    (7, "long-sword", 0x174CF64, (85,), 86, 1412),
+    (8, "switch-axe", 0x174D838, (103, 148, 178, 179), 105, 1499),
+    (1, "sword-shield", 0x174A354, (53,), 54, 1450),
+    (9, "gunlance", 0x174E110, (82,), 83, 1032),
 )
 
 
-def replay(weapon, style, name, vtable, sprints, brake, sprint_clip):
+def replay(weapon, name, vtable, sprints, brake, sprint_clip):
     g, nx, _, manager, _, packet, local, guest, second, sender, _ = network_scene(
-        weapon, style, name + "-extreme", vtable
+        weapon, name + "-extreme", vtable
     )
 
     def half(addr, value):

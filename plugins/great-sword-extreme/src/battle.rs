@@ -174,7 +174,7 @@ pub(super) unsafe fn local(p: u32) -> bool {
         }
         mhgu_sdk::style::hunter::local() == Some(p)
             && mhgu_sdk::style::hunter::equipped_weapon(p) == Some(0)
-            && mhgu_sdk::style::selected(0) == 1
+            && mhgu_sdk::style::selected(0) == Some(crate::STYLE_ID)
     }
 }
 mod peer;

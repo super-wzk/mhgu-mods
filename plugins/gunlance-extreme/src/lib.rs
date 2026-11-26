@@ -19,7 +19,7 @@ mod sound;
 #[cfg(target_arch = "arm")]
 const WEAPON: u8 = 9;
 #[cfg(target_arch = "arm")]
-const STYLE_ID: u32 = 6;
+const STYLE_ID: u32 = 15;
 
 #[cfg(target_arch = "arm")]
 macro_rules! native {
@@ -51,7 +51,7 @@ unsafe fn active(actor: u32) -> bool {
             && hunter::local() == Some(actor)
             && hunter::is_quest(actor)
             && hunter::equipped_weapon(actor) == Some(WEAPON)
-            && selected(WEAPON) == STYLE_ID
+            && selected(WEAPON) == Some(STYLE_ID)
     }
 }
 

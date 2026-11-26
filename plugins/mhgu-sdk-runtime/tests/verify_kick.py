@@ -9,13 +9,14 @@ from unicorn.arm_const import UC_ARM_REG_SP
 PLUGINS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PLUGINS / "great-sword-extreme/tests"))
 from verify_style import (
+    STYLE_IDS,
     CHANGE_ACTION, COMMAND_UPDATE, DISPATCH, boot, hunters, load_registered_style,
     quest_entries, setup_controller,
 )
 
 
-def replay(elf, row, weapon, style, plugin, vtable):
-    g = boot(elf, f"[Weapons]\n{weapon}={style}\n".encode(), ("registry",))
+def replay(elf, row, weapon, plugin, vtable):
+    g = boot(elf, f"[Weapons]\n{weapon}={STYLE_IDS[plugin]}\n".encode(), ("registry",))
     nro = PLUGINS / plugin / "dist" / plugin / "romfs/nativeNX/plugins" / (
         plugin.replace("-", "_") + ".nro"
     )
@@ -83,11 +84,11 @@ if __name__ == "__main__":
         zlib.decompress(raw) for name, kind, raw in quest_entries("com_m0.arc")
         if kind == 0x5139901D and name.endswith(b"\\plcmd_com_0x0010_800a")
     )
-    for weapon, style, plugin, vtable in (
-        (0, 1, "great-sword-extreme", 0x1749A88),
-        (11, 2, "dual-blades-extreme", 0x174F2B4),
-        (7, 3, "long-sword-extreme", 0x174CF64),
-        (8, 4, "switch-axe-extreme", 0x174D838),
-        (9, 6, "gunlance-extreme", 0x174E110),
+    for weapon, plugin, vtable in (
+        (0, "great-sword-extreme", 0x1749A88),
+        (11, "dual-blades-extreme", 0x174F2B4),
+        (7, "long-sword-extreme", 0x174CF64),
+        (8, "switch-axe-extreme", 0x174D838),
+        (9, "gunlance-extreme", 0x174E110),
     ):
-        replay(elf, row, weapon, style, plugin, vtable)
+        replay(elf, row, weapon, plugin, vtable)

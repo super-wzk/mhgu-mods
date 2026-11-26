@@ -11,7 +11,7 @@ from damage_target import damage_target
 
 def replay():
     vtable = 0x174A354
-    s = Scene(1, 5, "sword-shield", vtable)
+    s = Scene(1, "sword-shield", vtable)
     g, a = s.g, s.actor
     hdp = next(
         zlib.decompress(data)

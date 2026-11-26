@@ -7,7 +7,7 @@
 | [crates/mhgu-sdk](../crates/mhgu-sdk/README.md) | GU 1.4 引擎绑定，包括原生输入和转向、动作、碰撞、资源与注册接口。 |
 | [crates/mhfz-sdk](../crates/mhfz-sdk/README.md) | 极型武器共用的 Frontier 动作程序、动作库预加载、技能帧数补正、弹刀、镜头震动和表现时序。 |
 | [plugins/mhgu-sdk-runtime](../plugins/mhgu-sdk-runtime/README.md) | 构建共享 Forge 插件 `mhgu-sdk.nro`，提供武器风格与怪物物种注册服务，管理 GU 共用钩子和持久化。 |
-| [极之型大剑](../plugins/great-sword-extreme/README.md)、[极之型双剑](../plugins/dual-blades-extreme/README.md)、[极之型太刀](../plugins/long-sword-extreme/README.md)、[极之型斩斧 F](../plugins/switch-axe-extreme/README.md)、[极之型单手剑](../plugins/sword-shield-extreme/README.md)、[极之型铳枪](../plugins/gunlance-extreme/README.md) | 各武器的动作编号、派生优先级、精准防御规则、槽、专属狩技及表现资源。 |
+| [极之型大剑](../plugins/great-sword-extreme/README.md)、[极之型双剑](../plugins/dual-blades-extreme/README.md)、[极之型太刀](../plugins/long-sword-extreme/README.md)、[极之型斩斧F](../plugins/switch-axe-extreme/README.md)、[极之型单手剑](../plugins/sword-shield-extreme/README.md)、[极之型铳枪](../plugins/gunlance-extreme/README.md) | 各武器的动作编号、派生优先级、精准防御规则、槽、专属狩技及表现资源。 |
 | [plugins/monster-espinas](../plugins/monster-espinas/README.md) | 独立物种、任务和怪物行为的接入实例。 |
 | [tools/mhfz2mhgu](../tools/mhfz2mhgu/README.md) | 宿主资源转换 CLI。`mhf-resource` 读 FZ 格式，`mhgu-resource` 读写 GU 格式，`src/hunter.rs` 等负责具体移植映射。 |
 | [tools/package_weapon_styles.py](../tools/package_weapon_styles.py) | 组装 SDK 和六个武器的安装产物，在仓库根目录生成极之型整合包。 |
@@ -76,7 +76,7 @@ python3 tools/package_weapon_styles.py
 
 完整极之型合包包含 SDK 和当前六个武器模组目录。归档前核对每个目录的 NRO 和配套资源。已有合包的命名格式为 `mhgu边境风格-YYYYMMDDHHMM.7z`。
 
-重启游戏后，在原版装备箱按当前武器选风格。配置保存在 Forge 的 `savedata:/style_registry.ini`，`[Weapons]` 下用 GU 武器编号作键。查错误时依次确认 **安装包的 NRO 和资源、Forge 初始化和钩子日志、装备箱选择、任务内执行路径**。看到模组被列出或 NRO 被加载，只能确认到了加载阶段。
+重启游戏后，在原版装备箱按当前武器选风格。配置保存在 Forge 的 `savedata:/style_registry.ini`，`[Weapons]` 下用 GU 武器编号作键，值为自定义风格 ID（如大剑的 `10`）或 `native`。旧编号和旧字符串标识按原版风格读取，更新 SDK 和全部武器 NRO 后可在装备箱重新选择。查错误时依次确认 **安装包的 NRO 和资源、Forge 初始化和钩子日志、装备箱选择、任务内执行路径**。看到模组被列出或 NRO 被加载，只能确认到了加载阶段。
 
 ## 验证范围
 
@@ -84,6 +84,7 @@ python3 tools/package_weapon_styles.py
 | --- | --- |
 | 单个速度、距离或计时参数 | 构建受影响的插件。需要安装时对照安装文件与本次产物。手感由任务内观察确认。 |
 | 装备箱选择、肩键与 GU 命令优先级 | [装备箱与保存](../plugins/great-sword-extreme/tests/verify_menu.py)、[聊天快捷键与肩键交换](../plugins/mhgu-sdk-runtime/tests/verify_chat_shortcut.py)、[大剑输入及动作生命周期](../plugins/great-sword-extreme/tests/verify_style.py)。 |
+| 个人和队友状态、装备组合风格名称 | [状态与装备资料回放](../plugins/great-sword-extreme/tests/verify_menu.py)覆盖 GU 状态页面、装备资料的广播与单播、队友换风格和槽位复用。实机用同版本 SDK 的两台客户端在集会所和任务中互查状态，切回原版后再检查一次。 |
 | 冲刺收刀和击飞受身 | [公共动作回放](../plugins/mhgu-sdk-runtime/tests/verify_ground_recovery.py)核对冲刺、刹停和普通收刀选片、GU 的收刀退出，以及双剑、斩斧和铳枪的前后受身。[收刀联机回放](../plugins/mhgu-sdk-runtime/tests/verify_sheathe_multiplayer.py)使用 `MHGU_ROMFS` 验证队友跳过冲刺或刹停时的选片。 |
 | 攻击、防御、狩技和武器专属派生 | [大剑精防、蓄力与派生](../plugins/great-sword-extreme/tests/verify_style.py)、[大剑与双剑弹刀、刃打和双手刀光](../plugins/mhgu-sdk-runtime/tests/verify_deflection.py)、[专属狩技](../plugins/mhgu-sdk-runtime/tests/verify_weapon_arts.py)、[太刀](../plugins/long-sword-extreme/tests/verify_port.py)、[斩斧](../plugins/switch-axe-extreme/tests/verify_port.py)、[单手剑](../plugins/sword-shield-extreme/tests/verify_port.py)及[铳枪](../plugins/gunlance-extreme/tests/verify_port.py)的动作回放。 |
 | 动作、音效、特效与材质 | 对照输出槽位、事件帧、挂点或材质字段。参考[资源检查](../plugins/great-sword-extreme/tests/verify_assets.py)、[原生粒子](../plugins/great-sword-extreme/tests/verify_native_fx.py)和[材质绘制](../plugins/great-sword-extreme/tests/verify_native_material.py)。 |

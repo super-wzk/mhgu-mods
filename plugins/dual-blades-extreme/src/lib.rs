@@ -20,7 +20,7 @@ mod sound;
 #[cfg(target_arch = "arm")]
 const WEAPON: u8 = 11;
 #[cfg(target_arch = "arm")]
-const STYLE_ID: u32 = 2;
+const STYLE_ID: u32 = 11;
 
 #[cfg(target_arch = "arm")]
 macro_rules! native {
@@ -49,7 +49,7 @@ unsafe fn write<T>(address: u32, offset: u32, value: T) {
 }
 #[cfg(target_arch = "arm")]
 fn local_actor() -> Option<u32> {
-    if mhgu_sdk::style::selected(WEAPON) != STYLE_ID {
+    if mhgu_sdk::style::selected(WEAPON) != Some(STYLE_ID) {
         return None;
     }
     unsafe {

@@ -336,7 +336,7 @@ def round_force(s, waves, load, shape):
 def replay():
     from unicorn import arm_const
 
-    s = Scene(1, 5, "sword-shield", 0x174A354)
+    s = Scene(1, "sword-shield", 0x174A354)
     g, a = s.g, s.actor
     hits, waves = [], []
     shape, mgr, vt, load = [g.alloc(n) for n in (112, 16, 64, 4)]
@@ -361,7 +361,7 @@ def replay():
         return 1
 
     s.stub(0x168960, construct)
-    api = api_for(g, b"mhgu::StyleRegistryV1", b"SRG1")
+    api = api_for(g, b"mhgu::StyleRegistryV3", b"SRG3")
     s.stub(
         g.get(api + 8),
         lambda owner, attack, *_: (

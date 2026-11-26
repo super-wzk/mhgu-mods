@@ -17,7 +17,7 @@ from unicorn import arm_const as arm
 
 def jump_slash():
     vtable = 0x174A354
-    scene = Scene(1, 5, "sword-shield", vtable)
+    scene = Scene(1, "sword-shield", vtable)
     g, actor = scene.g, scene.actor
     manager, manager_vt, load, pel, handle, proof, parent = (
         g.alloc(n) for n in (16, 64, 4, 128, 32, 416, 16)

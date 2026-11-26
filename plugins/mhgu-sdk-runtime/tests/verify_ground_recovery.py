@@ -6,12 +6,12 @@ import sys
 PLUGINS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PLUGINS / "great-sword-extreme/tests"))
 from unicorn.arm_const import UC_ARM_REG_S0
-from verify_style import DECODE, DISPATCH, ENCODE, boot, hunters, load_registered_style, setup_controller
+from verify_style import STYLE_IDS, DECODE, DISPATCH, ENCODE, boot, hunters, load_registered_style, setup_controller
 
 
-def replay(weapon, style, plugin, vt, sprint=None, recoveries=()):
+def replay(weapon, plugin, vt, sprint=None, recoveries=()):
     elf = (PLUGINS.parent / "mhgu/main.elf").read_bytes()
-    g = boot(elf, f"[Weapons]\n{weapon}={style}\n".encode(), ("registry",))
+    g = boot(elf, f"[Weapons]\n{weapon}={STYLE_IDS[plugin]}\n".encode(), ("registry",))
     dist = PLUGINS / plugin / "dist" / plugin / "romfs/nativeNX"
     desc = load_registered_style(g, dist / "plugins" / (plugin.replace("-", "_") + ".nro"))
     actor, eq, _ = hunters(g)
@@ -146,13 +146,13 @@ def replay_launch(g, desc, actor, set_action, cases):
 
 
 if __name__ == "__main__":
-    replay(0, 1, "great-sword-extreme", 0x1749A88, (200, 201, 1032))
-    replay(1, 5, "sword-shield-extreme", 0x174A354, (53, 54, 1450))
-    replay(11, 2, "dual-blades-extreme", 0x174F2B4, (89, 90, 1032),
+    replay(0, "great-sword-extreme", 0x1749A88, (200, 201, 1032))
+    replay(1, "sword-shield-extreme", 0x174A354, (53, 54, 1450))
+    replay(11, "dual-blades-extreme", 0x174F2B4, (89, 90, 1032),
            ((0, ((77, 13, 12), (76, 13, 13)), 94.),))
-    replay(7, 3, "long-sword-extreme", 0x174CF64, (85, 86, 1412))
-    replay(9, 6, "gunlance-extreme", 0x174E110, (82, 83, 1032),
+    replay(7, "long-sword-extreme", 0x174CF64, (85, 86, 1412))
+    replay(9, "gunlance-extreme", 0x174E110, (82, 83, 1032),
            ((0, ((69, 13, 12), (68, 13, 13)), 100.),))
-    replay(8, 4, "switch-axe-extreme", 0x174D838,
+    replay(8, "switch-axe-extreme", 0x174D838,
            recoveries=((0, ((101, 14, 77), (102, 14, 78)), 60.),
                        (148, ((167, 15, 50), (168, 15, 51)), 60.)))

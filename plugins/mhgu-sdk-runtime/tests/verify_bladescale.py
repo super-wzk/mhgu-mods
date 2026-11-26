@@ -7,8 +7,8 @@ from verify_weapon_arts import Scene, float_bits
 from verify_style import DISPATCH, WEAPON_DISPATCH
 
 
-def replay(weapon, style, name, vtable, states, ordinary, weight):
-    scene = Scene(weapon, style, name, vtable)
+def replay(weapon, name, vtable, states, ordinary, weight):
+    scene = Scene(weapon, name, vtable)
     g, actor = scene.g, scene.actor
     # Let GU read the equipped skill bits, weapon property, drawn flag and
     # sharpness. Capture the feedback request independently of the gauge value.
@@ -161,5 +161,5 @@ def replay(weapon, style, name, vtable, states, ordinary, weight):
 
 
 if __name__ == "__main__":
-    replay(1, 5, "sword-shield", 0x174A354, (37, 38, 39), 0, 7)
-    replay(11, 2, "dual-blades", 0x174F2B4, (*range(36, 41), 73, 74, 75, *range(83, 89)), 0, 9)
+    replay(1, "sword-shield", 0x174A354, (37, 38, 39), 0, 7)
+    replay(11, "dual-blades", 0x174F2B4, (*range(36, 41), 73, 74, 75, *range(83, 89)), 0, 9)

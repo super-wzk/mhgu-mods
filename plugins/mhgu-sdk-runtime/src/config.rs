@@ -1,7 +1,12 @@
 //! Forge savedata INI, using the same tokenizer as Forge's config module.
 const SECTION: &str = "Weapons";
 pub const WEAPONS: usize = 15;
-type Selection = [u16; WEAPONS];
+const NATIVE: &str = "native";
+pub type Selection = [Option<u16>; WEAPONS];
+
+pub fn custom_id(id: u32) -> Option<u16> {
+    (id >= 10).then(|| u16::try_from(id).ok()).flatten()
+}
 
 fn parse(bytes: &[u8]) -> Selection {
     let Ok(s) = core::str::from_utf8(bytes) else {
@@ -16,7 +21,10 @@ fn parse(bytes: &[u8]) -> Selection {
             ini_core::Item::Section(name) => weapons = name == SECTION,
             ini_core::Item::Property(key, raw) if weapons => {
                 if let Some(slot) = decimal::<usize>(key).and_then(|i| selection.get_mut(i)) {
-                    *slot = raw.and_then(decimal).unwrap_or(0);
+                    *slot = match raw {
+                        Some(NATIVE) => Some(0),
+                        _ => raw.and_then(decimal).and_then(custom_id),
+                    };
                 }
             }
             ini_core::Item::Error(_) => return Selection::default(),
@@ -64,8 +72,16 @@ pub fn save(selection: Selection) -> bool {
             return false;
         };
         let mut text = alloc::format!("[{SECTION}]\n");
-        for (weapon, id) in selection.into_iter().enumerate().filter(|&(_, id)| id != 0) {
-            let _ = writeln!(text, "{weapon} = {id}");
+        for (weapon, value) in selection.into_iter().enumerate() {
+            match value {
+                Some(0) => {
+                    let _ = writeln!(text, "{weapon} = {NATIVE}");
+                }
+                Some(id) => {
+                    let _ = writeln!(text, "{weapon} = {id}");
+                }
+                None => {}
+            }
         }
         let Ok(file) = MtFile::open(&path, OpenMode::Write) else {
             return false;
@@ -116,10 +132,11 @@ mod tests {
     #[test]
     fn forge_ini() {
         let mut expected = Selection::default();
-        expected[0] = 1;
-        expected[11] = 2;
+        expected[0] = Some(10);
+        expected[11] = Some(0);
+        expected[14] = Some(65535);
         assert_eq!(
-            parse(b"\xef\xbb\xbf[Weapons]\r\n0 = 1\r\n11 = 2\r\n14 = 65536\r\n99 = 3"),
+            parse(b"\xef\xbb\xbf[Weapons]\r\n0 = 10\r\n11 = native\r\n14 = 65535\r\n99 = 11"),
             expected
         );
         for invalid in [
@@ -127,8 +144,11 @@ mod tests {
             b"[General]\nstyle=1",
             b"[Other]\nstyle=1",
             b"[Weapons]\n0=65536",
+            b"[Weapons]\n0=1\n11=2",
+            b"[Weapons]\n0=9",
+            b"[Weapons]\n0=0",
             b"[Weapons]\n11=-1",
-            b"[Weapons]\n0=true",
+            b"[Weapons]\n0=great-sword-extreme",
             b"[Weapons\n0=1",
             b"\xff",
             b"1",

@@ -18,7 +18,7 @@ mod program;
 #[cfg(target_arch = "arm")]
 mod sound;
 #[cfg(target_arch = "arm")]
-const STYLE_ID: u32 = 1;
+const STYLE_ID: u32 = 10;
 
 // Forge 1.5 generates a safe extern handler that dereferences its ABI argument.
 #[cfg(target_arch = "arm")]

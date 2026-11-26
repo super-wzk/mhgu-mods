@@ -65,7 +65,7 @@ pub(super) unsafe fn riot_active(actor: u32) -> bool {
 }
 
 fn selected(actor: u32) -> bool {
-    actor != 0 && actor == OWNER.load(Relaxed) && style::selected(WEAPON_ID) == STYLE_ID
+    actor != 0 && actor == OWNER.load(Relaxed) && style::selected(WEAPON_ID) == Some(STYLE_ID)
 }
 
 unsafe fn with_equipped_battle<T>(actor: u32, visit: impl FnOnce(&mut Battle) -> T) -> Option<T> {

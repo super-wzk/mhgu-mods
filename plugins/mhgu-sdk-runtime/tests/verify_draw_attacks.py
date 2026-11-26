@@ -11,8 +11,8 @@ from verify_style import CHANGE_ACTION, DB_DRAW_ROUTE, SA_DRAW_ROUTE, SNS_DRAW_R
 
 
 class DrawScene(Scene):
-    def __init__(self, weapon, style, name, vtable):
-        super().__init__(weapon, style, name, vtable)
+    def __init__(self, weapon, name, vtable):
+        super().__init__(weapon, name, vtable)
         g, actor = self.g, self.actor
         self.skills = set()
         self.hits = []
@@ -112,20 +112,20 @@ class DrawScene(Scene):
 def ground_draws():
     cases = (
         # Weapon, style, name, hunter vtable, draw selector and kind, state, frames, KO and hits.
-        (1, 5, "sword-shield", 0x174A354, SNS_DRAW_ROUTE, 0, 9, (0, 80, 8), 30, 1, [(0, 5)]),
-        (8, 4, "switch-axe", 0x174D838, SA_DRAW_ROUTE, 0, 10, (0, 80, 38, 40), 30, 1, []),
+        (1, "sword-shield", 0x174A354, SNS_DRAW_ROUTE, 0, 9, (0, 80, 8), 30, 1, [(0, 5)]),
+        (8, "switch-axe", 0x174D838, SA_DRAW_ROUTE, 0, 10, (0, 80, 38, 40), 30, 1, []),
         # The light-sword draw is selected by the controller after unlock.
-        (8, 4, "switch-axe", 0x174D838, None, 0x8004, 4, (0, 46, 38), 30, 1, []),
-        (9, 6, "gunlance", 0x174E110, 0x11A9D08, 0, 20, (0, 85, 42), 30, 1, []),
-        (11, 2, "dual-blades", 0x174F2B4, DB_DRAW_ROUTE, 0, 16, (0, 86, 28, 36), 8, 2, []),
+        (8, "switch-axe", 0x174D838, None, 0x8004, 4, (0, 46, 38), 30, 1, []),
+        (9, "gunlance", 0x174E110, 0x11A9D08, 0, 20, (0, 85, 42), 30, 1, []),
+        (11, "dual-blades", 0x174F2B4, DB_DRAW_ROUTE, 0, 16, (0, 86, 28, 36), 8, 2, []),
         # GU's sheathed-run slot 73 becomes the Frontier dash slash.
-        (11, 2, "dual-blades", 0x174F2B4, None, 73, 82, (4,), 8, 1, []),
+        (11, "dual-blades", 0x174F2B4, None, 73, 82, (4,), 8, 1, []),
     )
     # Converted SDT hitstop by state, including the paired shield/blade opener.
     factors = {(1, 9): (0, 1), (8, 10): (2,), (8, 4): (1,), (9, 20): (1,),
                (11, 16): (1, 1), (11, 82): (1,)}
-    for weapon, style, name, vt, route, kind, state, frames, ko, hits, other in cases:
-        s = DrawScene(weapon, style, name, vt)
+    for weapon, name, vt, route, kind, state, frames, ko, hits, other in cases:
+        s = DrawScene(weapon, name, vt)
         for drawn, skills in ((False, {91}), (False, {92}), (False, {91, 92}), (True, {91, 92})):
             s.skills = skills
             s.idle(drawn)
@@ -149,7 +149,7 @@ def ground_draws():
 
 
 def aerial_hitstop():
-    s = DrawScene(11, 2, "dual-blades", 0x174F2B4)
+    s = DrawScene(11, "dual-blades", 0x174F2B4)
     s.idle(True)
     s.change(16, 0x8000 + 78)
     s.frame(0)
@@ -166,7 +166,7 @@ def aerial_hitstop():
 
 
 def axe_charge():
-    s = DrawScene(8, 4, "switch-axe", 0x174D838)
+    s = DrawScene(8, "switch-axe", 0x174D838)
     g = s.g
     s.skills = {91, 92}
     g.put(s.actor + 28, float_bits(2))

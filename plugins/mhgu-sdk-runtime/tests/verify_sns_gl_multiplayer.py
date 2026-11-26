@@ -62,7 +62,7 @@ def settle(g, target, hit, player):
 def sword_shield():
     vtable = 0x174A354
     g, _, _, manager, session, packet, local, peer, _, sender, target = network_scene(
-        1, 5, "sword-shield-extreme", vtable
+        1, "sword-shield-extreme", vtable
     )
     configure_target(g, target)
     g.cpu.hook_del(g.traps.pop(0x2B76CC))
@@ -285,7 +285,7 @@ def shell_factory(g):
 def gunlance():
     vtable = 0x174E110
     g, _, _, manager, _, packet, local, peer, other, sender, target = network_scene(
-        9, 6, "gunlance-extreme", vtable
+        9, "gunlance-extreme", vtable
     )
     configure_target(g, target)
     g.stub(0x53A058, lambda *_: 5001)

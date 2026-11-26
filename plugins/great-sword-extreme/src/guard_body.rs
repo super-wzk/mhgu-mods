@@ -214,7 +214,7 @@ unsafe fn has_ground_body(state: u32) -> bool {
 
 unsafe fn local_guard_active(actor: u32) -> bool {
     unsafe {
-        style::selected(0) == STYLE_ID
+        style::selected(0) == Some(STYLE_ID)
             && hunter::equipped_weapon(actor) == Some(0)
             && hunter::is_quest(actor)
             && guard_body_active(actor)

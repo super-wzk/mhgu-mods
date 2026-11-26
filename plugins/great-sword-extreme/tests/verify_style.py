@@ -19,9 +19,19 @@ NX = ROOT / "dist/great-sword-extreme/romfs/nativeNX"
 PROVIDER_BASE = 0x9000000
 CONTENT = NX / "plugins/great_sword_extreme.nro"
 CONFIG = "savedata:/style_registry.ini"
+STYLE_IDS = {
+    "great-sword-extreme": 10,
+    "dual-blades-extreme": 11,
+    "long-sword-extreme": 12,
+    "switch-axe-extreme": 13,
+    "sword-shield-extreme": 14,
+    "gunlance-extreme": 15,
+}
 ENCODE, DECODE = 0x27C6A0, 0x27C6D4
 MENU_OPEN, MENU_UPDATE = 0x548B7C, 0x5490FC
 STATUS_STYLE, STATUS_STYLE_SMALL = 0x62FB78, 0x633450
+SET_STYLE_HOOKS = {0x72D3D8, 0x58A3DC, 0x58A44C, 0x5D96F8}
+PROFILE_HOOKS = {0x202640, 0x202764, 0x202894, 0x274400, 0x2776D4, 0x273BE0}
 HIT_ROW = 0x2A8A88
 DISPATCH, BLOCK = 0x282DA8, 0x2F2BA0
 INIT_HUNTER = 0x29B7D4
@@ -64,7 +74,7 @@ def api_for(g, identifier, magic):
 
 
 def service(g):
-    api = api_for(g, b"mhgu::StyleRegistryV1", b"SRG1")
+    api = api_for(g, b"mhgu::StyleRegistryV3", b"SRG3")
     return g.get(api), g.get(api + 4)
 
 
@@ -133,6 +143,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         g.put(g.run(g.get(vtable + 20)) + 16, 0x1886BB8)
     g.stub(0x13EFDAC, lambda p, size, *_: g.cpu.mem_write(p, bytes(size)))
     g.inline_hooks = g.inline_hooks | {
+        STATUS_STYLE, STATUS_STYLE_SMALL,
         ENCODE,
         DECODE,
         GAME_STYLE,
@@ -163,7 +174,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         WEAPON_DISPATCH,
         HIT_ROW,
         0x169548,
-    }
+    } | PROFILE_HOOKS | SET_STYLE_HOOKS
     g.originals = {}
     install = g.hook
 
@@ -206,6 +217,8 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             0x5B1294, 0x5B0F70, 0x646A3C, 0x646AD0, 0x5CB780, 0x65F7A4,
             STATUS_STYLE,
             STATUS_STYLE_SMALL,
+            *PROFILE_HOOKS,
+            *SET_STYLE_HOOKS,
             GAME_STYLE,
             ART_READY,
             ART_CAPACITY,
@@ -2424,13 +2437,13 @@ def verify_jump_slash(g, p, tick, neutral):
 
 def verify_sdk_registration(elf):
     # Exercise the actual SDK caller in the great-sword NRO, not only the raw ABI.
-    config = b"[Weapons]\r\n0 = 1\r\n1 = 1\r\n"
+    config = b"[Weapons]\r\n0 = 10\r\n1 = 10\r\n"
     for case in ("ready", "conflict", "worker"):
         g = boot(elf, config, ("registry",))
         register, selected = service(g)
         original_thread = g.thread
         if case == "conflict":
-            assert g.run(register, style_descriptor(g, 1, 1), 0, 0) == 0
+            assert g.run(register, style_descriptor(g, 10, 1), 0, 0) == 0
         elif case == "worker":
             g.thread = original_thread + 0x100
         calls = []
@@ -2441,8 +2454,8 @@ def verify_sdk_registration(elf):
         assert "forge_onUpdate" not in ex
         assert len(calls) == (0 if case == "worker" else 1)
         g.thread = original_thread
-        assert g.run(selected, 0) == int(case == "ready")
-        assert g.run(selected, 1) == int(case == "conflict")
+        assert g.run(selected, 0) == (10 if case == "ready" else 0)
+        assert g.run(selected, 1) == (10 if case == "conflict" else 0)
         assert sum("Conflict" in msg for _, msg in g.logs) == int(case == "conflict")
 
 
@@ -2491,7 +2504,7 @@ def verify_peer_callbacks(elf):
 
 def verify():
     elf = (REPO / "mhgu/main.elf").read_bytes()
-    on = b"[Weapons]\r\n0 = 1\r\n"
+    on = b"[Weapons]\r\n0 = 10\r\n"
     verify_action_lifecycle(elf, on)
     verify_sdk_registration(elf)
     verify_peer_callbacks(elf)
@@ -2499,30 +2512,34 @@ def verify():
     g = boot(elf, on)
     verify_great_sword(g)
     g = boot(elf, on, ("sword", "registry"))
-    assert g.run(service(g)[1], 0) == 1
+    assert g.run(service(g)[1], 0) == 10
     g = boot(elf, on, ("sword",))
     assert not g.hooks and g.files == {CONFIG: on}
     g = boot(elf, on, ("registry",))
     assert g.run(service(g)[1], 0) == 0
     for cfg in [
         None,
+        b"[Weapons]\n0=native",
         b"[Weapons]\n0=0",
+        b"[Weapons]\n0=1",
+        b"[Weapons]\n0=great-sword-extreme",
         b"1",
         b"[Weapons]\n0=-2",
-        b"[Weapons]\n0=999",
+        b"[Weapons]\n0=65535",
+        b"[Weapons]\n0=65536",
+        b"[Weapons]\n0=10\n0=native",
         b"[General]\nstyle=1",
     ]:
         g = boot(elf, cfg)
         assert g.run(service(g)[1], 0) == 0
         actor, _, _ = hunters(g)
         assert g.run(g.hooks.get(ENCODE, ENCODE), actor, 5001) == 0x501
-        if cfg is None:
-            assert not g.files
+        assert g.files == ({} if cfg is None else {CONFIG: cfg})
     g = boot(elf, None, mount_ok=False)
     assert not g.files and g.run(service(g)[1], 0) == 0
 
     # A second plugin may register after config load. Its ID applies only to its weapon.
-    g = boot(elf, b"[Weapons]\n0=1\n1=42")
+    g = boot(elf, b"[Weapons]\n0=10\n1=42\n8=42")
     register, selected = service(g)
     actor, eq, remote = hunters(g)
 
@@ -2531,14 +2548,11 @@ def verify():
     other = style_descriptor(g, 42, 1, enc)
     assert g.run(selected, 1) == 0
     assert g.run(register, other, 0, 0) == g.run(register, other, 0, 0) == 0
-    assert (
-        g.run(register, style_descriptor(g, 42, 0), 0, 0) == 2
-        and g.run(register, style_descriptor(g, 1, 1), 0, 0) == 2
-    )
-    for bad in [0, style_descriptor(g, 0, 0), style_descriptor(g, 65536, 0),
-                style_descriptor(g, 3, 255), style_descriptor(g, 3, 0, art_slots=4)]:
+    assert g.run(register, style_descriptor(g, 42, 0), 0, 0) == 2
+    for bad in [0, style_descriptor(g, 0, 0), style_descriptor(g, 9, 0), style_descriptor(g, 65536, 0),
+                style_descriptor(g, 43, 255), style_descriptor(g, 43, 0, art_slots=4)]:
         assert g.run(register, bad, 0, 0) == 1
-    assert g.run(selected, 0) == 1 and g.run(selected, 1) == 42
+    assert (g.run(selected, 0), g.run(selected, 1), g.run(selected, 8)) == (10, 42, 0)
     g.cpu.mem_write(eq + 1236, b"\x01")
     assert g.run(g.hooks[ENCODE], actor, 5001) == 0x801
     assert g.run(g.hooks[ENCODE], remote, 5001) == 0x501

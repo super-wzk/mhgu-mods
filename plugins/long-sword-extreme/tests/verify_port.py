@@ -722,11 +722,11 @@ def startup_camera(elf):
 
 
 def plugin(elf, selected):
-    g = boot(elf, b"[Weapons]\n7=3\n" if selected else b"[Weapons]\n", ("registry",))
+    g = boot(elf, b"[Weapons]\n7=12\n" if selected else b"[Weapons]\n", ("registry",))
     _, selection = service(g)
     d = load_registered_style(g, NX / "plugins/long_sword_extreme.nro")
-    assert g.get(d)==3 and g.get(d+4)==7 and bytes(g.cpu.mem_read(d+16,2))==bytes((1,3))
-    assert g.run(selection,7)==(3 if selected else 0)
+    assert g.get(d)==12 and g.get(d+4)==7 and bytes(g.cpu.mem_read(d+16,2))==bytes((1,3))
+    assert g.run(selection,7)==(12 if selected else 0)
     a,eq,remote = hunters(g)
     g.put(a,0x174cf64)
     g.cpu.mem_write(eq+1236,bytes([7]))

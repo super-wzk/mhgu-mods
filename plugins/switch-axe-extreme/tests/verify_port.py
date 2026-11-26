@@ -10,10 +10,10 @@ sys.path.insert(0, str(ROOT.parent / "mhgu-sdk-runtime/tests"))
 from verify_style import BLOCK, CHANGE_ACTION, api_for, boot, hunters, load_registered_style, service, setup_controller
 
 def main():
-    g = boot((REPO / "mhgu/main.elf").read_bytes(), b"[Weapons]\n8=4\n", ("registry",))
+    g = boot((REPO / "mhgu/main.elf").read_bytes(), b"[Weapons]\n8=13\n", ("registry",))
     desc = load_registered_style(g, ROOT / "dist/switch-axe-extreme/romfs/nativeNX/plugins/switch_axe_extreme.nro")
     _, selected = service(g)
-    assert (g.get(desc), g.get(desc+4), g.run(selected,8), g.run(selected,7)) == (4,8,4,0)
+    assert (g.get(desc), g.get(desc+4), g.run(selected,8), g.run(selected,7)) == (13,8,13,0)
     actor, eq, remote = hunters(g)
     g.cpu.mem_write(eq+1236, bytes([8]))
     g.put(actor,0x174d838)
@@ -52,7 +52,7 @@ def main():
     assert g.run(g.get(desc+60),actor,out)==2
     frame(24)
     assert g.run(g.get(desc+60),actor,out)==1
-    reg=api_for(g,b"mhgu::StyleRegistryV1",b"SRG1")
+    reg=api_for(g,b"mhgu::StyleRegistryV3",b"SRG3")
     # GU 2F0670 rechecks the guard, applies its reaction and requests recoil.
     # Substitute only the outer scene's action setup and recoil animation.
     g.put(actor + 5068, 1)

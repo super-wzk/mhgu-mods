@@ -4,16 +4,16 @@
 
 ## 1. 确认源武器和招式表
 
-从同一版本的 FZ 载入器和 `dat` 数据确认武器、风格、动作表、动作资源。GU 的装备武器编号、FZ 的武器编号、插件风格编号分别记录。
+从同一版本的 FZ 载入器和 `dat` 数据确认武器、风格、动作表、动作资源。GU 的装备武器编号、FZ 的武器编号、自定义风格编号分别记录。
 
-| 移植实例 | FZ 武器与动作资源 | GU 装备武器编号 | 插件风格编号 |
+| 移植实例 | FZ 武器与动作资源 | GU 装备武器编号 | 自定义风格 ID |
 | --- | --- | --- | --- |
-| [极之型大剑](../plugins/great-sword-extreme/README.md) | 0，`motion/w00.mot` | 0 | 1 |
-| [极之型双剑](../plugins/dual-blades-extreme/README.md) | 6，`motion/w06.mot` | 11 | 2 |
-| [极之型太刀](../plugins/long-sword-extreme/README.md) | 7，`motion/w07.mot` | 7 | 3 |
-| [极之型斩斧 F](../plugins/switch-axe-extreme/README.md) | 12，`motion/w12.mot` | 8 | 4 |
-| [极之型单手剑](../plugins/sword-shield-extreme/README.md) | 4，`motion/w04.mot` | 1 | 5 |
-| [极之型铳枪](../plugins/gunlance-extreme/README.md) | 9，`motion/w09.mot` | 9 | 6 |
+| [极之型大剑](../plugins/great-sword-extreme/README.md) | 0，`motion/w00.mot` | 0 | 10 |
+| [极之型双剑](../plugins/dual-blades-extreme/README.md) | 6，`motion/w06.mot` | 11 | 11 |
+| [极之型太刀](../plugins/long-sword-extreme/README.md) | 7，`motion/w07.mot` | 7 | 12 |
+| [极之型斩斧F](../plugins/switch-axe-extreme/README.md) | 12，`motion/w12.mot` | 8 | 13 |
+| [极之型单手剑](../plugins/sword-shield-extreme/README.md) | 4，`motion/w04.mot` | 1 | 14 |
+| [极之型铳枪](../plugins/gunlance-extreme/README.md) | 9，`motion/w09.mot` | 9 | 15 |
 
 每招先记录输入及优先级、前置状态、源状态、片段组和槽、起始帧、混合及循环、出判定与音效帧、派生窗口、结束动作。命中、格挡、落地或该层播放到末帧才允许的转移，应注明触发条件。由原生函数补充的分支也要登记，动作表的记录数只说明有多少状态槽。
 
@@ -30,7 +30,7 @@
 
 ## 3. 接入 GU 的风格和动作生命周期
 
-- 在内容插件 `lib.rs` 定义常驻 `Style`，声明全局唯一的风格编号、GU 武器类型、所需回调和已实现的动作 ID。在 Forge 入口用 `registry::when_ready` 登记初始化函数，由该函数调用 `registry.register` 一次，并在成功后绑定预读、联机和手册等回调。见[大剑入口](../plugins/great-sword-extreme/src/lib.rs)和[双剑入口](../plugins/dual-blades-extreme/src/lib.rs)。
+- 在内容插件 `lib.rs` 定义常驻 `Style`，声明全局唯一的自定义风格编号（10–65535）、GU 武器类型、所需回调和已实现的动作 ID。在 Forge 入口用 `registry::when_ready` 登记初始化函数，由该函数调用 `registry.register(&STYLE, name, description)` 一次，并在成功后绑定预读、联机和手册等回调。见[大剑入口](../plugins/great-sword-extreme/src/lib.rs)和[双剑入口](../plugins/dual-blades-extreme/src/lib.rs)。
 - 沿用 V1 注册接口和装备箱选择。配置由注册器按武器保存，未注册、不匹配或无配置时解析为 0。`independent` 让 GU 固定表使用内部索引 0，实际风格由独立描述符决定。切出风格或场景更换时，控制器会收到空输入。旧 actor 为 0 时只清理插件自己的状态。
 - 风格动作 ID 为 0–255，编码为 GU 武器组 `16` 的 `0x8000..0x80ff` 槽。与 GU 切招交接用 `action::enter`、`action::transition_to` 等现有接口。启动新招式时可用 `accept_custom_start` 接受 GU 已排定且尚未启动的目标动作。等 GU 接受目标后再更新朝向、建立游标、播放动作并安装命中和派生窗口。
 - 从 `Input::command`、`Input::weapon_command` 与原生 `ActionRequest` 取用 GU 已解析的输入。逐项核对按下、持续、松开和组合键优先级。附加肩键读取 `Input::auxiliary_pressed`，由 GU 原生键位查询处理默认 ZR 和交换布局。收刀冲刺的原生过滤可能只保留冲刺键，注册器从 GU 的过滤前按键中恢复附加肩键。`request` 返回已注册的动作 ID 可接手请求。普通武器切招中 `NATIVE_ACTION` 放行原生槽，`PASS` 拒绝本次请求。拔刀路由中的 `PASS` 保留 GU 选中的路由。见[请求解析](../plugins/mhgu-sdk-runtime/src/style/mod.rs)和[武器路由](../plugins/mhgu-sdk-runtime/src/style/weapon.rs)。

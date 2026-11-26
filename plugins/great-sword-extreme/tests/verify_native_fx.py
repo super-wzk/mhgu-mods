@@ -454,6 +454,6 @@ if __name__ == "__main__":
     resources(Game(elf))
     binding_stack(boot(elf, None))
     print("GU draw at binding stack depths 4 and 5 preserves live and outer bindings")
-    emission(boot(elf, b"[Weapons]\n0=1\n"))
+    emission(boot(elf, b"[Weapons]\n0=10\n"))
     soft_particles(boot(elf, None))
-    draw(boot(elf, b"[Weapons]\n0=1\n"))
+    draw(boot(elf, b"[Weapons]\n0=10\n"))

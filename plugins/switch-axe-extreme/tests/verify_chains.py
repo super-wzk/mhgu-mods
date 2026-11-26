@@ -54,7 +54,7 @@ def replay(g, root, actor, form, weapon, set_action, defer_transition):
     g.put(vt + 48, load)
     g.put(0x2126A64, manager)
     g.stub(load, lambda _, kind, *__: shape if kind == 0x1857810 else 0)
-    api = api_for(g, b"mhgu::StyleRegistryV1", b"SRG1")
+    api = api_for(g, b"mhgu::StyleRegistryV3", b"SRG3")
     hits = []
     submit = g.get(api + 8)
     g.stub(submit, lambda *_: hits.append((state(), g.half(actor + 1204))) or 1)

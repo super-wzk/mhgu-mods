@@ -12,7 +12,7 @@ W01 = 0x174A354
 
 
 def mapped_inputs():
-    s = Scene(1, 5, "sword-shield", W01)
+    s = Scene(1, "sword-shield", W01)
     g, a = s.g, s.actor
     for address in (0x1897F78, 0x188C670):
         if not g.get(address):
@@ -108,7 +108,7 @@ def mapped_inputs():
 
 
 def attack_followups():
-    s = Scene(1, 5, "sword-shield", W01)
+    s = Scene(1, "sword-shield", W01)
     g, a = s.g, s.actor
     for address in (0x1897F78, 0x188C670):
         if not g.get(address):
@@ -259,7 +259,7 @@ def attack_followups():
 
 
 def roll_cancel():
-    s = Scene(1, 5, "sword-shield", W01)
+    s = Scene(1, "sword-shield", W01)
     g, a = s.g, s.actor
     mgr, vt, loader, bank = [g.alloc(n) for n in (16, 64, 4, 112)]
     g.put(0x2126A64, mgr)
@@ -297,7 +297,7 @@ def roll_cancel():
 
 
 def sprint_landing():
-    s = Scene(1, 5, "sword-shield", W01)
+    s = Scene(1, "sword-shield", W01)
     g, a = s.g, s.actor
     s.stub(0x53A058, lambda *_: 5001)
     s.stub(0x27F5D0, lambda *_: 0)
@@ -337,7 +337,7 @@ def sprint_landing():
 
 
 def lobby():
-    s = Scene(1, 5, "sword-shield", W01)
+    s = Scene(1, "sword-shield", W01)
     g, a = s.g, s.actor
     equipment = g.get(a + 5060)
     lobby = g.alloc(14000)
@@ -367,7 +367,7 @@ def lobby():
     g.put(manager + 28, a)
     assert g.run(g.hooks[DISPATCH], a) == 7 and calls == [a, lobby, a]
     _, selected = service(g)
-    assert g.run(selected, 1) == 5
+    assert g.run(selected, 1) == 14
     s.stub(g.get(W01 + 360), lambda *_: 0)
     for kind in (0, 1, 2, 3, 4):
         raw = g.run(g.originals[SNS_DRAW_ROUTE], a, kind)

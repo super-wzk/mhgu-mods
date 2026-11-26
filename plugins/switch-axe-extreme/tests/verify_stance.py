@@ -144,7 +144,7 @@ def roll_chains(g, actor, set_action, form):
 
 
 def replay(repo, root):
-    g = boot((repo / "mhgu/main.elf").read_bytes(), b"[Weapons]\n8=4\n", ("registry",))
+    g = boot((repo / "mhgu/main.elf").read_bytes(), b"[Weapons]\n8=13\n", ("registry",))
     plugin = root / "dist/switch-axe-extreme/romfs/nativeNX/plugins/switch_axe_extreme.nro"
     desc = load_registered_style(g, plugin)
     actor, eq, _ = hunters(g)

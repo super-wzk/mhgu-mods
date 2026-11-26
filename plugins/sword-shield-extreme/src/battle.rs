@@ -742,7 +742,7 @@ unsafe extern "C" fn observe(local: u32) {
 pub unsafe fn live(index: usize, actor: u32) -> bool {
     unsafe {
         if index == 0 {
-            style::selected(crate::WEAPON) == crate::STYLE_ID
+            style::selected(crate::WEAPON) == Some(crate::STYLE_ID)
                 && hunter::local() == Some(actor)
                 && hunter::is_quest(actor)
                 && hunter::equipped_weapon(actor) == Some(crate::WEAPON)

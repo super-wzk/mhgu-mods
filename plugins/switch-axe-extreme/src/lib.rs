@@ -3,7 +3,7 @@
 #[cfg(target_arch = "arm")]
 extern crate alloc;
 #[cfg(target_arch = "arm")]
-const STYLE_ID: u32 = 4;
+const STYLE_ID: u32 = 13;
 #[cfg(target_arch = "arm")]
 const WEAPON_ID: u8 = 8;
 #[cfg(target_arch = "arm")]
@@ -85,7 +85,7 @@ mod entry {
         };
         if let Err(error) = registry.register(
             &EXTREME,
-            c"极之型斩斧 F",
+            c"极之型斩斧F",
             c"吸收怪物攻击可积蓄光剑槽。\r\n\
               剑鬼形态回满光剑槽并拔出光剑，\r\n\
               保留斩击槽并回复基础25点。\r\n\

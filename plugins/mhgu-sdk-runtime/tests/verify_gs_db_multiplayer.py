@@ -10,11 +10,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "plugins/great-sword-extreme/tests"))
 from damage_target import damage_target
-from verify_style import boot, guard_body_scene, load_registered_style, quest_entries
+from verify_style import STYLE_IDS, boot, guard_body_scene, load_registered_style, quest_entries
 
 
-def network_scene(weapon, style, name, vtable):
-    g = boot((ROOT / "mhgu/main.elf").read_bytes(), f"[Weapons]\n{weapon}={style}\n".encode(), ("registry",))
+def network_scene(weapon, name, vtable):
+    g = boot((ROOT / "mhgu/main.elf").read_bytes(), f"[Weapons]\n{weapon}={STYLE_IDS[name]}\n".encode(), ("registry",))
     nx = ROOT / "plugins" / name / "dist" / name / "romfs/nativeNX"
     if weapon == 1:
         g.inline_hooks.add(0x116D464)
@@ -116,7 +116,7 @@ def network_scene(weapon, style, name, vtable):
 
 def replay(weapon, name, vtable):
     g, nx, desc, manager, _, packet, local, guest, second, sender, target = network_scene(
-        weapon, 1 if weapon == 0 else 2, name, vtable
+        weapon, name, vtable
     )
     monster, status, collision, credit = target
 

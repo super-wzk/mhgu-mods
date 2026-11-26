@@ -17,11 +17,12 @@ mod manual;
 mod menu;
 mod multiplayer;
 mod physical;
+mod profile;
 mod weapon;
 mod world_contact;
 use mhgu_sdk::style::{
     ActionRequest, Input, PASS, Style, action, hunter, input, movement, preload,
-    registry::{self, ServiceV1},
+    registry::{self, ServiceV3},
     remote::Sheathe,
     rules,
 };
@@ -43,10 +44,11 @@ struct Entry {
     rules: AtomicPtr<rules::Rules>,
 }
 
-// Published entries live until exit. Zero selections skip the list entirely.
+// Published entries live until exit. Omitted and native preferences skip the list.
 static HEAD: AtomicPtr<Entry> = AtomicPtr::new(ptr::null_mut());
+const UNSPECIFIED: u32 = u32::MAX;
 static REQUESTED: [AtomicU32; crate::config::WEAPONS] =
-    [const { AtomicU32::new(0) }; crate::config::WEAPONS];
+    [const { AtomicU32::new(UNSPECIFIED) }; crate::config::WEAPONS];
 
 unsafe extern "C" fn register(
     raw: *const Style,
@@ -56,7 +58,7 @@ unsafe extern "C" fn register(
     let Some(style) = (unsafe { raw.as_ref() }) else {
         return 1;
     };
-    if !(1..=65535).contains(&style.id)
+    if crate::config::custom_id(style.id).is_none()
         || style.weapon as usize >= REQUESTED.len()
         || style.art_slots > 3
     {
@@ -122,22 +124,25 @@ fn entries(weapon: u32) -> impl Iterator<Item = &'static Entry> {
 }
 
 fn choose(weapon: u32, entry: Option<&Entry>) {
-    let Some(requested) = REQUESTED.get(weapon as usize) else {
+    let weapon = weapon as usize;
+    let Some(requested) = REQUESTED.get(weapon) else {
         return;
     };
     let id = entry.map_or(0, |e| e.style.id);
-    requested.store(id, Ordering::Release);
-    let selection = core::array::from_fn(|i| REQUESTED[i].load(Ordering::Acquire) as u16);
+    let previous = requested.swap(id, Ordering::AcqRel);
+    if previous != id && (id != 0 || previous != UNSPECIFIED) {
+        profile::selection_changed();
+    }
+    let selection =
+        core::array::from_fn(|i| u16::try_from(REQUESTED[i].load(Ordering::Acquire)).ok());
     if !crate::config::save(selection) {
-        forge::log::prelude::warn!("Style {} selected for this session; INI write failed", id);
+        forge::log::prelude::warn!("Could not save the style selection for weapon {}", weapon);
     }
 }
 
 fn active(weapon: u32) -> Option<&'static Entry> {
     let id = REQUESTED.get(weapon as usize)?.load(Ordering::Acquire);
-    if id == 0 {
-        return None;
-    }
+    crate::config::custom_id(id)?;
     entries(weapon).find(|entry| entry.style.id == id)
 }
 
@@ -284,7 +289,7 @@ unsafe fn decode(actor: u32, packed: u32) -> u32 {
     original!(actor, packed)
 }
 
-static API: ServiceV1 = ServiceV1 {
+static API: ServiceV3 = ServiceV3 {
     register,
     selected,
     attack: attack::submit,
@@ -547,11 +552,11 @@ unsafe fn update_valor_node(widget: u32) {
 }
 
 pub(super) fn install(base: u32) {
-    for (requested, id) in REQUESTED.iter().zip(crate::config::load()) {
-        requested.store(id.into(), Ordering::Release);
-    }
     if !unsafe { registry::publish(&API) } {
         return;
+    }
+    for (requested, id) in REQUESTED.iter().zip(crate::config::load()) {
+        requested.store(id.map_or(UNSPECIFIED, u32::from), Ordering::Release);
     }
     static RULES: rules::Service = rules::Service(bind_rules);
     unsafe { rules::publish(&RULES) };
@@ -581,5 +586,6 @@ pub(super) fn install(base: u32) {
     guard::install(base);
     weapon::install(base);
     menu::install(base);
+    profile::install(base);
     manual::install(base);
 }

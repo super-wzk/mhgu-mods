@@ -21,7 +21,7 @@ mod trail;
 #[cfg(target_arch = "arm")]
 const WEAPON: u8 = 1;
 #[cfg(target_arch = "arm")]
-const STYLE_ID: u32 = 5;
+const STYLE_ID: u32 = 14;
 
 #[cfg(target_arch = "arm")]
 macro_rules! native {

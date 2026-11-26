@@ -9,7 +9,7 @@ from unicorn import UC_HOOK_MEM_WRITE, arm_const as arm
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "plugins/great-sword-extreme/tests"))
-from verify_style import api_for, boot, hunters, load_registered_style, quest_entries, setup_controller
+from verify_style import STYLE_IDS, api_for, boot, hunters, load_registered_style, quest_entries, setup_controller
 
 
 def float_bits(value):
@@ -17,9 +17,9 @@ def float_bits(value):
 
 
 class Scene:
-    def __init__(self, weapon, style, name, vtable):
+    def __init__(self, weapon, name, vtable):
         g = self.g = boot((REPO / "mhgu/main.elf").read_bytes(),
-                          f"[Weapons]\n{weapon}={style}\n".encode(), ("registry",))
+                          f"[Weapons]\n{weapon}={STYLE_IDS[name + '-extreme']}\n".encode(), ("registry",))
         g.inline_hooks = g.inline_hooks | {0x2B4E7C, 0x11A4D8C}
         if weapon == 1:
             g.inline_hooks |= {0x116D464}
@@ -74,7 +74,7 @@ class Scene:
 
 
 def switch_axe():
-    s = Scene(8, 4, "switch-axe", 0x174D838)
+    s = Scene(8, "switch-axe", 0x174D838)
     g, a, hud = s.g, s.actor, s.field("HUD")
     def meters():
         s.tick()
@@ -197,8 +197,8 @@ def switch_axe():
             assert g.get(a + 13096) == sword
     g.put(a + 13100, 0)
     assert g.run(0x2B4E7C, a) == 1  # the unmodified axe predicate resumes at expiry
-    sword_phial(Scene(8, 4, "switch-axe", 0x174D838))
-    sword_deflection(Scene(8, 4, "switch-axe", 0x174D838))
+    sword_phial(Scene(8, "switch-axe", 0x174D838))
+    sword_deflection(Scene(8, "switch-axe", 0x174D838))
     print("Switch Axe: Riot recovery, Energy Charge, timed light drain and animated morph passed")
 
 
@@ -275,7 +275,7 @@ def sword_phial(s):
     s.stub(0x887660, lambda *_: 0)  # fixture shape belongs to the scene
     s.stub(load, lambda _, kind, *__: shape if kind == 0x1857810 else 0)
     flags = []
-    registry = api_for(g, b"mhgu::StyleRegistryV1", b"SRG1")
+    registry = api_for(g, b"mhgu::StyleRegistryV3", b"SRG3")
     s.stub(g.get(registry + 8), lambda _, attack, *__: flags.append(g.get(attack + 12)) or 1)
     slash_skills(s)
     for state, frame, sword in ((0, 56, False), (70, 70, True)):
@@ -371,7 +371,7 @@ def slash_skills(s):
 
 
 def long_sword():
-    s = Scene(7, 3, "long-sword", 0x174CF64)
+    s = Scene(7, "long-sword", 0x174CF64)
     g, a, cut = s.g, s.actor, s.field("CUT")
     hit = a + 12320
     # Bind GU's color virtual to the built detour, preserving its native
@@ -396,7 +396,7 @@ def long_sword():
 
 
 def dual_blades():
-    s = Scene(11, 2, "dual-blades", 0x174F2B4)
+    s = Scene(11, "dual-blades", 0x174F2B4)
     g, a = s.g, s.actor
     s.action(16, 0x8000)
     s.stub(g.get(g.get(a) + 900), lambda *_: 0)  # contact flash

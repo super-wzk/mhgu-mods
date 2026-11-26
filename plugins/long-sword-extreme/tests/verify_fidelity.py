@@ -12,7 +12,7 @@ ROLL_ATTACKS = ((0, 0), (2, 20))  # GU weapon command and Frontier destination.
 
 def replay(g, actor, descriptor, set_action, allow_transition):
     controller = g.get(descriptor + 20)
-    registry = api_for(g, b"mhgu::StyleRegistryV1", b"SRG1")
+    registry = api_for(g, b"mhgu::StyleRegistryV3", b"SRG3")
     inputs = g.alloc(40)
     motions = []
 

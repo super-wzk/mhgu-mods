@@ -12,7 +12,7 @@ from verify_style import (
 
 
 def replay():
-    g = boot((REPO / "mhgu/main.elf").read_bytes(), b"[Weapons]\n8=4\n", ("registry",))
+    g = boot((REPO / "mhgu/main.elf").read_bytes(), b"[Weapons]\n8=13\n", ("registry",))
     nx = ROOT / "dist/switch-axe-extreme/romfs/nativeNX"
     load_registered_style(g, nx / "plugins/switch_axe_extreme.nro")
     quest, equipment, _ = hunters(g)
@@ -41,7 +41,7 @@ def replay():
     assert g.get(lobby + 13096) == 0xA5A5A5A5, "style wrote beyond the lobby hunter"
     assert g.run(g.hooks[ENCODE], lobby, 5001) == 0x501
     _, selected = service(g)
-    assert g.run(selected, 8) == 4
+    assert g.run(selected, 8) == 13
 
     g.put(manager + 28, quest)
     g.put(quest + 13096, 1)

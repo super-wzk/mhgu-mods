@@ -1,6 +1,7 @@
 //! GU 1.4 equipment-box Change Style controller. Its list has eight real row widgets
 //! (6376BC); 5490FC and 548E24, however, only have six native style records.
-use super::{Entry, choose, entries, native_menu, selected};
+use super::{Entry, active, choose, entries, native_menu, profile, selected};
+use mhgu_sdk::sync::Shared;
 
 const STOCK: usize = 6;
 const ROWS: [u32; 8] = [7, 8, 9, 10, 0x46, 0x47, 0x4e, 0x4f];
@@ -221,7 +222,7 @@ unsafe fn update(ui: u32) -> u32 {
     }
     let out = native_menu((5..=9).contains(&phase), || original!(ui));
     let next = m.phase();
-    if ((phase == 1 && next == 5) || (phase == 3 && next == 4)) && selected(weapon) != 0 {
+    if (phase == 1 && next == 5) || (phase == 3 && next == 4) {
         let had_custom_slots = m.equipped().is_some_and(|entry| entry.style.art_slots != 0);
         choose(weapon, None); // Only after GU accepts the native style.
         if had_custom_slots && phase == 1 {
@@ -243,23 +244,11 @@ unsafe fn update(ui: u32) -> u32 {
     out
 }
 
-// The status controller uses 275A30 for the local equipment record. Other
-// hunters and equipment previews have their own record, even for the same weapon.
-unsafe fn status_entry(equipment: u32) -> Option<&'static Entry> {
-    unsafe {
-        let manager: u32 = read(forge::mem::text_addr(), 0x1885b58);
-        if manager == 0 || equipment == 0 || equipment != gu!(0x275a30, manager) {
-            return None;
-        }
-        super::active(u32::from(read::<u8>(equipment, 1236)))
-    }
-}
-
 #[forge::hook(offset = 0x62fb78)]
 unsafe fn status_style(ui: u32, equipment: u32, details: u32) -> u32 {
     let out = original!(ui, equipment, details);
     unsafe {
-        if let Some(entry) = status_entry(equipment) {
+        if let Some(entry) = crate::style::profile::status_entry(equipment) {
             gu!(0x56e808, ui, 0x5c, 1, entry.name.as_ptr() as u32);
             let cursor: u32 = read(ui, 80);
             if details != 0 && cursor != 0 && read::<u8>(cursor, 13) == 0 {
@@ -275,8 +264,79 @@ unsafe fn status_style(ui: u32, equipment: u32, details: u32) -> u32 {
 unsafe fn status_style_small(ui: u32) -> u32 {
     let out = original!(ui);
     unsafe {
-        if let Some(entry) = status_entry(read(ui, 76)) {
+        if let Some(entry) = crate::style::profile::status_entry(read(ui, 76)) {
             gu!(0x56e808, ui, 0x69, 2, entry.name.as_ptr() as u32);
+        }
+    }
+    out
+}
+
+// The My Set overview stores only the native style in its label widget.
+// Keep the preview weapon with that widget until the next refresh or initialization.
+static SET_PREVIEW: Shared<Option<(u32, u32)>> = Shared::new(None);
+
+#[forge::hook(offset = 0x72d3d8)]
+unsafe fn load_set_preview(ui: u32, slot: u32) -> u32 {
+    SET_PREVIEW.with(|preview| *preview = None);
+    let out = original!(ui, slot);
+    unsafe {
+        let save: u32 = read(forge::mem::text_addr(), 0x1856fe8);
+        if read::<u32>(ui, 840) == 0 && gu!(0x146ba0, save, 0, slot) == 1 {
+            let pane = gu!(0x65cbe8, ui, 22);
+            if pane != 0 {
+                let weapon = profile::equipment_weapon(ui + 3052);
+                SET_PREVIEW.with(|preview| *preview = Some((pane, weapon)));
+            }
+        }
+    }
+    out
+}
+
+#[forge::hook(offset = 0x58a3dc)]
+unsafe fn init_set_label(ui: u32) -> u32 {
+    SET_PREVIEW.with(|preview| {
+        if preview.is_some_and(|(pane, _)| pane == ui) {
+            *preview = None;
+        }
+    });
+    original!(ui)
+}
+
+#[forge::hook(offset = 0x58a44c)]
+unsafe fn draw_set_label(ui: u32) -> u32 {
+    let out = original!(ui);
+    let preview = SET_PREVIEW.with(|preview| *preview);
+    unsafe {
+        if let Some((pane, weapon)) = preview
+            && ui == pane
+            && read::<u32>(ui, 76) < 6
+            && let Some(entry) = active(weapon)
+        {
+            gu!(0x56ea08, ui, 0, 3, entry.name.as_ptr() as u32);
+        }
+    }
+    out
+}
+
+#[forge::hook(offset = 0x5d96f8)]
+unsafe fn draw_set_details(ui: u32, equipment: u32) -> u32 {
+    let out = original!(ui, equipment);
+    unsafe {
+        if equipment != 0
+            && let Some(entry) = active(profile::equipment_weapon(equipment))
+        {
+            let catalog: u32 = read(forge::mem::text_addr(), 0x1899220);
+            let format = gu!(0x55bc4c, catalog, 1, 15);
+            let title = gu!(0x55bc4c, catalog, 1, 63);
+            gu!(
+                0x56fd7c,
+                ui,
+                2,
+                3,
+                format,
+                title,
+                entry.name.as_ptr() as u32
+            );
         }
     }
     out
@@ -287,4 +347,8 @@ pub(super) fn install(base: u32) {
     forge::install_hook!(base, update);
     forge::install_hook!(base, status_style);
     forge::install_hook!(base, status_style_small);
+    forge::install_hook!(base, load_set_preview);
+    forge::install_hook!(base, init_set_label);
+    forge::install_hook!(base, draw_set_label);
+    forge::install_hook!(base, draw_set_details);
 }
