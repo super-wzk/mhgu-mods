@@ -1,6 +1,11 @@
 use crate::read;
-use mhfz_sdk::motion::{DrawnRoll, MotionBanks};
+use mhfz_sdk::motion::{DrawnRoll, MotionBanks, sprint_sheathe};
 use mhgu_sdk::style::{PASS, action, movement::relative_stick_yaw};
+
+// FZ common action 202, weapon row in 825901F4.
+const SPRINT_SHEATHE: u16 = 1032;
+pub(super) static SHEATHE_MOTIONS: mhgu_sdk::style::remote::Sheathe =
+    mhfz_sdk::motion::sheathe_motions(&[crate::program::SPRINT], SPRINT_SHEATHE);
 
 static BANKS: MotionBanks = MotionBanks::new([
     c"player\\mot\\frontier_db\\0",
@@ -54,6 +59,8 @@ pub(super) unsafe fn finish_blood_wind_frame(actor: u32, current: (u16, u16)) {
 pub unsafe extern "C" fn encode(actor: u32, request: u32) -> u32 {
     let source = if (PRIVATE..PRIVATE * 2).contains(&request) {
         request as u16
+    } else if unsafe { sprint_sheathe(actor, request, &SHEATHE_MOTIONS) } {
+        SPRINT_SHEATHE
     } else if request == 28 {
         let clip = unsafe {
             ROLL.clip(actor, || {
@@ -80,6 +87,9 @@ pub unsafe extern "C" fn decode(actor: u32, packed: u32) -> u32 {
     else {
         return PASS;
     };
+    if source == SPRINT_SHEATHE {
+        return 5003;
+    }
     LOCOMOTION
         .iter()
         .find(|&&(_, clip)| clip == source)

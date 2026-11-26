@@ -6,7 +6,7 @@ use core::{
 };
 use mhfz_sdk::{
     action::Cursor,
-    combat::{HitWindow, evade_bonus_frames},
+    combat::{HitWindow, evade_bonus_frames, knockback_recovery},
     effects::MotionClock,
     sound::Clock,
     sprint::{self, Flick, Resume},
@@ -607,7 +607,9 @@ impl Battle {
             let heat_blade = self.heat_blade > 0.;
             let eligible = |condition| program::eligible(condition, heat_blade);
             let cursor = self.cursor.as_mut().unwrap();
-            if cursor.art_window(eligible) && unsafe { action::activate_hunter_art(actor) } {
+            if (matches!(state, program::SPRINT | program::BRAKE) || cursor.art_window(eligible))
+                && unsafe { action::activate_hunter_art(actor) }
+            {
                 self.cursor = None;
                 return;
             }
@@ -799,6 +801,10 @@ impl Battle {
             sound::update(&mut self.sound, actor, clip, sample.frame, None);
             if let Some(clip) = clip {
                 fx::update(&mut self.motion_fx, actor, clip, sample);
+            }
+            // FZ w09 states 68 / 69 use the landed launch direction.
+            if let Some(state) = knockback_recovery(actor, current, drawn, input, [69, 68]) {
+                return self.begin(state);
             }
             // FZ evasion uses 812080B4 after the hop's initial
             // movement. Let the native GU hop provide that movement first.

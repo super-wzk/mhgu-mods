@@ -52,6 +52,40 @@ pub unsafe fn evade_bonus_frames(actor: u32) -> f32 {
     }
 }
 
+/// GU launch directions eligible for the FZ drawn recovery (817E9CB4 / 817EAA30).
+///
+/// # Safety
+/// The actor must be a live GU quest hunter on the game thread.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn knockback_recovery(
+    actor: u32,
+    current: (u16, u16),
+    drawn: bool,
+    input: &mhgu_sdk::style::Input,
+    states: [u8; 2],
+) -> Option<u8> {
+    use mhgu_sdk::style::movement;
+    if !drawn || !input.command(3) || !matches!(current, (64, 6 | 7)) {
+        return None;
+    }
+    unsafe {
+        // 2BB164 selects motion 1015 after landing. Leave airborne, lethal
+        // and other GU hit reactions alone.
+        if ((actor + 5) as *const u8).read() != 2
+            || ((actor + 11988) as *const u8).read() == 0
+            || ((actor + 5078) as *const i16).read() <= 0
+        {
+            return None;
+        }
+        let address = forge_sys::mem::forge_mem_getMainTextAddr() + 0x53a058;
+        let motion: unsafe extern "C" fn(u32) -> u32 = core::mem::transmute(address as usize);
+        if motion(actor) != 1015 || !movement::has_evade_stamina(actor, 150.) {
+            return None;
+        }
+    }
+    Some(states[usize::from(current.1 - 6)])
+}
+
 #[repr(u32)]
 pub enum DrawnEvade {
     Roll = 0,

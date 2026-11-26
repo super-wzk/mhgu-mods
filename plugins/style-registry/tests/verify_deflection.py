@@ -10,7 +10,7 @@ PLUGINS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PLUGINS / "great-sword-extreme/tests"))
 from verify_assets import Machine, MEM, STOP
 from verify_style import (
-    CHANGE_ACTION, COMMAND_UPDATE, DB_DRAW_ROUTE, ENCODE, WEAPON_DISPATCH, api_for, boot, hunters,
+    CHANGE_ACTION, COMMAND_UPDATE, DB_DRAW_ROUTE, DISPATCH, ENCODE, WEAPON_DISPATCH, api_for, boot, hunters,
     load_registered_style, quest_entries, setup_controller,
 )
 
@@ -95,6 +95,25 @@ def source():
     assert transitions == [(0, 200, 12), (1, 78, 12)], transitions
     print("FZ w06: native blade polish follow-ups and facing passed")
 
+    m.trap(0x817C45EC, lambda *_: 1)
+    m.trap(0x8172C370, lambda *_: 1)
+    m.trap(0x8182B03C, lambda *_: 1)
+    m.trap(0x8182B4FE, lambda *_: 0)
+
+    def forward_stick(_, output, *__):
+        m.c.mem_write(output, b"\0\0")
+        return 1
+
+    m.trap(0x8172C2D4, forward_stick)
+    m.c.mem_write(player + 3, b"\x06")  # w06
+    m.c.mem_write(player + 18, b"\x01")  # drawn
+    for phase, group, state in ((0, 0, 28), (1, 0, 28), (2, 1, 36), (3, 1, 83)):
+        transitions.clear()
+        m.c.mem_write(player + 3148, bytes([phase]))
+        assert m.call(0x817C5CD8, player, 1) == state
+        assert transitions == [(group, state, 4)], (phase, transitions)
+    print("FZ w06: free-state forward evade selects the roll or demon slash by phase")
+
 
 def replay(weapon, style, plugin, recoil, recoil_clip):
     elf = (PLUGINS.parent / "mhgu/main.elf").read_bytes()
@@ -172,7 +191,8 @@ def replay(weapon, style, plugin, recoil, recoil_clip):
     def tick(frame, *, native_input=False):
         g.cpu.mem_write(actor + 1276, struct.pack("<2f", frame + 1, frame))
         if native_input:
-            g.run(g.hooks[WEAPON_DISPATCH], actor)
+            entry = WEAPON_DISPATCH if g.half(actor + 9482) >= 0x8000 else DISPATCH
+            g.run(g.hooks[entry], actor)
         else:
             g.run(controller, actor, inputs)
         return g.half(actor + 9482) - 0x8000
@@ -292,7 +312,7 @@ def replay(weapon, style, plugin, recoil, recoil_clip):
         assert tick(16) == 0
         power_and_trails(g, actor, eq, vt, trails, begin, tick, set_action)
         polish_hitstop(g, actor, begin, tick, set_action, contact)
-        polish_followups(g, actor, begin, tick, transition, skills)
+        polish_followups(g, actor, begin, tick, transition, skills, set_action, submitted)
         demon_effects(g, actor, inputs, vt, begin, tick)
         aerial_followup(g, actor, begin, tick, set_action)
         roll_followup(g, actor, set_action)
@@ -382,7 +402,7 @@ def polish_hitstop(g, actor, begin, tick, set_action, contact):
     print("GU DB blade polish pauses for full-stop and slow-hit and resumes afterward")
 
 
-def polish_followups(g, actor, begin, tick, transition, skills):
+def polish_followups(g, actor, begin, tick, transition, skills, set_action, submitted):
     x, a, chord = 0x20, 0x100, 0x120
     aim = 0
     previous = 0
@@ -415,6 +435,22 @@ def polish_followups(g, actor, begin, tick, transition, skills):
         g.cpu.mem_write(actor + 5108, bytes(6))
         g.cpu.mem_write(actor + 5188, bytes(16))
         begin(state)
+
+    for activation, frame, state, strike_frame in ((68, 48, 36, 12), (69, 86, 83, 10)):
+        enter(activation)
+        tick(frame)
+        set_action(1, 0)
+        g.put(actor + 4076, 0)
+        submitted.clear()
+        assert pad(0, stick=100, common=1 << 3) == state
+        assert g.half(actor + 1204) == 1426
+        for at in range(2, strike_frame, 2):
+            assert pad(at) == state
+        if state == 83:
+            assert not submitted
+        assert pad(strike_frame) == state
+        assert submitted == [12320, 12504], (state, submitted)
+    print("GU DB: free-state forward demon evade plays 1426 and submits both strikes")
 
     # FZ states 7 and 19 can execute X or X+A as soon as frame 60.
     # GU reports the raw X press two ticks before its resolved weapon command.

@@ -330,6 +330,9 @@ fn dual_blades_equipment(w: &mut Writer, slot: usize, motion: usize, frames: u32
         w.equipment_timeline(slot, &[2, 12, 11], &[(1, 5), (5, 2), (7, 0)])
     } else if motion == 1003 && frames > 26 {
         w.equipment_timeline(slot, &[2, 12, 11], &[(7, 17), (5, 8), (1, 0)])
+    } else if motion == 1032 {
+        // FZ 819070E2 keeps the two blades in hand until frames 60 and 66.
+        w.equipment_timeline(slot, &[2, 12, 11], &[(7, 60), (5, 6), (1, 0)])
     } else {
         w.equipment_timeline(slot, &[11, 12], &[(3, 0)])
     }
@@ -340,6 +343,7 @@ fn gunlance_equipment(w: &mut Writer, slot: usize, motion: usize) -> Result<()> 
     // attachment 3 (drawn). Attachment 1 belongs to other weapon types.
     let keys: &[(u32, u32)] = match motion {
         1003 => &[(1, 32), (2, 0)],
+        1032 => &[(1, 100), (2, 0)],
         _ => &[(1, 0)],
     };
     w.equipment_timeline(slot, &[3, 2], keys)
@@ -514,6 +518,20 @@ pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
             out[16 + index..20 + index].copy_from_slice(&(count as u32).to_le_bytes());
             out[20 + index..24 + index].copy_from_slice(&ptr.to_le_bytes());
             out.extend_from_slice(src);
+            if kind == Weapon::GreatSword && field == 1 {
+                for row in out[ptr as usize..].chunks_exact_mut(stride) {
+                    // w00 states 40/43/44: take a fresh X 12 frames before the
+                    // authored frame 80 gate. Held X keeps its original window.
+                    let command = u16::from_le_bytes([row[4], row[5]]);
+                    let target = u16::from_le_bytes([row[22], row[23]]);
+                    if matches!(target, 40 | 43 | 44)
+                        && matches!(command, 3..=5 | 7..=9 | 23..=25)
+                        && row[10..12] == 80u16.to_le_bytes()
+                    {
+                        row[10..12].copy_from_slice(&68u16.to_le_bytes());
+                    }
+                }
+            }
         }
     }
     if kind == Weapon::SwitchAxe {

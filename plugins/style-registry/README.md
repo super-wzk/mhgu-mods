@@ -39,6 +39,8 @@ V1 注册服务同时提供攻击提交与格挡结果。GU 从武器动作组�
 
 联机由 [multiplayer 模块](src/runtime/multiplayer.rs) 转接 GU 的 `netPlAction` 收发、远端风格查找、私有动作与逐帧观察派发。风格注册成功后通过 [`remote::bind_playback`](../../crates/mhgu-sdk/src/style/remote.rs) 登记一次回放描述符。注册器按当前名册和远端猎人的装备武器选择回放。每把武器负责自己的动作、附加状态值与效果清理。动作包格式沿用现有 GU 布局，`StyleRemoteActionV1` 服务保留原有接口。
 
+带冲刺收刀的风格通过 `remote::bind_sheathe` 登记冲刺动作与两种收刀片段。双方使用本版时，队友可直接从收刀包确定片段。未携带收刀标记的旧版动作包沿用接收端的动作历史。[冲刺收刀联机回放](tests/verify_sheathe_multiplayer.py)覆盖六种极之型、错过冲刺或刹停、两名队友以及收刀结束。
+
 `art_slots` 指定狩技槽位数（0–3），装备、充能和发动由 GU 处理。`independent` 使 GU 的固定长度风格表使用索引 0，并停用勇气槽。仅替换动作资源的风格可以省略控制器。
 
 发布版首次请求某把武器的私有路径时，注册器先通过 GU `BCAD18` 读取 `common.arc`，再读取对应武器 ARC。两者保留在资源缓存中。GU 的 `B39F58` 按归档顺序加载依赖，供当前猎人和队友后续的原生路径请求复用。详见[打包回归](tests/verify_packed_release.py)。

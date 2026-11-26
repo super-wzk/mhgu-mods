@@ -1,7 +1,12 @@
-use mhfz_sdk::motion::MotionBanks;
+use mhfz_sdk::motion::{MotionBanks, sprint_sheathe};
 use mhgu_sdk::style::{PASS, action};
 
 const PRIVATE: u32 = 0x1_0000;
+// FZ common action 202, weapon row in 825901F4.
+const SPRINT_SHEATHE: u16 = 1032;
+pub(super) static SHEATHE_MOTIONS: mhgu_sdk::style::remote::Sheathe =
+    mhfz_sdk::motion::sheathe_motions(&[crate::program::SPRINT], SPRINT_SHEATHE);
+
 static BANKS: MotionBanks = MotionBanks::new([
     c"player\\mot\\frontier_gl\\0",
     c"player\\mot\\frontier_gl\\2",
@@ -21,6 +26,8 @@ pub unsafe extern "C" fn preload(_actor: u32) {
 pub unsafe extern "C" fn encode(actor: u32, request: u32) -> u32 {
     let clip = if (PRIVATE..PRIVATE * 2).contains(&request) {
         request as u16
+    } else if unsafe { sprint_sheathe(actor, request, &SHEATHE_MOTIONS) } {
+        SPRINT_SHEATHE
     } else if let Some(&(_, clip)) = GROUND.iter().find(|&&(key, _)| key == request) {
         clip
     } else {
@@ -40,6 +47,9 @@ pub unsafe extern "C" fn decode(actor: u32, packed: u32) -> u32 {
     else {
         return PASS;
     };
+    if clip == SPRINT_SHEATHE {
+        return 5003;
+    }
     GROUND
         .iter()
         .find(|&&(_, value)| value == clip)

@@ -4,6 +4,8 @@
 
 怪物子命令从 PAC 生成带骨架模型（MOD 0xD4）和动作列表（LMT v67），并从 Vita ELF 扫描脚本分组。支持输出单独资源、独立狩猎资源、带材质贴图的外观 ARC 和借用普通雌火龙资源的单招回放样本。
 
+猎人的收刀片段把源持刀位置转成 GU 装备挂点事件。双剑和铳枪的冲刺收刀使用片段 1032，分别在第 60、66 帧挂回双刀和第 100 帧挂回铳枪。
+
 棘龙插件的生成物统一在 [monster-espinas](../../plugins/monster-espinas/README.md) 下。插件的 `package.py` 用 `hunt` 生成完整狩猎资源，再调用 Forge 编译插件并组装安装包。下列单招导出命令只用于离线分析。
 
 将 `MHFZ_EM080_PAC` 设为 FZ 的 `em080.pac` 文件路径，`MHGU_ROMFS` 设为包含 `nativeNX` 的 GU RomFS 根目录。从本仓库根目录运行：

@@ -1,6 +1,6 @@
 use crate::{program::JUMP_SLASH, read, write};
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
-use mhfz_sdk::motion::{DrawnRoll, MotionBanks};
+use mhfz_sdk::motion::{DrawnRoll, MotionBanks, sprint_sheathe};
 use mhgu_sdk::style::{PASS, action};
 
 static BANKS: MotionBanks = MotionBanks::new([
@@ -21,6 +21,10 @@ pub(super) unsafe extern "C" fn preload(_actor: u32) {
 pub(super) unsafe fn source_clip(actor: u32, packed: u16) -> Option<u16> {
     unsafe { BANKS.decode(actor, packed) }
 }
+
+const SPRINT_SHEATHE: u16 = 1450;
+pub(super) static SHEATHE_MOTIONS: mhgu_sdk::style::remote::Sheathe =
+    mhfz_sdk::motion::sheathe_motions(&[crate::program::SPRINT], SPRINT_SHEATHE);
 
 const PRIVATE: u32 = 0x1_0000;
 const JUMP_TRAVEL_SCALE: f32 = 0.5;
@@ -103,11 +107,8 @@ const LOCOMOTION: &[(u32, u16)] = &[
 pub unsafe extern "C" fn encode(actor: u32, request: u32) -> u32 {
     let source = if (PRIVATE..PRIVATE * 2).contains(&request) {
         request as u16
-    } else if request == 5003
-        && unsafe { action::previous(actor) }
-            == (action::GROUP, action::slot(crate::program::SPRINT))
-    {
-        1450
+    } else if unsafe { sprint_sheathe(actor, request, &SHEATHE_MOTIONS) } {
+        SPRINT_SHEATHE
     } else if request == 28 {
         if FRONT_STEP.load(Relaxed) == actor && unsafe { action::current(actor) } == (1, 6) {
             return unsafe { BANKS.encode(actor, 1419) }.map_or(PASS, u32::from);
@@ -132,7 +133,7 @@ pub unsafe extern "C" fn decode(actor: u32, packed: u32) -> u32 {
     else {
         return PASS;
     };
-    if source == 1450 {
+    if source == SPRINT_SHEATHE {
         return 5003;
     }
     if source == 1419 {

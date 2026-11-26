@@ -111,8 +111,8 @@ mod entry {
         // FZ weapon row 7 uses 90°. GU 2F2BA0 rejects Guard Up hits for w07.
         guard_half_angle: 0x4000,
         deflection: Some(mhfz_sdk::combat::deflection),
+        ground_motion: Some(motion::finish_sheathe),
         camera_offset: Some(mhfz_sdk::camera::offset),
-        ..Rules::EMPTY
     };
 
     static EXTREME: Style = Style {
@@ -152,6 +152,7 @@ mod entry {
             return;
         }
         mhgu_sdk::style::manual::bind(STYLE_ID, include_str!("manual.txt"));
+        unsafe { remote::bind_sheathe(STYLE_ID, &motion::SHEATHE_MOTIONS) };
         if !rules::bind(STYLE_ID, &RULES) {
             forge::log::prelude::warn!("Style {}: GU rule service unavailable", STYLE_ID);
         }

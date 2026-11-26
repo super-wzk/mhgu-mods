@@ -1,4 +1,4 @@
-use mhfz_sdk::motion::{DrawnRoll, MotionBanks};
+use mhfz_sdk::motion::{DrawnRoll, MotionBanks, sprint_sheathe};
 use mhgu_sdk::style::{PASS, movement::relative_stick_yaw};
 
 fn base() -> u32 {
@@ -14,6 +14,11 @@ macro_rules! call {
     }};
     (@arg $x:expr)=>{u32};
 }
+
+// FZ common action 202, weapon row in 825901F4.
+const SPRINT_SHEATHE: u16 = 1032;
+pub(super) static SHEATHE_MOTIONS: mhgu_sdk::style::remote::Sheathe =
+    mhfz_sdk::motion::sheathe_motions(&[crate::battle::DASH], SPRINT_SHEATHE);
 
 static BANKS: MotionBanks = MotionBanks::new([
     c"player\\mot\\frontier_gs\\0",
@@ -75,6 +80,9 @@ pub(super) unsafe extern "C" fn encode(player: u32, request: u32) -> u32 {
         if (0x10000..0x20000).contains(&request) {
             return physical(player, request as u16).unwrap_or(PASS);
         }
+        if sprint_sheathe(player, request, &SHEATHE_MOTIONS) {
+            return physical(player, SPRINT_SHEATHE).unwrap_or(PASS);
+        }
         // Only replace the GS's drawn ground roll (GU 2CF8A4 -> 2ACFA4).
         // Let its controller spend stamina and set the invulnerability clock.
         if request == 28 {
@@ -110,6 +118,9 @@ pub(super) unsafe extern "C" fn decode(player: u32, id: u32) -> u32 {
     }) else {
         return PASS;
     };
+    if source == SPRINT_SHEATHE {
+        return 5003;
+    }
     MOTIONS
         .iter()
         .find(|&&(_, clip)| clip == source)

@@ -172,7 +172,11 @@ unsafe fn condition(actor: u32, command: *const Command) -> u32 {
             WEAPON_AFTER_COMBO if sample.next < close && input::attack_combo_pending(actor) => {
                 return 0;
             }
-            ATTACK_CHORD if input::attack_chord_with_shoulder(actor) => return 1,
+            ATTACK_CHORD
+                if input::attack_chord_held(actor) || input::attack_chord_with_shoulder(actor) =>
+            {
+                return 1;
+            }
             WEAPON_AFTER_COMBO | ATTACK_CHORD => WEAPON_CONDITION,
             opcode => opcode,
         };

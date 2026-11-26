@@ -14,7 +14,7 @@ use core::{
 };
 use mhfz_sdk::{
     action::Cursor,
-    combat::{HitWindow, evade_bonus_frames},
+    combat::{HitWindow, evade_bonus_frames, knockback_recovery},
     effects::MotionClock,
     sound::Clock,
     sprint::{Flick, Resume},
@@ -50,6 +50,7 @@ pub(super) unsafe fn preload_hit_shapes() {
     }
 }
 const DIRECTIONAL_SLASHES: u32 = (1 << 17) | (1 << 18) | (1 << 19);
+const CHORD_COMMAND: u16 = 5;
 const EVADE_STAMINA_COST: f32 = 150.;
 // FZ 8121C8D6 spends param 31 in half the units GU uses for stamina.
 const AXE_SWING_STAMINA_COST: f32 = (2 * program::param(31)) as f32;
@@ -184,7 +185,7 @@ struct Battle {
     gauges: Gauges,
     cursor: Option<Cursor>,
     previous_action: Option<u8>,
-    guard_slash: u32,
+    buffered_slash: u32,
     branch_aim: Option<(u16, u16)>,
     x_press_aim: Option<u16>,
     roll_followup: Option<u8>,
@@ -216,7 +217,7 @@ impl Battle {
             },
             cursor: None,
             previous_action: None,
-            guard_slash: 0,
+            buffered_slash: 0,
             branch_aim: None,
             x_press_aim: None,
             roll_followup: None,
@@ -311,7 +312,7 @@ impl Battle {
         unsafe {
             let previous = self.cursor.as_ref().map(|c| program::source_state(c.state));
             self.previous_action = previous;
-            self.guard_slash = 0;
+            self.buffered_slash = 0;
             self.branch_aim = None;
             self.x_press_aim = None;
             self.roll_followup = None;
@@ -351,6 +352,10 @@ impl Battle {
             self.poise = false;
             write(actor, 5, 1u8);
             let sprint = SprintForm::from_action(id);
+            // The recovery state also carries the form for peer playback.
+            if matches!(id, 167 | 168) {
+                self.gauges.sword = true;
+            }
             native!(0x282fd8, actor, 0, u32::from(sprint.is_none()), 0);
             if let Some(form) = sprint {
                 self.sprint_form = form;
@@ -671,6 +676,7 @@ impl Battle {
         mut bits: u32,
         direction: Option<i16>,
         dt: f32,
+        directional_slash: u32,
     ) -> bool {
         unsafe {
             let yaw = direction.unwrap_or(0);
@@ -691,19 +697,47 @@ impl Battle {
                 c.time.step += 1;
                 self.play(actor);
             }
-            let Some(c) = &self.cursor else { return true };
+            let Some(c) = &mut self.cursor else {
+                return true;
+            };
             let (frame, blend) = (c.time.frame, c.time.blend);
-            // Monster absorption opens its X+A rows at motion frame 10.
-            if matches!(state, 90 | 92) && frame < 10. {
-                let slash = bits & DIRECTIONAL_SLASHES;
+            // These w12 rows accept a discharge before the dodge slash opens.
+            // Let a directional chord wait for its own execution frame.
+            let slash_buffer = match (state, c.time.step) {
+                (76 | 175 | 176, 1) => Some(30. ..50.),
+                (95, 0) => Some(50. ..110.),
+                _ => None,
+            };
+            let chord = bits & (1 << CHORD_COMMAND) != 0;
+            let mut slash = bits & DIRECTIONAL_SLASHES;
+            if slash_buffer.is_some() && chord && slash == 0 {
+                self.buffered_slash = 0;
+            }
+            if slash_buffer.is_some_and(|window| window.contains(&frame)) {
+                // The stick may cross the dead zone just after X+A. While
+                // the chord is still held, steer a thrust waiting to execute.
+                if matches!(c.pending_action(), Some(70 | 77 | 98))
+                    && read::<u16>(actor, 5108) & 0x120 == 0x120
+                {
+                    slash = directional_slash;
+                }
                 if slash != 0 {
-                    self.guard_slash = slash;
+                    self.buffered_slash = slash;
+                    bits &= !(1 << CHORD_COMMAND);
+                    for command in [2, 3, CHORD_COMMAND, 8] {
+                        c.discard_pending_command(command);
+                    }
+                }
+            } else if matches!(state, 90 | 92) && frame < 10. {
+                // Monster absorption opens its X+A rows at motion frame 10.
+                if slash != 0 {
+                    self.buffered_slash = slash;
                 }
             } else {
-                if bits & DIRECTIONAL_SLASHES == 0 {
-                    bits |= self.guard_slash;
+                if slash == 0 {
+                    bits |= self.buffered_slash;
                 }
-                self.guard_slash = 0;
+                self.buffered_slash = 0;
             }
             if matches!(state, 36 | 37 | 119 | 120) && frame > 0. {
                 let offset = if matches!(state, 36 | 119) {
@@ -947,9 +981,9 @@ impl Battle {
             let chord = input.weapon_command(WEAPON_XA)
                 || pad::attack_chord_pressed(actor)
                 || pad::attack_chord_with_shoulder(actor);
-            let slash_commands = (u32::from(chord && left) << 17)
-                | (u32::from(chord && right) << 18)
-                | (u32::from(chord && back) << 19);
+            let directional_slash =
+                (u32::from(left) << 17) | (u32::from(right) << 18) | (u32::from(back) << 19);
+            let slash_commands = if chord { directional_slash } else { 0 };
             if matches!(old, Some(89 | 91))
                 && let Some(contact) = guard::take(actor)
             {
@@ -962,7 +996,7 @@ impl Battle {
                 };
                 if self.begin(actor, id) {
                     // GU can report the button on the same tick as the recoil.
-                    self.guard_slash = slash_commands;
+                    self.buffered_slash = slash_commands;
                     return true;
                 }
                 return false;
@@ -1022,7 +1056,7 @@ impl Battle {
                     (2, x),
                     (3, a),
                     (4, stance),
-                    (5, chord),
+                    (CHORD_COMMAND, chord),
                     (6, charge),
                     (7, x && move_stick),
                     (8, x && forward),
@@ -1044,7 +1078,7 @@ impl Battle {
                 .fold(slash_commands, |mask, (id, active)| {
                     mask | (u32::from(active) << id)
                 });
-                return self.advance(actor, commands, direction, dt);
+                return self.advance(actor, commands, direction, dt, directional_slash);
             }
             self.cursor = None;
             let sample = MotionFrame::sample(actor);
@@ -1072,6 +1106,11 @@ impl Battle {
                 drawn,
                 old.is_some_and(program::is_sprint),
             );
+            // FZ 81213142 selects the recovery pair from the current form.
+            let recovery = if self.gauges.sword { [167, 168] } else { [101, 102] };
+            if let Some(state) = knockback_recovery(actor, current, drawn, input, recovery) {
+                return self.begin(actor, state);
+            }
             if drawn && is_forward_roll(actor, current) && read::<u8>(actor, 5) != 0 {
                 // FZ 81212D02 / 824F07F0 gives sprint lower priority than
                 // attacks, absorption and axe charge. All execute in [50, 60).

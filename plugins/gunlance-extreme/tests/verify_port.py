@@ -979,6 +979,37 @@ def verify_actions():
     assert [(s, j, p) for s, j, p, _ in emitted(56)] == [(s, 1, peer_barrel) for s in selector_ids(56)]
     assert g.cpu.mem_read(peer + 13100, 3) == bytes(3)
     print("Peer charge follows the remote actor and retires on area change")
+
+    # Run the native command-table interpreter for the sprint cancel.
+    g.cpu.hook_del(g.traps.pop(0x2E9D54))
+    g.put(a + 5068, 1)
+    g.put(a + 5104, 1)
+    g.cpu.mem_write(a + 5078, struct.pack("<h", 100))
+    g.stub(g.originals[CHANGE_ACTION], lambda _, group, slot, flags: set_action(group, slot))
+    art_prepared = []
+    g.stub(0x2A8B34, lambda *_: int(bool(g.get(a + 5180) & 7)))
+    g.stub(0x2ACBEC, lambda *_: art_prepared.append(True))
+
+    def resolve_art(_, group, slot, flags):
+        for address, value in ((group, 16), (slot, 65), (flags, 0x40)):
+            g.cpu.mem_write(address, struct.pack("<H", value))
+        return 1
+
+    g.stub(0x2ACB60, resolve_art)
+    for running in (82, 83):
+        for slot in range(3):
+            g.cpu.mem_write(a + 5136, struct.pack("<h", 120))
+            start(running)
+            assert state() == running
+            g.put(a + 5180, 1 << slot)
+            before = len(art_prepared)
+            tick(2)
+            assert (g.half(a + 9478), g.half(a + 9482)) == (16, 65), (
+                running, slot, state(), art_prepared,
+            )
+            assert len(art_prepared) == before + 1
+            g.put(a + 5180, 0)
+    print("GU Gunlance: all three Hunter Art slots activate from sprint and brake")
     return g, weapon, blade_matrix, pivot, tip, proofs
 
 

@@ -11,7 +11,7 @@ pub enum CommandInput {
     Weapon(u8),
     /// A weapon command that waits for GU to resolve X+A.
     WeaponAfterCombo(u8),
-    /// The weapon's X+A command, also accepting GU's shoulder + X+A combination.
+    /// The weapon's X+A command, also accepting held X+A or shoulder + X+A.
     AttackChord(u8),
 }
 

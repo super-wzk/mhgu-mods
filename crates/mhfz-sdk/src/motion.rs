@@ -1,9 +1,29 @@
 //! Map paired Frontier motion groups to GU hunter LMT slots.
 use core::ffi::CStr;
 use mhgu_sdk::style::action::MotionBanks as GuMotionBanks;
+use mhgu_sdk::style::{action, remote::Sheathe};
 
 mod drawn_roll;
 pub use drawn_roll::DrawnRoll;
+
+/// Select the FZ sprint-sheathe clip for GU's common sheathe action.
+///
+/// # Safety
+/// The actor must be a live GU hunter on the game thread.
+pub unsafe fn sprint_sheathe(actor: u32, request: u32, motions: &Sheathe) -> bool {
+    request == Sheathe::MOTION
+        && unsafe { action::current(actor) } == Sheathe::ACTION
+        && motions.follows_sprint(unsafe { action::previous(actor) })
+}
+
+/// Explicit requests for converted Frontier motions, used by remote sheathing.
+pub const fn sheathe_motions(sprints: &'static [u8], sprint_clip: u16) -> Sheathe {
+    Sheathe {
+        sprints,
+        ordinary: 0x10000 | 1003,
+        sprint: 0x10000 | sprint_clip as u32,
+    }
+}
 
 pub struct MotionBanks(GuMotionBanks<3>);
 

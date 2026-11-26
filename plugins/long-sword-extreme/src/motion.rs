@@ -1,5 +1,10 @@
-use mhfz_sdk::motion::{DrawnRoll, MotionBanks};
+use mhfz_sdk::motion::{DrawnRoll, MotionBanks, sprint_sheathe};
 use mhgu_sdk::style::{PASS, action};
+
+// FZ common action 202, weapon row in 825901F4.
+const SPRINT_SHEATHE: u16 = 1412;
+pub(super) static SHEATHE_MOTIONS: mhgu_sdk::style::remote::Sheathe =
+    mhfz_sdk::motion::sheathe_motions(&[crate::program::SPRINT], SPRINT_SHEATHE);
 
 static BANKS: MotionBanks = MotionBanks::new([
     c"player\\mot\\frontier_ls\\0",
@@ -38,6 +43,8 @@ const LOCOMOTION: &[(u32, u16)] = &[
 pub unsafe extern "C" fn encode(actor: u32, request: u32) -> u32 {
     let source = if (PRIVATE..PRIVATE * 2).contains(&request) {
         request as u16
+    } else if unsafe { sprint_sheathe(actor, request, &SHEATHE_MOTIONS) } {
+        SPRINT_SHEATHE
     } else if request == 28 {
         let Some(clip) = (unsafe { ROLL.clip(actor, || None) }) else {
             return PASS;
@@ -59,10 +66,17 @@ pub unsafe extern "C" fn decode(actor: u32, packed: u32) -> u32 {
     else {
         return PASS;
     };
+    if source == SPRINT_SHEATHE {
+        return 5003;
+    }
     LOCOMOTION
         .iter()
         .find(|&&(_, clip)| clip == source)
         .map_or(32000 + u32::from(source - 1000), |&(id, _)| id)
+}
+
+pub(super) extern "C" fn finish_sheathe(slot: u16, phase: u8, motion: u32) -> bool {
+    matches!((slot, phase, motion), (2, 1, 5003))
 }
 
 pub unsafe fn play(actor: u32, clip: u16, start: u16, blend: u16) -> Option<u16> {

@@ -14,6 +14,12 @@ pub const AXE_BRAKE: u8 = 105;
 pub const SWORD_BRAKE: u8 = 151;
 const AXE_SPRINT_RESUME: u8 = 178;
 const SWORD_SPRINT_RESUME: u8 = 179;
+pub const SPRINT_STATES: &[u8] = &[
+    AXE_SPRINT,
+    SWORD_SPRINT,
+    AXE_SPRINT_RESUME,
+    SWORD_SPRINT_RESUME,
+];
 // Both FZ sprint clips loop from frame 90.
 const SPRINT_LOOP_START: u16 = 90;
 

@@ -85,6 +85,7 @@ mod entry {
             return;
         }
         mhgu_sdk::style::manual::bind(EXTREME.id, include_str!("manual.txt"));
+        unsafe { remote::bind_sheathe(EXTREME.id, &motion::SHEATHE_MOTIONS) };
         if !rules::bind(EXTREME.id, &RULES) {
             forge::log::prelude::warn!("Style {}: GU rule service unavailable", EXTREME.id);
         }

@@ -43,13 +43,19 @@ pub unsafe fn attack_chord_with_shoulder(actor: u32) -> bool {
     unsafe { ((actor + COMBO_STATE) as *const u32).read() & SHOULDER_CHORD != 0 }
 }
 
+/// Whether X and A are both held in GU's filtered pad state.
+///
+/// # Safety
+/// The actor must be a live local quest hunter on the game thread.
+pub unsafe fn attack_chord_held(actor: u32) -> bool {
+    let held = unsafe { ((actor + FILTERED_HELD) as *const u16).read() };
+    held & ATTACK_BUTTONS == ATTACK_BUTTONS
+}
+
 /// Whether a fresh attack-button press completed X+A using GU's filtered pad state.
 ///
 /// # Safety
 /// The actor must be a live local quest hunter on the game thread.
 pub unsafe fn attack_chord_pressed(actor: u32) -> bool {
-    unsafe {
-        let held = ((actor + FILTERED_HELD) as *const u16).read();
-        held & ATTACK_BUTTONS == ATTACK_BUTTONS && attack_buttons_pressed(actor) != 0
-    }
+    unsafe { attack_chord_held(actor) && attack_buttons_pressed(actor) != 0 }
 }

@@ -101,6 +101,7 @@ mod entry {
             return;
         }
         mhgu_sdk::style::manual::bind(STYLE_ID, include_str!("manual.txt"));
+        unsafe { remote::bind_sheathe(STYLE_ID, &motion::SHEATHE_MOTIONS) };
         rules::bind(STYLE_ID, &RULES);
         if !unsafe { remote::bind_playback(STYLE_ID, &battle::PLAYBACK) } {
             forge::log::prelude::warn!("Style {}: remote action playback unavailable", STYLE_ID);

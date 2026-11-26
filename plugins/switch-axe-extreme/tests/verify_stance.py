@@ -122,7 +122,9 @@ def roll_chains(g, actor, set_action, form):
         assert tick(122) == action(95), (current(), g.get(actor + 13096))
 
     double_slash()
-    assert tick(110, 0x120, side=True) == action(153)
+    assert tick(60, 0x120, side=True) == action(95)
+    assert tick(92) == action(95)
+    assert tick(110) == action(153)
     double_slash()
     assert tick(60, 0x120) == action(95)
     assert tick(92) == action(98)

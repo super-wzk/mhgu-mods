@@ -26,7 +26,7 @@ use mhgu_sdk::style::{
     input::{attack_chord_pressed, attack_chord_with_shoulder, attack_combo_pending},
     movement,
 };
-const DASH: u8 = 200;
+pub(super) const DASH: u8 = 200;
 const DASH_SLOT: u16 = action::slot(DASH);
 const BRAKE: u8 = 201;
 const IDLE: u8 = 255;
@@ -41,8 +41,12 @@ const SHEATHED_JUMP_SLASH: u16 = 38;
 const DRAWN_JUMP_SLASH: u16 = 67;
 const JUMP_COMBO_START: i16 = 54;
 const JUMP_COMBO_END: i16 = 158;
+const AIR_FINISHER_BUFFER: f32 = 12.;
+const FINISHER_TURN_LIMIT: i16 = 0x2000;
 const SWEEP: u8 = 0;
 const VERTICAL_FINISHER: u8 = 40;
+const RIGHT_FINISHER: u8 = 43;
+const LEFT_FINISHER: u8 = 44;
 // GU w00 pl_w00.fup float rows 1–3, in 60 Hz clock units.
 const GU_CHARGE_THRESHOLDS: [f32; 3] = [50., 100., 140.];
 const UPPERCUT_FOURTH_TIER_INTERVALS: f32 = 4.65;
@@ -86,22 +90,14 @@ static GUARD_RECOVERY: CommandSet = CommandSet::new(&[BufferedCommand {
 .retaining_native(0x8010, &[241]);
 
 // GU's 2008 landing table gives the jump slash a 54..158 combo window.
-const JUMP_FINISHER: BufferedCommand = BufferedCommand {
+static JUMP_LANDING: CommandSet = CommandSet::new(&[BufferedCommand {
     group: action::GROUP,
-    slot: action::slot(VERTICAL_FINISHER),
-    input: CommandInput::Weapon(12),
+    slot: action::slot(SWEEP),
+    input: CommandInput::Weapon(2),
     accept_from: JUMP_COMBO_START,
     execute_from: JUMP_COMBO_START,
     accept_until: JUMP_COMBO_END,
-};
-static JUMP_LANDING: CommandSet = CommandSet::new(&[
-    JUMP_FINISHER,
-    BufferedCommand {
-        slot: action::slot(SWEEP),
-        input: CommandInput::Weapon(2),
-        ..JUMP_FINISHER
-    },
-])
+}])
 .replacing_weapon(44); // GU strong wide slash
 
 // FZ 817C0982 starts the emitter at frame 84 of clip 1465.
@@ -218,9 +214,11 @@ struct Battle {
     resume_sprint: sprint::Resume,
     guard_dash: bool,
     roll_yaw: Option<u16>,
+    jump_finisher: Option<f32>,
     poise: f32,
     sustain_poise: bool,
 }
+
 impl Battle {
     fn charge_level(
         &mut self,
@@ -287,6 +285,7 @@ impl Battle {
             resume_sprint: sprint::Resume::default(),
             guard_dash: false,
             roll_yaw: None,
+            jump_finisher: None,
             poise: 0.,
             sustain_poise: false,
         }
@@ -305,6 +304,7 @@ impl Battle {
         self.hit = false;
         self.deflected = false;
         self.roll_yaw = None;
+        self.jump_finisher = None;
     }
     unsafe fn cancel_attack(&mut self, p: u32) {
         self.cancel();
@@ -405,6 +405,7 @@ impl Battle {
                 self.peer_guard = peer::GuardBody::Off;
             }
             self.roll_yaw = None;
+            self.jump_finisher = None;
             self.hit = false;
             self.deflected = false;
             self.charging = false;
@@ -526,9 +527,57 @@ impl Battle {
             }
         }
     }
+    unsafe fn begin_finisher(&mut self, p: u32) -> bool {
+        unsafe {
+            let offset = movement::live_relative_stick_yaw(p)
+                .map(|yaw| (yaw as i16).wrapping_neg())
+                .unwrap_or(0);
+            // The side clips already turn the hunter by 45 degrees through event 4.
+            let state = if offset >= FINISHER_TURN_LIMIT {
+                RIGHT_FINISHER
+            } else if offset <= -FINISHER_TURN_LIMIT {
+                LEFT_FINISHER
+            } else {
+                VERTICAL_FINISHER
+            };
+            let facing = read::<u16>(p, 4076);
+            if !action::transition_to(p, action::GROUP, action::slot(state)) {
+                return false;
+            }
+            if state == VERTICAL_FINISHER {
+                movement::set_facing(p, facing.wrapping_add_signed(offset));
+            }
+            self.begin(p, state)
+        }
+    }
+
+    unsafe fn jump_followup(&mut self, p: u32, phase: u8, x_pressed: bool) -> bool {
+        unsafe {
+            let frame = read::<f32>(p, 1280);
+            if !matches!(phase, 1 | 2) || (phase == 2 && frame >= f32::from(JUMP_COMBO_END)) {
+                self.jump_finisher = None;
+                return false;
+            }
+            if x_pressed {
+                self.jump_finisher = Some(AIR_FINISHER_BUFFER);
+            } else if phase == 1 {
+                let elapsed = read::<f32>(p, 28).max(0.);
+                self.jump_finisher = self
+                    .jump_finisher
+                    .map(|remaining| remaining - elapsed)
+                    .filter(|remaining| *remaining > 0.);
+            }
+            phase == 2
+                && frame >= f32::from(JUMP_COMBO_START)
+                && self.jump_finisher.is_some()
+                && self.begin_finisher(p)
+        }
+    }
+
     unsafe fn begin_branch(&mut self, p: u32, branch: u16) -> bool {
         unsafe {
             let next = match branch {
+                40 | 43 | 44 => return self.begin_finisher(p),
                 65 => {
                     if !action::transition_to(p, GUARD_GROUP, 0) {
                         return false;
@@ -636,8 +685,8 @@ impl Battle {
             self.poise = (self.poise - delta).max(0.);
             let was_charging = self.charging;
             self.events(p);
-            if state < 74
-                && program::hunter_art_window(&self.cursor, self.hit)
+            if (matches!(state, DASH | BRAKE)
+                || (state < 74 && program::hunter_art_window(&self.cursor, self.hit)))
                 && action::activate_hunter_art(p)
             {
                 self.cancel_attack(p);
@@ -929,6 +978,7 @@ impl Battle {
             }
             // Preserve a pending run through the native jump slash and its landing window.
             if !jump_slash {
+                self.jump_finisher = None;
                 let drawn = native!(0x2a2444, p) != 0;
                 self.resume_sprint
                     .on_native(p, current, ground_movement, drawn, was_sprinting);
@@ -951,8 +1001,14 @@ impl Battle {
                 return true;
             }
             if group == action::GROUP {
-                if jump_slash
-                    && phase == 2
+                if !jump_slash {
+                    return false;
+                }
+                let x_pressed = input.weapon_command(12) && !uppercut_input && !self.chord_x_held;
+                if self.jump_followup(p, phase, x_pressed) {
+                    return true;
+                }
+                if phase == 2
                     && dash_input
                     && (f32::from(JUMP_COMBO_START)..f32::from(JUMP_COMBO_END))
                         .contains(&read::<f32>(p, 1280))

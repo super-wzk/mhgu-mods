@@ -1,10 +1,12 @@
 use crate::{WEAPON_ID, fx, native, program, read, sound, write};
-use mhfz_sdk::motion::MotionBanks;
+use mhfz_sdk::motion::{MotionBanks, sprint_sheathe};
 use mhgu_sdk::style::{PASS, action};
 
 // GU 11A91E0 reads this field when choosing the equipped weapon's pose.
 pub(super) const SWORD_POSE: u32 = 13096;
 pub(super) const SPRINT_SHEATHE: u16 = 1499;
+pub(super) static SHEATHE_MOTIONS: mhgu_sdk::style::remote::Sheathe =
+    mhfz_sdk::motion::sheathe_motions(program::SPRINT_STATES, SPRINT_SHEATHE);
 pub(super) const SHEATHE_ACTION: (u16, u16) = (1, 2);
 const GU_SHEATHE_MOTION: u32 = 5003;
 
@@ -113,14 +115,8 @@ const LOCOMOTION: &[(u32, u16)] = &[
 pub unsafe extern "C" fn encode(actor: u32, request: u32) -> u32 {
     let source = if (PRIVATE..PRIVATE * 2).contains(&request) {
         request as u16
-    } else if request == GU_SHEATHE_MOTION && unsafe { action::current(actor) } == SHEATHE_ACTION {
-        let (group, slot) = unsafe { action::previous(actor) };
-        // FZ common action 202 uses w12's dedicated sprint sheathe clip.
-        if action::custom_id(group, slot).is_some_and(program::is_sprint) {
-            SPRINT_SHEATHE
-        } else {
-            1003
-        }
+    } else if unsafe { sprint_sheathe(actor, request, &SHEATHE_MOTIONS) } {
+        SPRINT_SHEATHE
     } else {
         let Some(&(_, source)) = LOCOMOTION.iter().find(|&&(id, _)| id == request) else {
             return PASS;

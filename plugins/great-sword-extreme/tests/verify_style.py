@@ -1077,7 +1077,7 @@ def verify_battle(g, p, remote, resources):
     g.cpu.mem_write(roll_entries, struct.pack("<2I", attack, command))
     g.cpu.mem_write(roll_table, struct.pack("<6I", 0, 0, 2, 2, 0, roll_entries))
 
-    for side in (9102, 32769):
+    for side in (0, 9102, 32769):
         vertical = 63 if side == 32769 else 62
         for presses, expected in (
             ((0x120,), 37), ((0x20, 0x120), 37), ((0x100, 0x120), 37),
@@ -1102,8 +1102,19 @@ def verify_battle(g, p, remote, resources):
             g.put(tables + 11 * 4, stock)
         roll(side)
         g.put(p + 5188, 0)
-        tick(63, held=0x20, pressed=0x20, native_pad=True)
+        tick(63 if side else 53, held=0x20, pressed=0x20, native_pad=True)
         assert clip() == vertical
+        for release_early in (False, True):
+            packed = roll(side)
+            g.put(p + 5188, 0)
+            for frame in range(20, 46, 2):
+                held = 0 if release_early and frame >= 28 else 0x120
+                tick(frame, held=held, pressed=0x120 if frame == 20 else 0, native_pad=True)
+                if frame < 44:
+                    assert g.half(p + 1204) == packed
+            assert g.half(p + 9482) == (6 if release_early else 0x8035), (side, release_early)
+        neutral()
+        tick(0)
 
     # Guard recovery uses the native common B command with no pre-input.
     guard_rows = (b"plcmd_com_0x8010_241a", b"plcmd_com_0x0001_006f", b"plcmd_w00_0x0010_004a")
@@ -1512,6 +1523,21 @@ def verify_battle(g, p, remote, resources):
         tick(0)
         assert g.half(p + 9482) == 54 and len(art_prepared) == 2 + slot
     g.put(p + 5180, 0)
+    for running in (200, 201):
+        for slot in range(3):
+            neutral()
+            f(5088, 900)
+            h(5136, 120)
+            g.run(GS_CHANGE_ACTION, p, 16, 0x8000 + running, 0)
+            tick(0)
+            assert g.half(p + 9482) == 0x8000 + running
+            g.put(p + 5180, 1 << slot)
+            before = len(art_prepared)
+            tick(2)
+            assert g.half(p + 9482) == 54
+            assert len(art_prepared) == before + 1
+            g.put(p + 5180, 0)
+    h(5136, 0)
     # Only an actual landed, drawn, living launch victim can use the two FZ
     # recoveries. A rejected input costs nothing. The attack bank stays bound.
     g.put(p + 3844 + 4 * 10, 0)
@@ -1977,6 +2003,7 @@ def verify_battle(g, p, remote, resources):
     assert (g.half(p + 9478), g.half(p + 9482)) == (1, 0)
     g.cpu.mem_write(eq + 1236, b"\0")
     verify_jump_slash(g, p, tick, neutral)
+    verify_ground_finisher(g, p, tick, neutral)
 
     # A resolved R+X+A chord can carry GU's raw guard edge and its standalone
     # X command. Test both R arriving first and all three arriving together.
@@ -2216,6 +2243,66 @@ def verify_dash_drop(g, p, tick, action, neutral):
     print("GU native sprint drops: both terrain routes, landing resume, stick release, depletion and interruption passed")
 
 
+def verify_ground_finisher(g, p, tick, neutral):
+    for press, stick, recenter, expected, yaw in (
+        (65, 0x8000, True, 29, 0),
+        (68, 0x8000, True, 40, 0),
+        (68, 0x8000, False, 43, 0x2000),
+        (68, 0, False, 44, 0xE000),
+        (68, 0x4800, False, 40, 0x800),
+        (80, 0x8000, False, 43, 0x2000),
+        (102, 0x8000, False, 29, 0),
+    ):
+        neutral()
+        g.cpu.mem_write(p + 5136, bytes(2))
+        # Let prior flick input expire before testing a distinct press.
+        for _ in range(14):
+            tick(0)
+        g.put(p + 4076, 0)
+        g.put(p + 5280, 0)
+        g.run(GS_CHANGE_ACTION, p, 16, 0x8000 + 29, 0)
+        tick(0)
+        g.cpu.mem_write(p + 5132, struct.pack("<H2xH", stick, 120))
+        tick(press, held=0x20, pressed=0x20)
+        assert g.half(p + 9482) == 0x8000 + (expected if press == 80 else 29), (
+            press, stick, g.half(p + 9482)
+        )
+        if press < 80:
+            assert g.get(p + 4076) == 0
+            if recenter:
+                g.cpu.mem_write(p + 5136, bytes(2))
+            tick(79)
+            assert g.half(p + 9482) == 0x8000 + 29
+            tick(80)
+        assert g.half(p + 9482) == 0x8000 + expected, (press, stick, expected)
+        assert g.get(p + 4076) == g.get(p + 5280) == yaw, (
+            press, stick, g.get(p + 4076), g.get(p + 5280), yaw
+        )
+
+    # Keep GU's held-stick lock, but rotate the live camera after queuing X.
+    camera_manager, camera = g.alloc(120), g.alloc(120)
+    previous_manager = g.get(0x2126504)
+    g.put(0x2126504, camera_manager)
+    g.put(camera_manager + 84, camera)
+    neutral()
+    g.put(p + 4076, 0)
+    g.put(p + 5280, 0)
+    g.run(GS_CHANGE_ACTION, p, 16, 0x8000 + 29, 0)
+    tick(0)
+    g.cpu.mem_write(p + 5132, struct.pack("<H2xH", 0x4000, 120))
+    tick(68, held=0x20, pressed=0x20)
+    g.cpu.mem_write(camera + 96, struct.pack("<3f", 100, 0, 0))
+    tick(74)
+    assert g.get(p + 4076) == 0
+    tick(80)
+    assert g.half(p + 9482) == 0x802B
+    assert g.get(p + 4076) == g.get(p + 5280) == 0x2000
+    assert g.cpu.mem_read(p + 11990, 1) == b"\x01"
+    g.put(0x2126504, previous_manager)
+    g.cpu.mem_write(p + 5136, bytes(2))
+    print("GU ground finisher: early tap, authored execution and expiry, live camera and neutral stick passed")
+
+
 def verify_jump_slash(g, p, tick, neutral):
     lmt = next(
         zlib.decompress(raw) for name, kind, raw in quest_entries("w00.arc")
@@ -2257,6 +2344,7 @@ def verify_jump_slash(g, p, tick, neutral):
     g.stub(0x19998, lambda *_: 0)  # animation-change notification
     g.stub(0x1160294, lambda *_: 0)  # motion-linked rendering
     g.stub(0x2B7240, lambda _, __, row, flags: hit_rows.append((row, flags)))
+    g.cpu.mem_write(p + 5136, bytes(2))
     for slot, motion, key, destination, source in (
         (38, 5233, 0x20, 40, 1451),
         (67, 5150, 0x100, 0, 1406),
@@ -2276,7 +2364,7 @@ def verify_jump_slash(g, p, tick, neutral):
         assert g.run(DECODE, p, g.half(p + 1204)) == 5135
         assert hit_rows[-1] == (7, 3)
         bound = g.get(p + 9384)
-        assert bound != table and g.get(bound + 8) == 3
+        assert bound != table and g.get(bound + 8) == 2
         assert g.get(g.get(bound + 20)) == common
         for frame in (53, 158):
             tick(frame, held=key, pressed=key)
@@ -2287,6 +2375,7 @@ def verify_jump_slash(g, p, tick, neutral):
         assert g.cpu.mem_read(p + 13115, 1) == b"\0"
     tick(72, held=0x20, pressed=0x20)
     assert g.half(p + 9482) == 0x8000 + 22  # sweep -> charge
+
     neutral()
     grounded = False
     g.run(GS_CHANGE_ACTION, p, 16, 67, 0)
@@ -2297,6 +2386,38 @@ def verify_jump_slash(g, p, tick, neutral):
     tick(62)
     double_flick(g, p, tick, 54)
     assert g.half(p + 9482) == 0x8000 + 200
+
+    for press_in_air, air_ticks, stick_at_execution, destination, yaw in (
+        (True, 1, 0, 0x8028, 0),
+        (True, 14, 0, 67, 0),
+        (False, 0, 0, 0x8028, 0),
+        (False, 0, 120, 0x802B, 0x2000),
+    ):
+        neutral()
+        grounded = False
+        g.put(p + 4076, 0)
+        g.put(p + 5280, 0)
+        g.run(GS_CHANGE_ACTION, p, 16, 67, 0)
+        tick(0)
+        if press_in_air:
+            g.cpu.mem_write(p + 5132, struct.pack("<H2xH", 0, 120))
+            tick(40, held=0x20, pressed=0x20)
+            g.cpu.mem_write(p + 5136, bytes(2))
+            for i in range(air_ticks):
+                tick(41 + i)
+        grounded = True
+        tick(52)
+        if not press_in_air:
+            g.cpu.mem_write(p + 5132, struct.pack("<H2xH", 0x8000, 120))
+            tick(30, held=0x20, pressed=0x20)
+            g.cpu.mem_write(p + 5136, bytes(2))
+        tick(53)
+        assert g.half(p + 9482) == 67 and g.get(p + 4076) == 0
+        g.cpu.mem_write(p + 5136, struct.pack("<h", stick_at_execution))
+        tick(54)
+        assert g.half(p + 9482) == destination
+        assert g.get(p + 4076) == g.get(p + 5280) == yaw
+
     print("GU jump slash: both native motions, grounded command window, Frontier finisher and sweep continuation passed")
 
 

@@ -18,7 +18,7 @@ use core::{
 };
 use mhfz_sdk::{
     action::{Cursor, Time},
-    combat::{DrawnEvade, HitWindow, bladescale_evade, evade_bonus_frames},
+    combat::{DrawnEvade, HitWindow, bladescale_evade, evade_bonus_frames, knockback_recovery},
     sound::Clock,
     sprint::{self, Flick, Resume},
 };
@@ -899,6 +899,10 @@ impl Battle {
                 .is_some_and(|cursor| cursor.state == SPRINT);
             self.resume_sprint
                 .on_native(actor, current, ground, drawn, was_sprinting);
+            // FZ w06 states 76 / 77 use the landed launch direction.
+            if let Some(state) = knockback_recovery(actor, current, drawn, input, [77, 76]) {
+                return self.begin(actor, state);
+            }
             if drawn
                 && (matches!(current, (4, 14 | 23))
                     || (current.0 == 16 && NATIVE_AERIAL_SLOTS.contains(&current.1)))

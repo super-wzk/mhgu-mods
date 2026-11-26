@@ -132,6 +132,46 @@ pub type Tick = unsafe extern "C" fn(actor: u32, state: u8);
 /// A per-frame observer for peer actions that return to GU's native dispatcher.
 pub type Observe = unsafe extern "C" fn(local: u32);
 
+/// Native sheathe variants a style can replay without the preceding action.
+#[repr(C)]
+pub struct Sheathe {
+    pub sprints: &'static [u8],
+    pub ordinary: u32,
+    pub sprint: u32,
+}
+
+impl Sheathe {
+    pub const ACTION: (u16, u16) = (1, 2);
+    pub const MOTION: u32 = 5003;
+
+    pub fn follows_sprint(&self, previous: (u16, u16)) -> bool {
+        super::action::custom_id(previous.0, previous.1)
+            .is_some_and(|id| self.sprints.contains(&id))
+    }
+}
+
+const SHEATHE_NAME: &core::ffi::CStr = c"mhgu::StyleRemoteSheatheV1";
+const SHEATHE_MAGIC: u32 = u32::from_le_bytes(*b"SRS1");
+
+#[doc(hidden)]
+#[repr(C)]
+pub struct SheatheService(pub unsafe extern "C" fn(u32, &'static Sheathe) -> bool);
+
+/// # Safety
+/// Publish a resident service during Forge initialization.
+#[doc(hidden)]
+pub unsafe fn publish_sheathe(api: &'static SheatheService) -> bool {
+    unsafe { service::publish(SHEATHE_NAME, SHEATHE_MAGIC, api) }
+}
+
+/// # Safety
+/// Call after style registration. The descriptor and motion callbacks must remain loaded.
+pub unsafe fn bind_sheathe(id: u32, motions: &'static Sheathe) -> bool {
+    service::on_game_thread()
+        && unsafe { service::find::<SheatheService>(SHEATHE_NAME, SHEATHE_MAGIC) }
+            .is_some_and(|api| unsafe { (api.0)(id, motions) })
+}
+
 /// Optional state carried by a style's GU action packets. Encode 0..=7 to
 /// include a value, or return `u8::MAX` to omit it. Decode receives
 /// `u8::MAX` when the sender omitted the value.

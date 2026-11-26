@@ -186,9 +186,6 @@ def replay(g, root, actor, form, weapon, set_action, defer_transition):
     native = Frontier(root.parents[1] / "mhfz/eboot.bin.elf")
     data = (root / "target/assets/switch_axe.fsaa").read_bytes()
     for opener, samples, expected in (
-        (76, ((20, False, True), (30, True, False), (40, False, False)), 77),
-        (76, ((20, False, True), (49, True, False)), 77),
-        (76, ((20, False, True), (50, True, False)), 153),
         (70, ((69, True, False), (70, False, False)), 70),
         (70, ((69, False, False), (70, True, False)), 153),
         (77, ((30, False, True), (69, True, False)), 77),
@@ -205,6 +202,44 @@ def replay(g, root, actor, form, weapon, set_action, defer_transition):
         for frame, pressed, ended in samples:
             active = pad(frame, 0x120 if pressed else 0, stick=100, wrap=ended)
         assert active == expected, (opener, samples, active, expected)
+
+    # FZ w12 opens the thrust before the directional follow-up here.
+    for samples, expected in (
+        (((20, False, True), (30, True, False), (40, False, False)), 77),
+        (((20, False, True), (49, True, False)), 77),
+        (((20, False, True), (50, True, False)), 153),
+    ):
+        assert native.light_sword_chords(data, 76, samples) == expected
+    for opener, thrust in ((76, 77), (175, 77), (176, 70), (95, 98)):
+        start, thrust_at, slash_at = (50, 92, 110) if opener == 95 else (30, 40, 50)
+        for yaw, target in ((-0x4000, 153), (0x4000, 154), (-0x8000, 152)):
+            refill_light()
+            enter(opener, sword=True)
+            if opener != 95:
+                assert pad(20, wrap=True) == opener
+            aim = (facing - yaw) & 0xffff
+            assert pad(start, 0x120, stick=100) == opener
+            assert pad(thrust_at) == opener, (opener, yaw, state())
+            assert pad(slash_at) == target, (opener, yaw, state())
+        refill_light()
+        enter(opener, sword=True)
+        if opener != 95:
+            assert pad(20, wrap=True) == opener
+        assert pad(start, 0x120) == opener
+        assert pad(thrust_at) == thrust
+
+    for first in (0, 0x20, 0x100):
+        refill_light()
+        enter(76, sword=True)
+        assert pad(20, wrap=True) == 76
+        if first:
+            assert pad(30, first) == 76
+        assert pad(32, 0x120) == 76
+        aim = (facing + 0x4000) & 0xffff
+        assert pad(34, 0x120, stick=100) == 76
+        assert pad(40) == 76
+        assert pad(50) == 153
+    print("GU light sword: early directional chords wait for the evade slash across roll follow-ups and four-hit finishers.")
     aim = facing
 
     for strength, expected in ((0, 2), (48, 2), (49, 2), (50, 3), (100, 3)):

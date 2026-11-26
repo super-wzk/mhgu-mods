@@ -22,6 +22,7 @@ mod world_contact;
 use mhgu_sdk::style::{
     ActionRequest, Input, PASS, Style, action, hunter, input, movement, preload,
     registry::{self, ServiceV1},
+    remote::Sheathe,
     rules,
 };
 
@@ -220,7 +221,7 @@ unsafe fn playback_style(actor: u32) -> Option<&'static Style> {
         local_style(actor).or_else(|| {
             let style = multiplayer::peer_entry(actor)?.style;
             let current = action::current(actor);
-            let (group, slot) = if current == (1, 2) {
+            let (group, slot) = if current == Sheathe::ACTION {
                 // Common sheathe can bind a custom follow-up to the preceding action.
                 action::previous(actor)
             } else {
@@ -232,14 +233,33 @@ unsafe fn playback_style(actor: u32) -> Option<&'static Style> {
     }
 }
 
+unsafe fn peer_sheathe(actor: u32) -> Option<(&'static Style, u32)> {
+    unsafe {
+        let entry = multiplayer::peer_entry(actor)?;
+        if action::current(actor) != Sheathe::ACTION {
+            return None;
+        }
+        Some((entry.style, multiplayer::sheathe_request(actor, entry)?))
+    }
+}
+
 unsafe fn independent(actor: u32) -> bool {
     unsafe { local_style(actor) }.is_some_and(|style| style.independent)
 }
 
 #[forge::hook(offset = 0x27c6a0)]
 unsafe fn encode(actor: u32, request: u32) -> u32 {
-    if let Some(f) = unsafe { playback_style(actor) }.and_then(|s| s.encode) {
-        let out = unsafe { f(actor, request) };
+    let (style, selected) = unsafe {
+        if request == Sheathe::MOTION
+            && let Some((style, selected)) = peer_sheathe(actor)
+        {
+            (Some(style), selected)
+        } else {
+            (playback_style(actor), request)
+        }
+    };
+    if let Some(f) = style.and_then(|style| style.encode) {
+        let out = unsafe { f(actor, selected) };
         if out != PASS {
             return out;
         }
@@ -249,7 +269,12 @@ unsafe fn encode(actor: u32, request: u32) -> u32 {
 
 #[forge::hook(offset = 0x27c6d4)]
 unsafe fn decode(actor: u32, packed: u32) -> u32 {
-    if let Some(f) = unsafe { playback_style(actor) }.and_then(|s| s.decode) {
+    let style = unsafe {
+        peer_sheathe(actor)
+            .map(|(style, _)| style)
+            .or_else(|| playback_style(actor))
+    };
+    if let Some(f) = style.and_then(|style| style.decode) {
         let out = unsafe { f(actor, packed) };
         if out != PASS {
             return out;
@@ -354,7 +379,16 @@ unsafe fn dispatch(actor: u32) -> u32 {
     if result != mhgu_sdk::style::PASS {
         return result;
     }
+    if let Some((style, _)) = unsafe { peer_sheathe(actor) } {
+        unsafe {
+            weapon::finish_ground_motion(actor, style, Sheathe::ACTION.1, finish_peer_sheathe)
+        };
+    }
     original!(actor)
+}
+
+extern "C" fn finish_peer_sheathe(slot: u16, phase: u8, motion: u32) -> bool {
+    (slot, phase, motion) == (Sheathe::ACTION.1, 1, Sheathe::MOTION)
 }
 
 #[forge::hook(offset = 0x2b8178)]
