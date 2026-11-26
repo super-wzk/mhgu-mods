@@ -36,16 +36,16 @@
 
 ## 构建与安装
 
-发布整合包时使用 [ARC 打包流程](../../docs/development.md#本地输入和构建)。正式发布目录中，本武器的资源放在一个 ARC，NRO 独立，通用素材随风格注册器安装。下文的单武器打包和回放使用开发目录。
+发布整合包时使用 [ARC 打包流程](../../docs/development.md#本地输入和构建)。正式发布目录中，本武器的资源放在一个 ARC，NRO 独立，通用素材随 SDK 安装。下文的单武器打包和回放使用开发目录。
 
 在仓库根目录运行，使用自己的 Frontier 数据和 GU RomFS。
 
 ```sh
-python3 plugins/style-registry/package.py
+python3 plugins/mhgu-sdk-runtime/package.py
 python3 plugins/long-sword-extreme/package.py "${MHFZ_DAT:?}" "${MHGU_ROMFS:?}"
 ```
 
-将太刀的 `dist/long-sword-extreme` 安装到 MHGURecomp 的 mods 目录，在 Forge 和 style-registry 之后加载。大剑与太刀的光波判定由注册器共用钩子处理，更新时将 style-registry 和已安装的极之型武器 NRO 一起更新。
+将太刀的 `dist/long-sword-extreme` 安装到 MHGURecomp 的 mods 目录，并安装对应版本的 SDK。大剑与太刀的光波判定由 SDK 共用钩子处理，更新时将 SDK 和已安装的极之型武器 NRO 一起更新。
 
 大剑与太刀共用注册器的粒子释放钩子。冲刺达到满蓄力时，太刀在刀身上闪光一次。三处持续光效沿握刀关节的局部 Z 轴分布在 100、160、220 处，闪光位于第一处并取刀身朝向。刀身关节就绪后才生成光效。出斩、回避、受击中断或卸载风格时结束。持续拖刀的地面粒子取已计算的动作根节点位置，本机和联机接收端均播放。
 

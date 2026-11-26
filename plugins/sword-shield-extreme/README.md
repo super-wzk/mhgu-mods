@@ -40,16 +40,16 @@ FZ 单手剑为武器 4（`motion/w04.mot`），在 GU 对应武器 1，注册�
 
 ## 构建与离线回放
 
-发布整合包时使用 [ARC 打包流程](../../docs/development.md#本地输入和构建)。正式发布目录中，本武器的资源放在一个 ARC，NRO 独立，通用素材随风格注册器安装。下文的单武器打包和回放使用开发目录。
+发布整合包时使用 [ARC 打包流程](../../docs/development.md#本地输入和构建)。正式发布目录中，本武器的资源放在一个 ARC，NRO 独立，通用素材随 SDK 安装。下文的单武器打包和回放使用开发目录。
 
 从仓库根目录运行，`MHFZ_DAT` 指向 FZ 的 dat 目录，`MHGU_ROMFS` 指向包含 `nativeNX` 的 GU RomFS 根目录。
 
 ```sh
-python3 plugins/style-registry/package.py
+python3 plugins/mhgu-sdk-runtime/package.py
 python3 plugins/sword-shield-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 ```
 
-把注册器及 `plugins/sword-shield-extreme/dist/sword-shield-extreme` 安装到游戏的 mods 目录。已安装极之型太刀时，一并更新本版本太刀的 NRO，共用碰撞派发由注册器提供。
+把 SDK 的 `dist/mhgu-sdk/` 及 `plugins/sword-shield-extreme/dist/sword-shield-extreme` 安装到游戏的 mods 目录。已安装极之型太刀时，一并更新本版本太刀的 NRO，共用碰撞派发由注册器提供。
 
 在装有 Unicorn 的 Python 环境中设置 `MHGU_ROMFS`，按[开发指引](../../docs/development.md)准备本地 ELF 后运行下列回放。脚本逐项核对 FZ 的 48 个非空起手，并回放涂油、换区和队员动作。`verify_lifecycle.py` 使用 GU 原生按键映射检查组合键、回避交接、冲刺落地和集会所切换。`verify_contacts.py` 用原版命中数据与打包的碰撞形状检查刀身、真空波的独立扣血和盾击的眩晕值。
 

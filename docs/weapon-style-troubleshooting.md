@@ -10,19 +10,19 @@
 | --- | --- |
 | IDE 或命令行报 `.json target specs require -Zjson-target-spec` | 从插件目录运行构建，确认 Cargo 读到了该插件的 `.cargo/config.toml` 和 `[unstable] json-target-spec`，并使用对应 nightly。 |
 | 代码已改，回放或游戏里还是旧行为 | 比对插件根目录、`dist` 及游戏模组目录里的 NRO 哈希。离线脚本通常加载 `dist` 中的成品。改了动作程序、音库或粒子等资源时，重新打包相关插件并同步配套资源。 |
-| 暂停菜单操作手册返回时或启动期间崩溃 | 核对风格注册器 NRO 及故障栈是否经过 GU `65F7A4`。该入口第二条指令有 PC 相对取值，Forge 的旧 trampoline 复制后会读错位置。当前关闭钩子直接走原生对话框关闭和移除入口。用[共用武器验收](../plugins/style-registry/tests/verify_weapon_styles.py)检查无对话框、已有对话框、两个手册入口和返回。 |
+| 暂停菜单操作手册返回时或启动期间崩溃 | 核对风格注册器 NRO 及故障栈是否经过 GU `65F7A4`。该入口第二条指令有 PC 相对取值，Forge 的旧 trampoline 复制后会读错位置。当前关闭钩子直接走原生对话框关闭和移除入口。用[共用武器验收](../plugins/mhgu-sdk-runtime/tests/verify_weapon_styles.py)检查无对话框、已有对话框、两个手册入口和返回。 |
 
 ## 注册、输入和状态
 
 | 现象 | 已有案例与排查方法 |
 | --- | --- |
-| Switch 装备箱只出现部分极之型 | Forge 的插件初始化顺序可能随环境变化。武器入口通过 `registry::when_ready` 登记完整初始化函数。用[整合包启动回放](../plugins/style-registry/tests/verify_weapon_styles.py)验证按 NRO 文件名排序和注册器最后启动两种情况。 |
-| 装备箱没显示自定义风格 | 检查注册器和当前武器的 NRO 是否都已加载、`when_ready` 回调是否执行、风格 ID 是否冲突。注册器按当前 GU 武器筛选列表，未知编号按 0 解析。详细配置见[注册器 README](../plugins/style-registry/README.md)。 |
-| 装备箱能选极之型，但操作指南缺页或找不到该风格 | 检查该武器 NRO 是否带有最新的 `src/manual.txt` 并成功调用 `manual::bind`。核对空行分页、操作页的制表符和行数。用同一套安装包分别走猎人笔记和暂停菜单。见[手册格式](../plugins/style-registry/README.md)及[手册回放](../plugins/style-registry/tests/verify_manual.py)。 |
+| Switch 装备箱只出现部分极之型 | Forge 的插件初始化顺序可能随环境变化。武器入口通过 `registry::when_ready` 登记完整初始化函数。用[整合包启动回放](../plugins/mhgu-sdk-runtime/tests/verify_weapon_styles.py)验证按 NRO 文件名排序和注册器最后启动两种情况。 |
+| 装备箱没显示自定义风格 | 检查注册器和当前武器的 NRO 是否都已加载、`when_ready` 回调是否执行、风格 ID 是否冲突。注册器按当前 GU 武器筛选列表，未知编号按 0 解析。详细配置见[注册器 README](../plugins/mhgu-sdk-runtime/README.md)。 |
+| 装备箱能选极之型，但操作指南缺页或找不到该风格 | 检查该武器 NRO 是否带有最新的 `src/manual.txt` 并成功调用 `manual::bind`。核对空行分页、操作页的制表符和行数。用同一套安装包分别走猎人笔记和暂停菜单。见[手册格式](../plugins/mhgu-sdk-runtime/README.md)及[手册回放](../plugins/mhgu-sdk-runtime/tests/verify_manual.py)。 |
 | 选中极之型还出现勇气纳刀或勇气槽 | 核对 `independent`、实际选中的本地武器风格，以及引擎的内部表索引。菜单预览、状态页、实际动作和已创建的 HUD 有不同的查询点。自定义 ID 由注册器保存，GU 装备里的原版风格字段仍供原版路径使用。 |
-| 附加肩键在奔跑中失灵，或交换键位后打开聊天 | 先用 GU `65FA04` 核对当前附加肩键。奔跑过滤前的按键在任务角色 `+5124`，常规已过滤按键在 `+5112`。聊天入口在 UI 按键流上暂时屏蔽同一个键，手动菜单、触屏事件和猎人指令各自检查。见[聊天回放](../plugins/style-registry/tests/verify_chat_shortcut.py)。 |
-| 收刀、奔跑或长按时招式串了 | 从 GU 已接受的请求查起，区分普通拔刀、拔刀防御、拔刀上挑和切招。大剑的原生拔刀防御路由有独立的入口。双剑的 `X` 是斩下，`A` 是回旋斩，极鬼人时的 `A` 有专属派生。用实际 GU 命令位核对 `X+A`、按下和长按，避免先后两套输入逻辑争用。见[武器路由](../plugins/style-registry/src/runtime/weapon.rs)。 |
-| 不能预输入、派生延迟，或同一次按键出两招 | 先查 GU 是否已写入另一个目标槽，再查 FZ 派生的接收和执行帧。大剑翻滚的四蓄上挑需要让 GU 先完成 `X+A` 判定，双剑和斩斧的翻滚也需要核对原版表抢占。复现时分别试单键、两键同帧、错开一帧及肩键组合。见[命令表绑定](../plugins/style-registry/src/runtime/commands.rs)。 |
+| 附加肩键在奔跑中失灵，或交换键位后打开聊天 | 先用 GU `65FA04` 核对当前附加肩键。奔跑过滤前的按键在任务角色 `+5124`，常规已过滤按键在 `+5112`。聊天入口在 UI 按键流上暂时屏蔽同一个键，手动菜单、触屏事件和猎人指令各自检查。见[聊天回放](../plugins/mhgu-sdk-runtime/tests/verify_chat_shortcut.py)。 |
+| 收刀、奔跑或长按时招式串了 | 从 GU 已接受的请求查起，区分普通拔刀、拔刀防御、拔刀上挑和切招。大剑的原生拔刀防御路由有独立的入口。双剑的 `X` 是斩下，`A` 是回旋斩，极鬼人时的 `A` 有专属派生。用实际 GU 命令位核对 `X+A`、按下和长按，避免先后两套输入逻辑争用。见[武器路由](../plugins/mhgu-sdk-runtime/src/style/weapon.rs)。 |
+| 不能预输入、派生延迟，或同一次按键出两招 | 先查 GU 是否已写入另一个目标槽，再查 FZ 派生的接收和执行帧。大剑翻滚的四蓄上挑需要让 GU 先完成 `X+A` 判定，双剑和斩斧的翻滚也需要核对原版表抢占。复现时分别试单键、两键同帧、错开一帧及肩键组合。见[命令表绑定](../plugins/mhgu-sdk-runtime/src/style/commands.rs)。 |
 | 大剑翻滚中提前长按 X+A 变成纵斩 | GU 的组合键按下指令可能早于第 30 帧消失，长按 X 的指令仍有效。窗口内同时按住 X 和 A 时，上捞派生优先入队，仍在第 44 帧执行。回放覆盖前滚、左右侧滚以及窗口打开前松开两键。见[大剑输入回放](../plugins/great-sword-extreme/tests/verify_style.py)。 |
 | 单手剑 R＋A 出原版动作，或特殊攻击键变成后跳 | GU 的 `2E9D54` 先于 `282DA8` 执行，公会指令表 2000/2023 会请求原版槽 14、15 或 25。单手剑的原生映射 `1169554` 同时按 R＋A 时发出武器指令 26。回放按键映射、原生命令表和风格派发，覆盖同按、错开按、持盾及带方向输入。见[单手剑交接回放](../plugins/sword-shield-extreme/tests/verify_lifecycle.py)。 |
 | 单手剑先 X 后 R 断掉剑斩连段 | GU `1169554` 能用武器指令 4 表示 R＋X。这个采样没有新 X 按下沿，派生必须接收组合指令本身。见[单手剑交接回放](../plugins/sword-shield-extreme/tests/verify_lifecycle.py)。 |
@@ -32,21 +32,21 @@
 | 大剑上挑后第二次 X＋A 接不出前砍 | 上挑的 X 派生可以预输入。GU 单键 X 的长按位（武器指令 5）在组合键判定前就会置位，须等指令 12 确认单键再用长按位维持 X。早按 X＋A 时检查松开顺序，确保在前砍窗口内重按仍能生效。见[上挑派生回放](../plugins/great-sword-extreme/tests/verify_style.py)。 |
 | 大剑上挑蓄力接横扫后，X＋A 误出普通蓄力 | w00 状态 6 的横扫片段 `1406` 从第 72 帧允许执行蓄力派生。用 GU `27CA28` 和 `1160058` 回放完整连段。组合键判定完成前，单键 X 的长按位不能提前写入普通蓄力派生。也要覆盖按住横扫的 A 再补按 X，以及单按 X 的正常派生。见[上挑连段回放](../plugins/great-sword-extreme/tests/verify_style.py)。 |
 | 大剑松开 A 后自动接普通蓄力，或三键同按变成防御 | X＋A 已消耗的 X 长按位持续到实际松开 X。回放派生窗口前的 X＋A、先松 A 和重新按 X。已识别的 R＋X＋A 可能与公共防御指令 70 同时出现，检查站立、横扫和持刀奔跑的上捞优先级。见[大剑输入回放](../plugins/great-sword-extreme/tests/verify_style.py)。 |
-| 双剑错开按 X＋A，地面变成单键斩击，或空中提前下劈 | GU 公共指令 30 会在 `27CA28` 的组合键窗口结束前报告 X。单键攻击等 `11BAEF0` 确认，组合键可用过滤后按键的按下沿补判。尚未判定时拦下提前到达的原生空中攻击请求。回放覆盖单独 X、两键错开一帧、按住一键再补另一键及肩键交换。见[双剑离线回放](../plugins/style-registry/tests/verify_deflection.py)。 |
+| 双剑错开按 X＋A，地面变成单键斩击，或空中提前下劈 | GU 公共指令 30 会在 `27CA28` 的组合键窗口结束前报告 X。单键攻击等 `11BAEF0` 确认，组合键可用过滤后按键的按下沿补判。尚未判定时拦下提前到达的原生空中攻击请求。回放覆盖单独 X、两键错开一帧、按住一键再补另一键及肩键交换。见[双剑离线回放](../plugins/mhgu-sdk-runtime/tests/verify_deflection.py)。 |
 | 太刀按组合键后松 R 误出气刃，或铳枪持盾按 X＋A 变成防御突刺 | R 已按住时，`27CA28` 可能只标记 X＋A（`0x40`）。同时检查 GU 肩键长按位和武器专属映射。太刀应消费本次 R，铳枪应进入龙击炮派生。分别回放三键同按、R 先保持多帧及两种肩键布局。见[太刀离线回放](../plugins/long-sword-extreme/tests/verify_fidelity.py)和[铳枪离线回放](../plugins/gunlance-extreme/tests/verify_port.py)。 |
 | 铳枪连段先按 R＋A 再补 X，龙击炮没接上 | GU 会在第一次采样决定肩键双键组合，下一次采样的第三键可只显示单键待判定。前两键未触发动作时，用紧邻采样的新按下沿完成三键组合。已出招的双键继续按该动作的派生窗口处理。见[铳枪离线回放](../plugins/gunlance-extreme/tests/verify_port.py)。 |
 | 铳枪对空火炮抬枪后卡住，龙击炮特效缺失 | GU `11AFFE4` 从上抬槽 98–100 请求发射槽 135–137。逐级回放全弹、上抬、发射队列、恢复动作和仍在冷却时的分支。只验证起手槽会漏掉这段原生跳转。见[铳枪离线回放](../plugins/gunlance-extreme/tests/verify_port.py)。 |
 | 攻击接侧向回避变成普通翻滚 | GU 接受动作 `1:6` 后在阶段 0 编码动作 28。分别检查转入翻滚前和原生起手时的映射，并覆盖松杆和退出后的下一次普通翻滚。见[单手剑交接回放](../plugins/sword-shield-extreme/tests/verify_lifecycle.py)。 |
-| 收刀后有 A 提示，按键却无法采集 | 记录最后一招、当前动作组和槽及其结束标志。对比收刀后直接按 A 与先移动一步再按 A，确认是否已回到 GU 的地面公共动作。若仍停在拔刀、收刀或回避的恢复动作，检查是否观察到片段实际结束。[公共动作回放](../plugins/style-registry/tests/verify_ground_recovery.py)检查收刀最后一帧的 GU 退出条件，采集本身需要实机复现。 |
+| 收刀后有 A 提示，按键却无法采集 | 记录最后一招、当前动作组和槽及其结束标志。对比收刀后直接按 A 与先移动一步再按 A，确认是否已回到 GU 的地面公共动作。若仍停在拔刀、收刀或回避的恢复动作，检查是否观察到片段实际结束。[公共动作回放](../plugins/mhgu-sdk-runtime/tests/verify_ground_recovery.py)检查收刀最后一帧的 GU 退出条件，采集本身需要实机复现。 |
 | 狩技槽满却不亮、武器狩技无动作或卡在最后一帧 | 分开核对装备槽位、GU 蓄积和显示、`HUNTER_ART` 派生窗口、武器专属起手与续段。血风陀螺的原生处理器依赖层结束位切换到下一段。只在确认指定层的前后两次播放位置都到片段末端时补结束信号，继续由原生处理器收尾。见[双剑动作适配](../plugins/dual-blades-extreme/src/motion.rs)。 |
-| 骑乘成功后小刀不出招 | 骑乘小刀属于 GU 武器组 `16`，槽 `803..=805` 和 `810` 由公共骑乘动作处理器负责。自定义风格过滤原版武器招式时需统一放行这些槽，大剑也要保留对应的原生切换收尾。见[原生槽解析](../plugins/style-registry/src/runtime/weapon.rs)。 |
+| 骑乘成功后小刀不出招 | 骑乘小刀属于 GU 武器组 `16`，槽 `803..=805` 和 `810` 由公共骑乘动作处理器负责。自定义风格过滤原版武器招式时需统一放行这些槽，大剑也要保留对应的原生切换收尾。见[原生槽解析](../plugins/mhgu-sdk-runtime/src/style/weapon.rs)。 |
 
 ## 加载、换区和收刀
 
 | 现象 | 已有案例与排查方法 |
 | --- | --- |
-| 压缩资源版进任务后缺动作、特效或声音 | 检查同次构建的注册器 NRO、`arc/frontier/common.arc` 与对应武器 ARC 是否同时安装。首次资源请求应先读取 common，再读取武器包。档内贴图应早于 MRL，模型应早于 EFL，EFL 应早于 PEL，音频样本应早于 SBKR 和 SRQR。用[发布包回放](../plugins/style-registry/tests/verify_packed_release.py)核对顺序和引用。 |
-| 任务加载页短暂停顿，或第一次拔刀才卡 | 检查 GU `29B7D4` 后本地风格预读传给 `BCAD18` 的加载标志。LMT 和私有 HTS 用 `1` 同步准备。PEL、SRQR 和 HUD TEX 用 `2` 提交给原生加载线程。核对资源 `+80` 的完成位，确认后台未就绪时消费方会跳过且不会重复读盘。动作库首次使用时才绑定到 GU 的空闲槽。升级后若拔刀或攻击仍走 GU 动作，核对武器 NRO 和同包的 `0.lmt`、`2.lmt`、`4.lmt` 是否一起安装。见[共用武器验收](../plugins/style-registry/tests/verify_weapon_styles.py)。 |
+| 压缩资源版进任务后缺动作、特效或声音 | 检查同次构建的注册器 NRO、`arc/frontier/common.arc` 与对应武器 ARC 是否同时安装。首次资源请求应先读取 common，再读取武器包。档内贴图应早于 MRL，模型应早于 EFL，EFL 应早于 PEL，音频样本应早于 SBKR 和 SRQR。用[发布包回放](../tools/tests/verify_packed_release.py)核对顺序和引用。 |
+| 任务加载页短暂停顿，或第一次拔刀才卡 | 检查 GU `29B7D4` 后本地风格预读传给 `BCAD18` 的加载标志。LMT 和私有 HTS 用 `1` 同步准备。PEL、SRQR 和 HUD TEX 用 `2` 提交给原生加载线程。核对资源 `+80` 的完成位，确认后台未就绪时消费方会跳过且不会重复读盘。动作库首次使用时才绑定到 GU 的空闲槽。升级后若拔刀或攻击仍走 GU 动作，核对武器 NRO 和同包的 `0.lmt`、`2.lmt`、`4.lmt` 是否一起安装。见[共用武器验收](../plugins/mhgu-sdk-runtime/tests/verify_weapon_styles.py)。 |
 | 装备斩斧进入集会酒吧卡在加载画面 | GU `282DA8` 的共享派发也接收集会所角色。先核对装备对应的 actor 类型、任务状态是否已结束，以及是否读写了 `SWORD_POSE` 等只在任务内存在的字段。已知风险可用[任务到集会所回放](../plugins/switch-axe-extreme/tests/verify_lobby.py)检查。要定位新的读图故障仍需对应日志和复现场景。 |
 | 光剑收刀闪退、换区后残留特效 | 对照 GU 接管收刀、动作片段退出和区域变化三处时序。斩斧接管收刀时回收瓶光和冲刺层。冲刺收刀片段 1499 的跟踪层在受击或退出时回收。普通收刀片段 1003／1009 的闪光层停用。通过粒子释放回调移除已经回收的记录，检查跨区状态时只访问仍有效的 actor。见[斩斧战斗控制](../plugins/switch-axe-extreme/src/battle.rs)和[斩斧粒子](../plugins/switch-axe-extreme/src/fx.rs)。 |
 
@@ -57,21 +57,21 @@
 | 大剑待机变成长枪姿势 | 先确认 FZ 武器表和 MOT 路径。FZ 大剑是 `w00`，`w03` 是长枪。GU 武器编号、FZ 武器编号和注册风格编号分别查[移植实例表](weapon-style-porting.md#1-确认源武器和招式表)。 |
 | 拔刀斩挂点错，防御回正时剑跳动 | 对照男、女片段的挂点事件、换手帧、起播帧与混合持续时间。重点看源动作的背部、左右手交接和收招回正。通过快照或逐帧记录区分骨架映射问题与挂点切得太早。 |
 | 攻击或回避方向错误，必须松开再推摇杆才会转向 | 对照 GU 世界朝向、摇杆目标朝向、源相对角和片段根位移。分别检查预输入帧和执行帧的方向，覆盖持续推杆、转相机及提前回中。斩斧沿用 GU 原生死区，通过 `live_relative_stick_yaw` 修正按住输入时锁住的相机角。回放缓冲按键时也要覆盖 GU 到下一帧才确认单键的情况。见[GU 移动接口](../crates/mhgu-sdk/src/style/movement.rs)。 |
-| 双剑停一下再按 X，漏招后又从第一刀起手 | 记录实际按下和 GU `27CA28` 确认单键时的片段帧。w06 状态 0 和 1 的 X 窗口在第 50 帧关闭，原版在第 48 帧输入可续招。回放应确认这次输入即使到第 50 帧才被确认也能续上。拔刀攻击状态 16 另查片段 1413 → 1404 的切换帧，确认这一帧的已解析指令能进入第二段窗口。见[双剑原生输入回放](../plugins/style-registry/tests/verify_deflection.py)。 |
-| 双剑的乱舞或多段斩击中按键无法取消 | 记录动作状态、当前片段、按下帧和该行执行帧。乱舞改 1414 的回避有两个窗口，第 48 帧打开、第 66 帧关闭，第 116 帧重新打开。乱舞旋风要查第二片段 1430 的窗口。两段回旋中可先按特殊攻击，等第二段才执行。耐力偏低时核对 GU 体术与料理后的成本；冲刺中 B 与 A 同拍可用时，前向回避应先执行。见[双剑取消回放](../plugins/style-registry/tests/verify_deflection.py)。 |
+| 双剑停一下再按 X，漏招后又从第一刀起手 | 记录实际按下和 GU `27CA28` 确认单键时的片段帧。w06 状态 0 和 1 的 X 窗口在第 50 帧关闭，原版在第 48 帧输入可续招。回放应确认这次输入即使到第 50 帧才被确认也能续上。拔刀攻击状态 16 另查片段 1413 → 1404 的切换帧，确认这一帧的已解析指令能进入第二段窗口。见[双剑原生输入回放](../plugins/mhgu-sdk-runtime/tests/verify_deflection.py)。 |
+| 双剑的乱舞或多段斩击中按键无法取消 | 记录动作状态、当前片段、按下帧和该行执行帧。乱舞改 1414 的回避有两个窗口，第 48 帧打开、第 66 帧关闭，第 116 帧重新打开。乱舞旋风要查第二片段 1430 的窗口。两段回旋中可先按特殊攻击，等第二段才执行。耐力偏低时核对 GU 体术与料理后的成本；冲刺中 B 与 A 同拍可用时，前向回避应先执行。见[双剑取消回放](../plugins/mhgu-sdk-runtime/tests/verify_deflection.py)。 |
 | 滑出台阶悬空或冲刺爬台阶后变成走路 | 在持刀滑步及冲刺出口接入 GU 离地、攀爬和落地流程。结合动作组、当前与上一动作、持刀状态及摇杆位移判断是否恢复冲刺。方向性台阶探测要按实际移动方向查，并留意原生探测缓存。见[双剑战斗控制](../plugins/dual-blades-extreme/src/battle.rs)及[大剑战斗控制](../plugins/great-sword-extreme/src/battle.rs)。 |
 | 空中下劈原地落下或距离偏短 | 空中 X 终结的前进速度与空舞连斩、普通终结分别配置。核对水平速度写入、角色面向、开始及落地时机，GU 按轨迹和地形计算实际距离。同一个速度在不同落差下有不同位移。见[双剑空中动作参数](../plugins/dual-blades-extreme/src/program.rs)。 |
 | 斩斧跳攻后接不出地面派生，或落地出错招 | 记录起跳槽、原生阶段和落地收招槽。部分动作在同一槽收招，另一些会进入原生槽 60 或 68。核对按下沿是否在落地前 8 个 GU 时钟单位内或收招期间，之后是否有新输入覆盖。方向袈裟斩还需确认执行时对应槽有余量。见[落地逻辑](../plugins/switch-axe-extreme/src/battle/landing.rs)和[地形回放](../plugins/switch-axe-extreme/tests/verify_routes.py)。 |
 
 ## 命中和骑乘积蓄
 
-- **普通空舞出现骑乘值。** GU 的双剑 HDP 行 61、62 同时带空中斩击形状和骑乘属性。注册器在本次 HDP 行副本上处理 `Attack::NO_MOUNT`，先清除骑乘属性再调用 GU 构造，形状沿用原模板。普通空舞连斩与命中后按 A 的终结使用无骑乘设置。跳下台阶等普通滞空按 X 是单独的终结动作，保留骑乘值。普通空舞状态里的 X 分支已移除。见[命中构造](../plugins/style-registry/src/runtime/attack.rs)和[双剑战斗控制](../plugins/dual-blades-extreme/src/battle.rs)。
+- **普通空舞出现骑乘值。** GU 的双剑 HDP 行 61、62 同时带空中斩击形状和骑乘属性。注册器在本次 HDP 行副本上处理 `Attack::NO_MOUNT`，先清除骑乘属性再调用 GU 构造，形状沿用原模板。普通空舞连斩与命中后按 A 的终结使用无骑乘设置。跳下台阶等普通滞空按 X 是单独的终结动作，保留骑乘值。普通空舞状态里的 X 分支已移除。见[命中构造](../plugins/mhgu-sdk-runtime/src/style/attack.rs)和[双剑战斗控制](../plugins/dual-blades-extreme/src/battle.rs)。
 - **选对模板，写回却未执行。** 跟到虚表调用点核对参数。双剑 `11BAD38` 是 `2B76CC` 调用的命中调整虚函数，实参为猎人、接触对象、HDP 行指针和标志。此前把第三个实参当作攻击类别比较，导致处理提前返回。另一个武器修正的虚表入口参数不同，应逐个确认。
 - **拔刀斩延迟或命中阶段不对。** 区分事件到达帧、模板自带的延迟以及本次有效区间。事件触发后只传入剩余延迟，跨帧时扣掉已经过去的有效时间。大剑后退、横扫或蓄力接出的攻击应按当前片段与招式选择行。
-- **拔刀攻击吃不到拔刀术。** 从拔刀起手追到释放动作和命中构造。大剑与斩斧的拔刀蓄力通过 GU `2AB670` 为本次释放保留拔刀标记，普通切招会清掉该标记。命中构造须启用会心计算。拔刀术【力】还要求 HDP 第 34 字节为负的条件眩晕值，具体数值按 GU 对应武器的命中模板核对。回放时分别核对拔刀、持刀与后续连段，并单独验证会心和眩晕。见[大剑回放](../plugins/great-sword-extreme/tests/verify_style.py)及[双剑、片手、斩斧和铳枪回放](../plugins/style-registry/tests/verify_draw_attacks.py)。
-- **加成未消费、同一招多次扣斩味、精准防御数值偏差。** 兽魂附身在首个有效大剑命中构造时进入原生修正，起手或空阶段保留。多段独立判定逐段声明斩味策略。精准防御按碰撞确认、受击反应、斩味和无敌计时分别对照，避免从看见回正动作推断所有伤害处理。见[大剑原生修正](../plugins/style-registry/src/runtime/weapon.rs)、[防御接入](../plugins/style-registry/src/runtime/guard.rs)和[大剑命中数据](../plugins/great-sword-extreme/src/combat.rs)。
-- **精准防御有动作却挡不住攻击。** 分开检查 GP 窗口、来袭角、GU 命中标记和防御强化资格。注册器使用风格声明的半角补判时仍遵守 GU 的攻击排除规则。对需要防御强化的攻击，分别用有技能和无技能的装备验证。见[防御接入](../plugins/style-registry/src/runtime/guard.rs)。
-- **大剑精防成功却挡不住怪物推进。** 检查成功后保护时间、是否已接反击、怪物是否在地面以及是正撞还是擦边。联机先确认负责怪物位移的一端装了配套大剑插件，再核对 `netPlAction` 上精防成功标记及对应队员槽。见[位移阻挡](../plugins/great-sword-extreme/src/guard_body.rs)和[联机回放](../plugins/style-registry/tests/verify_gs_db_multiplayer.py)。
+- **拔刀攻击吃不到拔刀术。** 从拔刀起手追到释放动作和命中构造。大剑与斩斧的拔刀蓄力通过 GU `2AB670` 为本次释放保留拔刀标记，普通切招会清掉该标记。命中构造须启用会心计算。拔刀术【力】还要求 HDP 第 34 字节为负的条件眩晕值，具体数值按 GU 对应武器的命中模板核对。回放时分别核对拔刀、持刀与后续连段，并单独验证会心和眩晕。见[大剑回放](../plugins/great-sword-extreme/tests/verify_style.py)及[双剑、片手、斩斧和铳枪回放](../plugins/mhgu-sdk-runtime/tests/verify_draw_attacks.py)。
+- **加成未消费、同一招多次扣斩味、精准防御数值偏差。** 兽魂附身在首个有效大剑命中构造时进入原生修正，起手或空阶段保留。多段独立判定逐段声明斩味策略。精准防御按碰撞确认、受击反应、斩味和无敌计时分别对照，避免从看见回正动作推断所有伤害处理。见[大剑原生修正](../plugins/mhgu-sdk-runtime/src/style/weapon.rs)、[防御接入](../plugins/mhgu-sdk-runtime/src/style/guard.rs)和[大剑命中数据](../plugins/great-sword-extreme/src/combat.rs)。
+- **精准防御有动作却挡不住攻击。** 分开检查 GP 窗口、来袭角、GU 命中标记和防御强化资格。注册器使用风格声明的半角补判时仍遵守 GU 的攻击排除规则。对需要防御强化的攻击，分别用有技能和无技能的装备验证。见[防御接入](../plugins/mhgu-sdk-runtime/src/style/guard.rs)。
+- **大剑精防成功却挡不住怪物推进。** 检查成功后保护时间、是否已接反击、怪物是否在地面以及是正撞还是擦边。联机先确认负责怪物位移的一端装了配套大剑插件，再核对 `netPlAction` 上精防成功标记及对应队员槽。见[位移阻挡](../plugins/great-sword-extreme/src/guard_body.rs)和[联机回放](../plugins/mhgu-sdk-runtime/tests/verify_gs_db_multiplayer.py)。
 
 ## 声音和渲染
 
@@ -89,7 +89,7 @@
 | 地面烟尘或水花在场景交界处有硬边，穿过地面时突然被切掉 | 先确认 FZ 源层启用了场景深度淡化，再核对安装的 EFL 是否包含 `FZF` 标记及该层的正阈值（常见 `0.03` 或 `0.01`）。确认模型路径位于 `effect/frontier_<tag>/`，以及风格注册器已加载。在 GU 主渲染通道检查两次深度测试的绘制包是否各自保留了部分 Alpha，并且只测试场景深度。见[FZ 模型粒子绘制](../crates/mhfz-sdk/src/effects/model.rs)及[片手粒子离线回放](../plugins/sword-shield-extreme/tests/verify_particles.py)。 |
 | 蓄力、不动、辉烈剑或鬼人特效过亮，透明度失效 | 逐层核对贴图 Alpha、粒子 Alpha、MRL 技法及加法或透明混合状态，再检查重复发射和多层叠加。核对 GU 原生 MOD 顶点布局及粒子绘制常量。已有案例里，引擎选中了 `CBTest.fDummyColor`，正常粒子路径用 `CBPrimEflEmu`。共用渲染器在主通道把加法和透明混合层的 RGB 乘以 `0.7`，颜色校正保留源 Alpha。见[大剑材质说明](../plugins/great-sword-extreme/README.md)及[材质离线检查](../plugins/great-sword-extreme/tests/verify_native_material.py)。 |
 | 蓄力边缘发黑或图块可见 | 检查源层的混合方式、透明遮罩、图集 UV 及 mipmap 的跨图块采样。先分清该层的压暗用途、遮罩轮廓和颜色通道。遮罩修正按粒子层处理，辉烈剑及上挑雾气各自核对。 |
-| 某些区发动特效后整屏亮、蓝或地形不可见 | 对照发生前后的模型粒子绘制状态，特别是后续地图雾需要的绑定。注册器在已注册的模型粒子绘制期间保存并恢复 GU 绘制状态。若换区才出现，记录地图区域并检查后续绘制包。见[粒子绘制钩子](../plugins/style-registry/src/runtime/effect.rs)。 |
+| 某些区发动特效后整屏亮、蓝或地形不可见 | 对照发生前后的模型粒子绘制状态，特别是后续地图雾需要的绑定。注册器在已注册的模型粒子绘制期间保存并恢复 GU 绘制状态。若换区才出现，记录地图区域并检查后续绘制包。见[粒子绘制钩子](../plugins/mhgu-sdk-runtime/src/style/effect.rs)。 |
 | 刀光反向、拖在原地或与挥刀错帧 | 从源片段的当前帧和下一帧确认是否触发，检查 GU 的混合、回绕和动作变速。定位 FZ 节点、映射后的 GU 节点及发射模式，区分挂点更新和一次性世界坐标取样。复验至少两种猎人朝向。双剑左右刀光分别核对路由和关节，独立光波核对粒子与碰撞的生成位置。见[动作特效游标](../crates/mhfz-sdk/src/effects.rs)及[武器风格移植流程](weapon-style-porting.md)。 |
 | 猎人转向后斩斧光弧倾斜或偏离刀身 | 读取 GU 原生绘制矩阵的朝向和位移。即使提交给 `3267D0` 的角度正确，合并 PEL 参数时仍可能继承错误的欧拉角顺序。带缩放的世界粒子显式选用顺序 4，保持光弧的局部倾角，再随猎人转向。见[原生绘制回放](../plugins/switch-axe-extreme/tests/verify_phial_follow.py)。 |
 
@@ -97,8 +97,8 @@
 
 | 现象 | 已有案例与排查方法 |
 | --- | --- |
-| 队友的极之型私有动作没有回放 | 先查武器插件是否报 `remote action playback unavailable`。再从[联机派发入口](../plugins/style-registry/src/runtime/multiplayer.rs)核对队员是否仍在 GU 任务名册、装备武器是否匹配，以及该武器是否只有一个对应的回放绑定。 |
-| 队友的冲刺收刀偶尔显示为普通收刀 | 核对双方的注册器与武器 NRO 版本，以及 `1:2` 动作包是否带收刀标记。旧版依赖接收端的上一动作。用[收刀联机回放](../plugins/style-registry/tests/verify_sheathe_multiplayer.py)分别跳过冲刺和刹停，检查选片、末帧收尾及队员之间的隔离。 |
-| 队友动作正常，片手却少真空波或铳枪少打炮弹 | 核对收发两端的注册器、该武器 NRO 和资源版本。片手查包里的刃药标记、狩技等级与发波帧。铳枪查动作起手弹数、原生弹仓容量、装填后的弹数和跨帧炮击请求。若特效正常但伤害不对，再查命中对象的猎人槽和 GU 结算。见[片手与铳枪联机回放](../plugins/style-registry/tests/verify_sns_gl_multiplayer.py)。 |
+| 队友的极之型私有动作没有回放 | 先查武器插件是否报 `remote action playback unavailable`。再从[联机派发入口](../plugins/mhgu-sdk-runtime/src/style/multiplayer.rs)核对队员是否仍在 GU 任务名册、装备武器是否匹配，以及该武器是否只有一个对应的回放绑定。 |
+| 队友的冲刺收刀偶尔显示为普通收刀 | 核对双方的注册器与武器 NRO 版本，以及 `1:2` 动作包是否带收刀标记。旧版依赖接收端的上一动作。用[收刀联机回放](../plugins/mhgu-sdk-runtime/tests/verify_sheathe_multiplayer.py)分别跳过冲刺和刹停，检查选片、末帧收尾及队员之间的隔离。 |
+| 队友动作正常，片手却少真空波或铳枪少打炮弹 | 核对收发两端的注册器、该武器 NRO 和资源版本。片手查包里的刃药标记、狩技等级与发波帧。铳枪查动作起手弹数、原生弹仓容量、装填后的弹数和跨帧炮击请求。若特效正常但伤害不对，再查命中对象的猎人槽和 GU 结算。见[片手与铳枪联机回放](../plugins/mhgu-sdk-runtime/tests/verify_sns_gl_multiplayer.py)。 |
 
 复现时记录双方模组版本及 NRO 哈希、武器模型、地图区域、房主与受影响的队员、当前动作组和槽，以及触发前后的输入。修复后按[文档同步流程](development.md#文档同步)补充对应的原版调用点、动作行号、资源组槽或回放断言，并标明实机观察到哪一步。

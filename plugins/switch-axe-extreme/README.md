@@ -89,23 +89,23 @@
 
 ## 构建、安装与离线回放
 
-发布整合包时使用 [ARC 打包流程](../../docs/development.md#本地输入和构建)。正式发布目录中，本武器的资源放在一个 ARC，NRO 独立，通用素材随风格注册器安装。下文的单武器打包和回放使用开发目录。
+发布整合包时使用 [ARC 打包流程](../../docs/development.md#本地输入和构建)。正式发布目录中，本武器的资源放在一个 ARC，NRO 独立，通用素材随 SDK 安装。下文的单武器打包和回放使用开发目录。
 
 按仓库[开发指引](../../docs/development.md)准备工具链。`MHFZ_DAT` 指向 Frontier 的 `dat` 目录，`MHGU_ROMFS` 指向含 `nativeNX` 的 GU RomFS。从仓库根目录运行：
 
 ```sh
-python3 plugins/style-registry/package.py
+python3 plugins/mhgu-sdk-runtime/package.py
 python3 plugins/switch-axe-extreme/package.py "${MHFZ_DAT:?}" "${MHGU_ROMFS:?}"
 ```
 
-将 `plugins/style-registry/dist/style-registry/` 和 `plugins/switch-axe-extreme/dist/switch-axe-extreme/` 作为两个模组安装到 MHGURecomp 的 `mods/` 下，保留各自的 `romfs/nativeNX/` 层级。本版两份模组需一起更新，斩斧通过 `registry::when_ready` 等待风格注册器就绪。首次安装需要整个斩斧目录，动作库、音效、特效、命中形状和槽条贴图都在 NRO 之外。
+将 `plugins/mhgu-sdk-runtime/dist/mhgu-sdk/` 和 `plugins/switch-axe-extreme/dist/switch-axe-extreme/` 作为两个模组安装到 MHGURecomp 的 `mods/` 下，保留各自的 `romfs/nativeNX/` 层级。本版两份模组需一起更新，斩斧通过 `registry::when_ready` 等待风格注册器就绪。首次安装需要整个斩斧目录，动作库、音效、特效、命中形状和槽条贴图都在 NRO 之外。
 
 离线回放需要可导入 `unicorn` 的 Python 环境、本地 `mhfz/eboot.bin.elf` 和 `mhgu/main.elf`，以及导出的 `MHGU_ROMFS`。`verify_port.py` 还会调用共用武器验收，先按[开发指引](../../docs/development.md)生成所有极之型武器和风格注册器的安装包。从仓库根目录运行以下用例。
 
 ```sh
 python3 plugins/switch-axe-extreme/tests/verify_port.py
 python3 plugins/switch-axe-extreme/tests/verify_lobby.py
-python3 plugins/style-registry/tests/verify_weapon_arts.py
+python3 plugins/mhgu-sdk-runtime/tests/verify_weapon_arts.py
 ```
 
 [动作回放](tests/verify_port.py)覆盖风格选择、斧 X 的预输入连段、光剑解锁及 A 起手。吸收防御从 GU 的受击结算 `2F0670` 进入，检查防御技能、来袭方向、不可防标记，以及后仰后两种形态各自的成功派生。它还会运行 [HUD 回归](tests/verify_hud.py)，用 GU 的原生模式切换代码检查贴图延迟加载、连续刷新、节点替换和退出风格后的恢复。
@@ -114,7 +114,7 @@ python3 plugins/style-registry/tests/verify_weapon_arts.py
 
 [地面输入回放](tests/verify_stance.py)按游戏顺序执行公共按键解析、斩斧按键映射、原版待机表的对应指令行和风格控制器。覆盖双形态的 X、推杆 X、A、X+A、肩键蓄力与吸收、B 翻滚和长按 X 派生。特殊攻击键覆盖光剑未满时保持待机、满槽解锁、连段预输入变形斩和吸收后的两种派生。
 
-[共用武器验收](../style-registry/tests/verify_weapon_styles.py)覆盖各武器的统一预读入口。斩斧在任务初始化时预读男女共用的三组动作库、音库、粒子表、刀身和放出命中形状及槽条贴图。首次播放再绑定动作库。
+[共用武器验收](../mhgu-sdk-runtime/tests/verify_weapon_styles.py)覆盖各武器的统一预读入口。斩斧在任务初始化时预读男女共用的三组动作库、音库、粒子表、刀身和放出命中形状及槽条贴图。首次播放再绑定动作库。
 
 [集会所回放](tests/verify_lobby.py)检查任务 → 集会所 → 任务切换时，集会所角色保留 GU 原生派发和动作编码，所选斩斧风格仍保存在配置中。
 

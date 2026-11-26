@@ -11,14 +11,11 @@ from unicorn import UC_HOOK_CODE
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parents[1]
-sys.path.insert(0, str(REPO / "plugins/monster-registry/tests"))
+sys.path.insert(0, str(REPO / "plugins/mhgu-sdk-runtime/tests"))
 from verify_espinas_quest import Game, MANAGER
+from verify_espinas_quest import SDK_NRO as PROVIDER
 
 NX = ROOT / "dist/great-sword-extreme/romfs/nativeNX"
-PROVIDER = (
-    REPO
-    / "plugins/style-registry/dist/style-registry/romfs/nativeNX/plugins/style_registry.nro"
-)
 PROVIDER_BASE = 0x9000000
 CONTENT = NX / "plugins/great_sword_extreme.nro"
 CONFIG = "savedata:/style_registry.ini"
@@ -237,6 +234,10 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             GUARD_REACTION,
             DRAW_MODEL,
             SUBMIT_MODEL,
+            # The same NRO also provides the monster layout, records and save hooks.
+            0x50B64, 0x523104, 0x526D94, 0x526DD4, 0x526E00, 0x526E44,
+            0x526EB0, 0x526EF8, 0x526F48, 0x39F2B0, 0x3A75C8, 0x3A3930,
+            0x38D990, 0x3E21B8, 0x3E0980, 0x3E1308,
         }
         if "registry" in order
         else set()
@@ -2453,20 +2454,28 @@ def verify_peer_callbacks(elf):
     register, _ = service(g)
     assert g.run(register, style_descriptor(g, 42, 8), 0, 0) == 0
     assert g.run(register, style_descriptor(g, 43, 4), 0, 0) == 0
-    api = api_for(g, b"mhgu::StyleRemoteActionV1", b"SRA1")
-    observe, bind_state = g.get(api + 4), g.get(api + 8)
-    frame, encode, decode, codec = (g.alloc(8) for _ in range(4))
+    bind = g.get(api_for(g, b"mhgu::StylePlaybackV1", b"SPB1"))
+    tick, frame, encode, decode, codec = (g.alloc(8) for _ in range(5))
     frames, received = [], []
+    g.stub(tick, lambda *_: 0)
     g.stub(frame, lambda hunter, *_: frames.append(hunter))
     g.stub(encode, lambda hunter, *_: 5 if hunter == local else 255)
     g.stub(decode, lambda hunter, bits, *_: received.append((hunter, bits)))
     g.put(codec, encode)
     g.put(codec + 4, decode)
-    assert g.run(observe, 43, frame) == 1
-    assert g.run(bind_state, 43, codec) == 0  # Weapon 4 uses the native flags.
-    assert g.run(bind_state, 42, codec) == 1
+
+    def playback(observe=0, state=0):
+        descriptor = g.alloc(12)
+        g.cpu.mem_write(descriptor, struct.pack("<3I", tick, observe, state))
+        return descriptor
+
     for addr in (DISPATCH, 0x1FED90, 0x1FF308):
         g.stub(g.originals[addr], lambda *_: 0)
+    assert g.run(bind, 43, playback(frame, codec)) == 0  # Weapon 4 uses the native flags.
+    g.run(g.hooks[DISPATCH], local)
+    assert not frames  # Rejected descriptors cannot partially bind the observer.
+    assert g.run(bind, 43, playback(frame)) == 1
+    assert g.run(bind, 42, playback(state=codec)) == 1
     g.run(g.hooks[DISPATCH], local)
     assert frames == [local]
     packet = g.alloc(200)
@@ -2477,7 +2486,7 @@ def verify_peer_callbacks(elf):
     g.put(packet + 16, 0x1001)
     g.run(g.hooks[0x1FF308], packet, peer)
     assert received == [(peer, 5), (peer, 255)]
-    print("V1 peer callbacks: independent frame observer and state-only send/receive passed.")
+    print("GU peer playback: atomic binding, frame observer and action-state send/receive passed.")
 
 
 def verify():

@@ -1023,7 +1023,7 @@ unsafe extern "C" fn decode_ammo(actor: u32, count: u8) {
 pub(super) static PLAYBACK: remote::Playback = remote::Playback {
     tick: peer,
     observe: Some(observe),
-    action_state: Some(remote::ActionState {
+    action_state: Some(&remote::ActionState {
         encode: encode_ammo,
         decode: decode_ammo,
     }),

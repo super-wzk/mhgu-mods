@@ -96,16 +96,24 @@ unsafe fn release(actor: u32) -> u32 {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 mod entry {
     use super::*;
-    use mhgu_sdk::monster::species::registry::MonsterRegistry;
+    use mhgu_sdk::monster::species::registry::{self, MonsterRegistry};
 
     #[forge::entry]
     fn main() {
+        registry::when_ready(register_espinas);
+    }
+
+    extern "C" fn register_espinas() {
         // Forge init runs on the game thread. Frontier's 0x50 is Glavenus in GU.
         let Some(registry) = MonsterRegistry::current() else {
             return;
         };
         if let Err(err) = registry.register("frontier:espinas", SPECIES.packed(), FACTORY_LAYOUT) {
             forge::log::prelude::warn!("Espinas disabled: {err:?}");
+            return;
+        }
+        if !melee::bind_world_contact() {
+            forge::log::prelude::warn!("Espinas disabled: SDK world-contact service unavailable");
             return;
         }
         let base = forge::mem::text_addr();

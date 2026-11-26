@@ -4,7 +4,7 @@ use super::{
     package::{Batch, Package, row_id},
 };
 use mhgu_sdk::{
-    combat::collision::{Contact, ContactPool},
+    combat::collision::{Contact, ContactPool, world},
     monster::{Monster, MonsterState, attack::AttackTables, motion::MotionId},
 };
 
@@ -286,29 +286,29 @@ fn clock_owner(contact: Contact<'_>) -> Option<Monster<'_>> {
 
 // 1696FC expands HTS into manager world volumes. Joint 127 in FZ effect 54
 // is the position at spawn; do not reevaluate it from the skeleton each pass.
-#[forge::hook(offset = 0x1696fc)]
-unsafe fn expand(hit: u32) -> u32 {
-    unsafe {
-        let Some(contact) = Contact::from_raw(hit) else {
-            return original!(hit);
-        };
-        let info = CONTACTS.with(|actors| {
-            actors
-                .get(&contact.owner_address())
-                .and_then(|h| h.world.as_ref())
-                .filter(|w| w.hit == hit)
-                .and_then(|w| w.center.map(|pos| (pos, w.radius)))
-        });
-        let Some((pos, radius)) = info else {
-            return original!(hit);
-        };
-        u32::from(contact.submit_world_sphere(pos, radius))
+struct WorldContact;
+
+impl world::Handler for WorldContact {
+    fn sphere(contact: world::ContactKey) -> Option<world::Sphere> {
+        CONTACTS.with(|actors| {
+            let world = actors.get(&contact.owner)?.world.as_ref()?;
+            if world.hit != contact.address {
+                return None;
+            }
+            Some(world::Sphere {
+                center: world.center?,
+                radius: world.radius,
+            })
+        })
     }
+}
+
+pub(super) fn bind_world_contact() -> bool {
+    world::bind::<WorldContact>()
 }
 
 pub(super) fn install(base: u32) {
     forge::install_hook!(base, arm);
     forge::install_hook!(base, submit);
     forge::install_hook!(base, advance);
-    forge::install_hook!(base, expand);
 }

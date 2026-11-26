@@ -2,7 +2,9 @@
 
 普通 FZ 棘龙使用独立物种 `frontier:espinas`、GU 物种编号 `0x006b` 和怪物归档 `em107_00.arc`。在集会所★3下位任务《棘龙》（`0010336`，塔之秘境）狩猎一头棘龙。棘龙在塔顶 1 区出场；没有其他大型怪物或乱入，讨伐或捕获均可完成任务。原版雌火龙的任务、资源与记录保留。
 
-将 [monster-registry](../monster-registry/README.md) 的 `dist/monster-registry/` 和本插件的 `dist/monster-espinas/` 作为两个模组安装。在 MHGURecomp 的 Mods 加载顺序中把 `monster-registry` 放在 `monster-espinas` 前面。棘龙只在 Forge 入口注册一次；缺少注册服务、编号冲突或顺序颠倒时，不挂接怪物行为或把新任务加入柜台。请先停用旧的雌火龙替换包。
+将 [SDK 运行时](../mhgu-sdk-runtime/README.md)的 `dist/mhgu-sdk/` 和本插件的 `dist/monster-espinas/` 作为两个模组安装。使用极之型武器整合包时可以共用包内的 SDK。棘龙在物种注册服务就绪后注册一次，成功才挂接怪物行为并把新任务加入柜台。请先停用旧的雌火龙替换包。
+
+升级时一起更新 SDK 和棘龙的 NRO。棘龙通过 SDK 的 `world::Handler` 提供固定位置的球心和半径，由 SDK 在与武器模组共用的 GU 碰撞入口校验并提交。
 
 选招从 [mhgu-sdk](../../crates/mhgu-sdk/README.md) 查询猎人、巡逻点和怪物状态。插件决定 FZ 的招式、碰撞窗口、发射时机和轨迹；SDK 负责播放 GU 动作、编码受击程序、校验碰撞形状组、计算水平朝向和登记弹体。硬直用哪个动作、断尾后换哪个形状组、冲锋何时转向由插件决定。火球按棘龙自己的 ARC 路径从资源管理器取得，直接绑定到新建的 GU 定向弹体。不读取原版怪物的弹体槽，也不改写共享弹体缓存。
 
@@ -15,9 +17,9 @@
 ```sh
 pac="${MHFZ_EM080_PAC:?请指定 FZ 的 em080.pac 文件路径}"
 enemy="${MHGU_ROMFS:?请指定 GU RomFS 根目录}/nativeNX/arc/enemy"
-python3 plugins/monster-registry/package.py
+python3 plugins/mhgu-sdk-runtime/package.py
 python3 plugins/monster-espinas/package.py --pac "$pac" --enemy "$enemy"
-python3 plugins/monster-registry/tests/verify_espinas_quest.py --native "$MHGU_ROMFS/nativeNX"
+python3 plugins/mhgu-sdk-runtime/tests/verify_espinas_quest.py --native "$MHGU_ROMFS/nativeNX"
 python3 plugins/monster-espinas/tests/verify_espinas_sound.py
 python3 plugins/monster-espinas/tests/verify_espinas_spawn.py
 python3 plugins/monster-espinas/tests/verify_espinas_contacts.py plugins/monster-espinas/dist/monster-espinas

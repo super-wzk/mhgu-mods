@@ -715,7 +715,7 @@ unsafe fn round_force(actor: u32, tier: u32) -> u32 {
 pub(super) static PLAYBACK: remote::Playback = remote::Playback {
     tick: peer,
     observe: Some(observe),
-    action_state: Some(remote::ActionState {
+    action_state: Some(&remote::ActionState {
         encode: encode_art,
         decode: decode_art,
     }),

@@ -1,6 +1,6 @@
 # MHF-Z 极之型铳枪 → MHGU 1.4
 
-在装备箱装备铳枪后选择「极之型铳枪」。FZ 与 GU 的武器编号都是 `9`，注册器风格编号为 `6`。启用时停用原版热度累计，原生热度槽用于显示点火计时。普通炮弹、装填、龙击炮冷却和三格狩技沿用 GU 接口。切回原版风格后恢复 GU 热度显示和累计。依赖同次构建的 `style-registry`。
+在装备箱装备铳枪后选择「极之型铳枪」。FZ 与 GU 的武器编号都是 `9`，注册器风格编号为 `6`。启用时停用原版热度累计，原生热度槽用于显示点火计时。普通炮弹、装填、龙击炮冷却和三格狩技沿用 GU 接口。切回原版风格后恢复 GU 热度显示和累计。依赖同次构建的 `mhgu-sdk.nro`。
 
 | 场景 | 输入 |
 | --- | --- |
@@ -38,16 +38,16 @@ HUD 沿用 GU `hud9_g_lance` 的外框和数字弹量。原热度槽内的色块
 
 ## 构建与离线检查
 
-发布整合包时使用 [ARC 打包流程](../../docs/development.md#本地输入和构建)。正式发布目录中，本武器的资源放在一个 ARC，NRO 独立，通用素材随风格注册器安装。下文的单武器打包和回放使用开发目录。
+发布整合包时使用 [ARC 打包流程](../../docs/development.md#本地输入和构建)。正式发布目录中，本武器的资源放在一个 ARC，NRO 独立，通用素材随 SDK 安装。下文的单武器打包和回放使用开发目录。
 
 从仓库根目录运行。两项路径参数的含义见[开发指引](../../docs/development.md)。
 
 ```sh
-python3 plugins/style-registry/package.py
+python3 plugins/mhgu-sdk-runtime/package.py
 python3 plugins/gunlance-extreme/package.py "$MHFZ_DAT" "$MHGU_ROMFS"
 python3 plugins/gunlance-extreme/tests/verify_port.py
-python3 plugins/style-registry/tests/verify_sns_gl_multiplayer.py
-python3 plugins/style-registry/tests/verify_weapon_styles.py
+python3 plugins/mhgu-sdk-runtime/tests/verify_sns_gl_multiplayer.py
+python3 plugins/mhgu-sdk-runtime/tests/verify_weapon_styles.py
 ```
 
-将 `dist/gunlance-extreme` 和对应的注册器目录分别放入模组目录。铳枪回放需要 Unicorn、本地 GU 1.4 ELF、Vita ELF 和 `MHGU_ROMFS`。回放覆盖动作槽与资源引用、GU 原生组合键、炮弹与炮击队列、HUD 隔离、龙击炮计时、干湿地形分流、枪口挂点和粒子绘制。声音检查包含普通与蓄炮各方向、空膛、全弹、点火、装填和龙击炮的请求，并解码成品 ADPCM 检查是否含有可听信号。主光和光晕的曲线直接与 Vita ELF 对照，回放同时改变枪管和相机位置检查绘制结果。任务内的混音、画面和实际网络同步仍需实机确认。
+将 `dist/gunlance-extreme` 和 SDK 的 `dist/mhgu-sdk/` 分别放入模组目录。铳枪回放需要 Unicorn、本地 GU 1.4 ELF、Vita ELF 和 `MHGU_ROMFS`。回放覆盖动作槽与资源引用、GU 原生组合键、炮弹与炮击队列、HUD 隔离、龙击炮计时、干湿地形分流、枪口挂点和粒子绘制。声音检查包含普通与蓄炮各方向、空膛、全弹、点火、装填和龙击炮的请求，并解码成品 ADPCM 检查是否含有可听信号。主光和光晕的曲线直接与 Vita ELF 对照，回放同时改变枪管和相机位置检查绘制结果。任务内的混音、画面和实际网络同步仍需实机确认。

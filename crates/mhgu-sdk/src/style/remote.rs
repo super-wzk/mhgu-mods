@@ -125,8 +125,8 @@ impl<T> Default for PeerStates<T> {
     }
 }
 
-const NAME: &core::ffi::CStr = c"mhgu::StyleRemoteActionV1";
-const MAGIC: u32 = u32::from_le_bytes(*b"SRA1");
+const NAME: &core::ffi::CStr = c"mhgu::StylePlaybackV1";
+const MAGIC: u32 = u32::from_le_bytes(*b"SPB1");
 
 pub type Tick = unsafe extern "C" fn(actor: u32, state: u8);
 /// A per-frame observer for peer actions that return to GU's native dispatcher.
@@ -182,31 +182,21 @@ pub struct ActionState {
 }
 
 /// A style's remote action playback and optional companion callbacks.
+#[repr(C)]
 pub struct Playback {
     pub tick: Tick,
     pub observe: Option<Observe>,
-    pub action_state: Option<ActionState>,
+    pub action_state: Option<&'static ActionState>,
 }
 
 #[doc(hidden)]
 #[repr(C)]
-pub struct Service {
-    pub bind: unsafe extern "C" fn(u32, Tick),
-    pub observe: unsafe extern "C" fn(u32, Observe) -> bool,
-    pub bind_action_state: unsafe extern "C" fn(u32, &'static ActionState) -> bool,
-}
+pub struct Service(pub unsafe extern "C" fn(u32, &'static Playback) -> bool);
 
 /// # Safety
 /// Publish a resident service during Forge initialization.
 pub unsafe fn publish(api: &'static Service) -> bool {
     unsafe { service::publish(NAME, MAGIC, api) }
-}
-
-fn current() -> Option<&'static Service> {
-    if !service::on_game_thread() {
-        return None;
-    }
-    unsafe { service::find(NAME, MAGIC) }
 }
 
 /// Bind a registered style's playback on the game thread. Returns false if
@@ -216,44 +206,7 @@ fn current() -> Option<&'static Service> {
 /// Call during style initialization after registration succeeds. The style,
 /// descriptor and callbacks must remain loaded.
 pub unsafe fn bind_playback(id: u32, playback: &'static Playback) -> bool {
-    let Some(api) = current() else { return false };
-    unsafe {
-        if let Some(state) = &playback.action_state
-            && !(api.bind_action_state)(id, state)
-        {
-            return false;
-        }
-        if let Some(observe) = playback.observe
-            && !(api.observe)(id, observe)
-        {
-            return false;
-        }
-        (api.bind)(id, playback.tick);
-    }
-    true
-}
-
-/// # Safety
-/// The registered style and callback must remain loaded.
-pub unsafe fn bind(id: u32, tick: Tick) -> bool {
-    let Some(api) = current() else { return false };
-    unsafe { (api.bind)(id, tick) };
-    true
-}
-
-/// Register a per-frame observer for a style.
-///
-/// # Safety
-/// The callback must remain valid throughout the lifetime of the style.
-pub unsafe fn observe(id: u32, callback: Observe) -> bool {
-    current().is_some_and(|api| unsafe { (api.observe)(id, callback) })
-}
-
-/// Register state callbacks for a style. Returns false if the registry cannot
-/// carry the value in this weapon's native packet.
-///
-/// # Safety
-/// The descriptor and callbacks must remain valid throughout the lifetime of the style.
-pub unsafe fn bind_action_state(id: u32, state: &'static ActionState) -> bool {
-    current().is_some_and(|api| unsafe { (api.bind_action_state)(id, state) })
+    service::on_game_thread()
+        && unsafe { service::find::<Service>(NAME, MAGIC) }
+            .is_some_and(|api| unsafe { (api.0)(id, playback) })
 }

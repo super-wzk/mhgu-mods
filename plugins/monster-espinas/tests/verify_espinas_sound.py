@@ -6,7 +6,7 @@ from pathlib import Path
 
 from game_files import GU_ELF, REPO, assets
 
-sys.path.insert(0, str(REPO / "plugins/monster-registry/tests"))
+sys.path.insert(0, str(REPO / "plugins/mhgu-sdk-runtime/tests"))
 from verify_espinas_quest import Game
 
 

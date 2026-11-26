@@ -1,12 +1,48 @@
 //! Optional registry service. GU's own lookup and records work without a provider.
 use super::{HuntCounts, Species, SpeciesId, valid_key};
 use crate::memory::{Field, entry, singleton};
+use crate::service::{self, Init, Startup};
 use core::{ffi::CStr, marker::PhantomData};
 
 // A named MT type provides a process-wide rendezvous, including on MHGURecomp,
 // whose loader resolves NRO imports before other plugins may be initialized.
 const NAME: &CStr = c"mhgu::MonsterRegistryV1";
 const MAGIC: u32 = u32::from_le_bytes(*b"MRG1");
+const STARTUP: &CStr = c"mhgu::MonsterStartupV1";
+const STARTUP_MAGIC: u32 = u32::from_le_bytes(*b"MSI1");
+
+static WAITING: crate::sync::Shared<alloc::vec::Vec<Init>> =
+    crate::sync::Shared::new(alloc::vec::Vec::new());
+
+extern "C" fn enqueue(init: Init) {
+    WAITING.with(|waiting| waiting.push(init));
+}
+
+extern "C" fn drain() {
+    for init in WAITING.with(core::mem::take) {
+        init();
+    }
+}
+
+/// Run a content NRO's setup once the monster registry and its hooks are ready.
+/// Call once from the content plugin's serialized Forge entry point.
+pub fn when_ready(init: extern "C" fn()) {
+    static LOCAL: Startup = Startup { enqueue, drain };
+    service::when_ready(
+        STARTUP,
+        STARTUP_MAGIC,
+        &LOCAL,
+        || provider().is_some(),
+        init,
+    );
+}
+
+/// # Safety
+/// Provider only. Call on the init thread after installing the registry hooks.
+#[doc(hidden)]
+pub unsafe fn finish_startup() {
+    unsafe { service::finish_startup(STARTUP, STARTUP_MAGIC) };
+}
 
 /// Versioned plugin ABI. No Rust strings, references or allocator ownership cross NROs.
 #[doc(hidden)]
@@ -21,11 +57,12 @@ pub struct ServiceV1 {
 /// Publish once on the serialized Forge init thread with a process-lifetime API.
 #[doc(hidden)]
 pub unsafe fn publish(api: &'static ServiceV1) -> bool {
-    unsafe { crate::service::publish(NAME, MAGIC, api) }
+    unsafe { service::publish(NAME, MAGIC, api) }
 }
 
+// Callers check the game thread before accessing the MT table.
 fn provider() -> Option<&'static ServiceV1> {
-    unsafe { crate::service::find(NAME, MAGIC) }
+    unsafe { service::find(NAME, MAGIC) }
 }
 
 /// Access on the initialized game thread. Do not send across threads.
@@ -34,7 +71,7 @@ impl MonsterRegistry {
     /// Obtain access only on GU's startup thread; returns None before MT initialization
     /// or from another thread. The handle cannot be sent to a worker thread.
     pub fn current() -> Option<Self> {
-        crate::service::on_game_thread().then_some(Self(PhantomData))
+        service::on_game_thread().then_some(Self(PhantomData))
     }
 
     pub fn resolve(&self, id: SpeciesId) -> Option<Species> {

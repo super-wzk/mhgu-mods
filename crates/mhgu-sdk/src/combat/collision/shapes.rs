@@ -127,15 +127,22 @@ impl<'a> ShapeGroups<'a> {
 
     /// GU's 16A4D8 / 16A4E4 accept loaded groups (even empty ones), but never null slots.
     pub fn get(self, index: u8) -> Option<ShapeGroup<'a>> {
-        if u32::from(index) >= self.count
-            || self.slots.get(Field::<u32>::at(4 * usize::from(index))) == 0
-        {
-            return None;
-        }
+        self.group(index)?;
         Some(ShapeGroup {
             resource: self.resource,
             index,
         })
+    }
+
+    fn group(self, index: u8) -> Option<Object<'a>> {
+        if u32::from(index) >= self.count {
+            return None;
+        }
+        unsafe { Object::at(self.slots.get(Field::at(4 * usize::from(index)))) }
+    }
+
+    pub(super) fn shape_count(self, index: u8) -> Option<u32> {
+        Some(self.group(index)?.get(Field::at(4)))
     }
 
     pub(crate) fn belongs_to(self, resource: Object) -> bool {

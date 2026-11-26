@@ -13,6 +13,7 @@ const CONTACT_GROUP: Field<u32> = Field::at(136);
 const CONTACT_FLAGS: Field<u32> = Field::at(48);
 
 mod shapes;
+pub mod world;
 pub use shapes::{CachedHitShape, HitShape, ShapeGroup, ShapeGroups};
 
 #[derive(Clone, Copy)]

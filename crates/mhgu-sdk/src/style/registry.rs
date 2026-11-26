@@ -1,7 +1,7 @@
 //! Optional weapon-style service. The provider owns registrations and preferences.
 pub use super::RegisterError;
 use super::{Style, action::Attack};
-use crate::service;
+use crate::service::{self, Init, Startup};
 use core::{
     ffi::{CStr, c_char},
     marker::PhantomData,
@@ -31,13 +31,6 @@ pub unsafe fn publish(api: &'static ServiceV1) -> bool {
 // the process-wide queue and owns its allocation until startup completes.
 const STARTUP: &CStr = c"mhgu::StyleStartupV1";
 const STARTUP_MAGIC: u32 = u32::from_le_bytes(*b"SSI1");
-type Init = extern "C" fn();
-
-#[repr(C)]
-struct Startup {
-    enqueue: extern "C" fn(Init),
-    drain: extern "C" fn(),
-}
 
 static WAITING: crate::sync::Shared<alloc::vec::Vec<Init>> =
     crate::sync::Shared::new(alloc::vec::Vec::new());
@@ -55,30 +48,26 @@ extern "C" fn drain() {
 /// Run a content NRO's complete setup once the registry and its hooks are ready.
 /// Call once from the weapon's serialized Forge entry point.
 pub fn when_ready(init: extern "C" fn()) {
-    if !service::on_game_thread() {
-        return;
-    }
-    if StyleRegistry::current().is_some() {
-        init();
-        return;
-    }
     static LOCAL: Startup = Startup { enqueue, drain };
-    unsafe {
-        if let Some(queue) = service::find::<Startup>(STARTUP, STARTUP_MAGIC) {
-            (queue.enqueue)(init);
-        } else if service::publish(STARTUP, STARTUP_MAGIC, &LOCAL) {
-            enqueue(init);
-        }
-    }
+    service::when_ready(
+        STARTUP,
+        STARTUP_MAGIC,
+        &LOCAL,
+        || provider().is_some(),
+        init,
+    );
 }
 
 /// # Safety
 /// Provider only. Call after installing every runtime service on the init thread.
 #[doc(hidden)]
 pub unsafe fn finish_startup() {
-    if let Some(queue) = unsafe { service::find::<Startup>(STARTUP, STARTUP_MAGIC) } {
-        (queue.drain)();
-    }
+    unsafe { service::finish_startup(STARTUP, STARTUP_MAGIC) };
+}
+
+// Callers check the game thread before accessing the MT table.
+fn provider() -> Option<&'static ServiceV1> {
+    unsafe { service::find(NAME, MAGIC) }
 }
 
 /// A handle to the published registry, restricted to GU's initialized game thread.
@@ -89,7 +78,7 @@ impl StyleRegistry {
         if !service::on_game_thread() {
             return None;
         }
-        Some(Self(unsafe { service::find(NAME, MAGIC) }?, PhantomData))
+        Some(Self(provider()?, PhantomData))
     }
 
     /// Register a process-lifetime definition with UTF-8 equipment-box labels.

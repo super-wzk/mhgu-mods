@@ -179,7 +179,7 @@ unsafe extern "C" fn receive(actor: u32, id: u8) {
 pub(crate) static PLAYBACK: remote::Playback = remote::Playback {
     tick: receive,
     observe: Some(peer_frame),
-    action_state: Some(remote::ActionState {
+    action_state: Some(&remote::ActionState {
         encode: send_phial,
         decode: receive_phial,
     }),

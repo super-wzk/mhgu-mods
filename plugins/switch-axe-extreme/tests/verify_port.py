@@ -6,7 +6,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parents[1]
 sys.path.insert(0, str(ROOT.parent / "great-sword-extreme/tests"))
-sys.path.insert(0, str(ROOT.parent / "style-registry/tests"))
+sys.path.insert(0, str(ROOT.parent / "mhgu-sdk-runtime/tests"))
 from verify_style import BLOCK, CHANGE_ACTION, api_for, boot, hunters, load_registered_style, service, setup_controller
 
 def main():

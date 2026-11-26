@@ -5,3 +5,8 @@
 !/mhgu/.gitkeep
 target
 __pycache__/
+/dist/
+/plugins/style-registry/dist/
+/plugins/style-registry/style_registry.nro
+/plugins/monster-registry/dist/
+/plugins/monster-registry/monster_registry.nro

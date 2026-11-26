@@ -2,6 +2,46 @@
 use crate::memory::entry;
 use core::ffi::{CStr, c_char};
 
+pub(crate) type Init = extern "C" fn();
+
+// The first waiting NRO publishes its queue in the process-wide type table.
+// Its callbacks keep allocation and deallocation within that same NRO.
+#[repr(C)]
+pub(crate) struct Startup {
+    pub enqueue: extern "C" fn(Init),
+    pub drain: extern "C" fn(),
+}
+
+pub(crate) fn when_ready(
+    name: &'static CStr,
+    magic: u32,
+    local: &'static Startup,
+    ready: impl FnOnce() -> bool,
+    init: Init,
+) {
+    if !on_game_thread() {
+        return;
+    }
+    if ready() {
+        init();
+        return;
+    }
+    unsafe {
+        if let Some(queue) = find::<Startup>(name, magic) {
+            (queue.enqueue)(init);
+        } else if publish(name, magic, local) {
+            (local.enqueue)(init);
+        }
+    }
+}
+
+// Called by a provider on the init thread after installing its hooks.
+pub(crate) unsafe fn finish_startup(name: &'static CStr, magic: u32) {
+    if let Some(queue) = unsafe { find::<Startup>(name, magic) } {
+        (queue.drain)();
+    }
+}
+
 #[repr(C)]
 struct Published<T: 'static> {
     dti: [u32; 8], // GU 7AEDCC initializes all eight fields in caller-owned storage.

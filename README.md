@@ -1,6 +1,6 @@
 # MHGU 移植开发
 
-本仓库为 MHGU Switch 1.4 提供 Rust 引擎绑定、Forge 注册插件和 Frontier 资源转换工具。
+本仓库为 MHGU Switch 1.4 提供 [mhgu-sdk Rust 接口](crates/mhgu-sdk/README.md)、[共享 Forge 运行时](plugins/mhgu-sdk-runtime/README.md)和 Frontier 资源转换工具。
 
 [查看更新日志](CHANGELOG.md)
 

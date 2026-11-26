@@ -2,15 +2,21 @@
 
 MHGU Switch 1.4 的 Rust 引擎绑定。插件通过路径依赖引用 `mhgu-sdk`，Rust 中使用 `mhgu_sdk`。包为 `no_std`；宿主工具可以使用 `MotionId` 等值类型，ARM32 小端目标还提供运行时绑定。
 
-`Monster::species()` 读取实例完整的任务编号，和 `MonsterClass` 的虚表判断独立。在游戏线程取 `MonsterRegistry::current()` 后，`resolve(id)` 与 `counts(species)` 可查询原版或已注册物种。SDK 自身不保存计数；新增物种的注册与持久化由 [monster-registry](../../plugins/monster-registry/README.md) 提供。
+使用风格或新增物种服务的模组需要安装一次 [mhgu-sdk.nro](../../plugins/mhgu-sdk-runtime/README.md)。Cargo 依赖提供 Rust 类型和调用接口，进程内的版本化服务由该 NRO 提供。武器和怪物模组各自在 Forge 入口调用对应的 `registry::when_ready`，运行时可先于或晚于内容加载。
 
-内容插件在 Forge 的 `#[forge::entry]` 中注册一次：
+`Monster::species()` 读取实例完整的任务编号，和 `MonsterClass` 的虚表判断独立。在游戏线程取 `MonsterRegistry::current()` 后，`resolve(id)` 与 `counts(species)` 可查询原版或已注册物种。新增物种的注册和持久化由[运行时的怪物注册服务](../../plugins/mhgu-sdk-runtime/monsters.md)负责。
+
+内容插件在运行时就绪后注册一次。
 
 ```rust
-use mhgu_sdk::monster::species::{SpeciesId, registry::MonsterRegistry};
+use mhgu_sdk::monster::species::{SpeciesId, registry::{self, MonsterRegistry}};
 
 #[forge::entry]
 fn main() {
+    registry::when_ready(register);
+}
+
+extern "C" fn register() {
     if let Some(registry) = MonsterRegistry::current()
         && let Err(err) = registry.register("frontier:espinas", 0x006b, SpeciesId::new(1).unwrap())
     {
@@ -19,7 +25,7 @@ fn main() {
 }
 ```
 
-`current()` 在游戏线程返回句柄，从其他线程调用返回 `None`。`id.is_native()` 只查 GU 的只读物种表，不需要注册表句柄。模板只决定原版构造器和固定表的布局；物种编号、资源和猎人记录可以独立。键或编号无效、模板非原生或编号已被占用时，`register` 返回错误。如果注册服务尚未初始化，调用返回 `Unavailable`，不会排队或重试。替换已有物种无需注册。
+`current()` 在游戏线程返回句柄，从其他线程调用返回 `None`。`id.is_native()` 只查 GU 的只读物种表，不需要注册表句柄。模板决定原版构造器和固定表的布局，物种编号、资源和猎人记录可以独立。键或编号无效、模板非原生或编号已被占用时，`register` 返回错误。直接调用 `register` 时，服务尚未初始化会返回 `Unavailable`。替换已有物种无需注册。
 
 在 GU 回调中用 `unsafe { Monster::from_raw(actor) }` 借用引擎持有的怪物，再通过 `monster.state()` 取得 `MonsterState`。它借用引擎的实时状态块，可访问位置、生命值、动作阶段和碰撞对象；复制句柄不会复制这些数据。空的怪物指针或尚未挂载的状态块分别返回 `None`。句柄只能在对象和状态块有效时、在所属游戏线程使用，不能存入插件的跨帧状态。可存储 `MotionId` 等值类型。
 
@@ -36,6 +42,8 @@ fn spawn(resource: &DirectedShellResource<'_>, launch: ShellLaunch) -> bool {
 ```
 
 独立资源直接绑定到 GU 的定向弹体实例，不占用或替换原版编号缓存；已有槽位沿用 GU 的编号登记流程。引擎拒绝时返回 `false`。选择哪种招式、发射帧和速度由插件决定。碰撞池则必须一直存活到引擎不再持有地址；和原始回调入口一样，这个生命周期边界显式保留 `unsafe`。
+
+需要展开固定世界位置球形判定的内容插件实现 [`world::Handler`](src/combat/collision/world.rs)，在运行时就绪后调用 `world::bind::<Handler>()`。回调按 `ContactKey` 匹配自己持有的碰撞体，返回球心和半径或 `None`。SDK 在原生碰撞回调内检查球形参数、HTS 形状数和碰撞池容量，再提交形状。返回 `None` 时继续派发，再交回 GU。用法见[棘龙近战接入](../../plugins/monster-espinas/src/melee.rs)。按风格 ID 绑定的 `style::world_contact` 沿用现有接口。
 
 模块首先区分操作对象。插件导入怪物行为编号用 `mhgu_sdk::monster::action::ActionId`，导入共享碰撞对象用 `mhgu_sdk::combat::collision::Contact`。宿主工具可以使用 `ActionId`、`MotionId`、`AngerMode`、`Posture` 和几何值；访问活对象、调用引擎的方法仅在 ARM32 小端目标编译。
 
@@ -58,7 +66,7 @@ fn spawn(resource: &DirectedShellResource<'_>, launch: ShellLaunch) -> bool {
 
 [mhfz-sdk](../mhfz-sdk/README.md) 在本 SDK 的 GU 接口上提供极型武器共用的 Frontier 动作、输入及表现逻辑。
 
-[StyleRegistry](src/style/registry.rs) 在 GU 游戏线程访问风格注册器。注册器先初始化，内容插件在 Forge 初始化入口调用一次 `registry.register(&STYLE, name, description)`。一个 V1 描述符提供动作编号、狩技槽位数及可选的请求、更新和防御规则。用 `style::selected(weapon)` 查询当前风格，返回 0 时使用 GU 原版风格。实际用法见[极型大剑](../../plugins/great-sword-extreme/src/lib.rs)。
+[StyleRegistry](src/style/registry.rs) 在 GU 游戏线程访问风格注册器。内容插件在 Forge 入口调用 `registry::when_ready`，在回调中执行一次 `registry.register(&STYLE, name, description)`。一个 V1 描述符提供动作编号、狩技槽位数及可选的请求、更新和防御规则。用 `style::selected(weapon)` 查询当前风格，返回 0 时使用 GU 原版风格。实际用法见[极型大剑](../../plugins/great-sword-extreme/src/lib.rs)。
 
 GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提供 GU 已解析的公共和武器指令，`request` 处理 GU 已接受的拔刀和武器切招请求。公共动作可返回 `PASS` 交给 GU。空输入通知插件结束，actor 为 0 时代表旧猎人已失效。
 
@@ -66,7 +74,7 @@ GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提�
 
 [preload](src/style/preload.rs) 登记本地风格在 GU 完成任务猎人初始化后执行的资源准备回调。[MotionBanks](src/style/action/motion_bank.rs) 缓存男女模型共用的 LMT。首次播放时才绑定运行时 bank，按装备模型选择基础片段或槽号加 128 的专用片段。私有 HTS 可通过 [CachedHitShape](src/combat/collision/shapes.rs) 复用已加载资源。
 
-[remote](src/style/remote.rs) 提供 GU 名册查询和远端状态存储。风格注册成功后，用 `bind_playback` 一次提交常驻的 `Playback` 描述符，包含动作回放 `tick`、可选的逐帧观察 `observe` 和动作包状态 `action_state`。注册器校验当前武器的动作包是否有可用位，插件定义状态值及回放逻辑。读取远端装备前按当前名册核对猎人，角色离场、换武器或槽位更换时释放旧状态。原有的三个独立绑定函数仍可通过 V1 服务调用。
+[remote](src/style/remote.rs) 提供 GU 名册查询和远端状态存储。风格注册成功后，用 `bind_playback` 一次提交常驻的 `Playback` 描述符，包含动作回放 `tick`、可选的逐帧观察 `observe` 和动作包状态 `action_state`。注册器校验当前武器的动作包是否有可用位，校验通过后才登记整份描述符。插件定义状态值及回放逻辑。读取远端装备前按当前名册核对猎人，角色离场、换武器或槽位更换时释放旧状态。
 
 使用 GU 公共收刀的风格可通过 `bind_sheathe` 登记常驻 `Sheathe` 描述符，提供冲刺动作 ID 和两种片段的显式编码请求。注册器把收刀变体加到原生动作包，并将接收到的变体交给风格的动作编码回调。
 

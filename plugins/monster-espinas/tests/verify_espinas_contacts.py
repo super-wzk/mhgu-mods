@@ -249,30 +249,41 @@ def verify(mod):
     hts = base + 0x70000
     hde = base + 0x80000
     anchor = status + 2456
+    world_handlers = []
     if independent:
         # The separate quest test runs the actual provider. Here a minimal
-        # published V1 service makes the combat replay independent of save/quest I/O.
+        # pair of published services lets the combat replay call the content directly.
         owner = base + 0xe0800
         put(0x18a6190 + 56, owner)
         stub(0x13effd4, lambda *_: owner)
-        descriptor, api, name, register = (owner + n for n in (64, 128, 160, 200))
-        cpu.mem_write(name, b"mhgu::MonsterRegistryV1\0")
-        put(descriptor + 4, name)
-        put(descriptor + 32, int.from_bytes(b"MRG1", "little"))
-        put(descriptor + 36, api)
-        put(api, register)
-        stub(0x7aef68, lambda *_: descriptor)
+        descriptors = {}
+
+        def publish_service(at, identifier, magic, handler):
+            descriptor, api, name, callback = (at + n for n in (0, 64, 80, 128))
+            cpu.mem_write(name, identifier + b"\0")
+            put(descriptor + 4, name)
+            put(descriptor + 32, int.from_bytes(magic, "little"))
+            put(descriptor + 36, api)
+            put(api, callback)
+            stub(callback, handler)
+            descriptors[run(0x7CBDB4, name, 0xFFFFFFFF) & 0x7FFFFFFF] = descriptor
+
         def register_species(raw, key, length, template):
             assert (raw, bytes(cpu.mem_read(key, length)), template) == (107, b"frontier:espinas", 1)
             return 0
-        stub(register, register_species)
+
+        publish_service(owner + 0x100, b"mhgu::MonsterRegistryV1", b"MRG1", register_species)
+        publish_service(owner + 0x200, b"mhgu::WorldContactV1", b"WCT1", lambda expand, *_: world_handlers.append(expand))
+        stub(0x7aef68, lambda key, *_: descriptors.get(key, 0))
     run(exports["forge_onLoad"], base + 0xE0000)
     run(exports["forge_onInit"], base + 0xE0000)
     required = {0x7DC2C, 0x1696E4, 0x16919C, 0x6ED40}
     assert hooks.keys() in (
         required,
-        required | {0xCF5F64, 0x1696FC, 0xBA874, 0xBCC04, 0xBCE6C, 0xA134C, 0x951A80} | ({0x4A858, 0x152960, 0x39BB30, 0x3D7E90, 0x560CA4, 0x3A3178, 0x192340, 0x56EF50, 0x55BDA4, 0xB84114} if independent else set()),
+        required | {0xCF5F64, 0xBA874, 0xBCC04, 0xBCE6C, 0xA134C, 0x951A80} | ({0x4A858, 0x152960, 0x39BB30, 0x3D7E90, 0x560CA4, 0x3A3178, 0x192340, 0x56EF50, 0x55BDA4, 0xB84114} if independent else {0x1696FC}),
     )
+    if independent:
+        assert len(world_handlers) == 1
     if combined:
         assert 0xCF5F64 in hooks
     stub(0x13EFDC4, lambda p, n, *_: cpu.mem_write(p, bytes(n)))  # __aeabi_memclr
@@ -945,7 +956,8 @@ def verify(mod):
                 assert bool(run(0x169328, world)) == (70 <= i < 110)
                 if i in (70, 88, 109):
                     put(manager + 10288, 0)
-                    assert run(hooks[0x1696FC], world) == 1
+                    expand = world_handlers[0] if independent else hooks[0x1696FC]
+                    assert run(expand, world) == 1
                     assert s.unpack("<B3xf3f", cpu.mem_read(manager + 8240, 20)) == (
                         1,
                         400,
@@ -953,6 +965,17 @@ def verify(mod):
                         140,
                         210,
                     )
+                    if independent and i == 70:
+                        group_size = get(groups + 4 * get(world + 136)) + 4
+                        assert get(group_size) == 1
+                        put(group_size, 2)
+                        assert run(expand, world) == 0xFFFFFFFF
+                        assert get(manager + 10288) == 1
+                        put(group_size, 1)
+                        put(manager + 10288, 64)
+                        assert run(expand, world) == 0
+                        assert get(manager + 10288) == 64
+                        put(manager + 10288, 1)
         for roll, move in [(18, (3, 13)), (19, (3, 14))]:
             choose(100, roll, True, move)
             for cycle in range(2):

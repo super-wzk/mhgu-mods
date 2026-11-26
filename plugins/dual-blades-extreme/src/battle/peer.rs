@@ -137,7 +137,7 @@ unsafe extern "C" fn observe(local: u32) {
 pub(crate) static PLAYBACK: remote::Playback = remote::Playback {
     tick: tick,
     observe: Some(observe),
-    action_state: Some(remote::ActionState {
+    action_state: Some(&remote::ActionState {
         encode: encode,
         decode: decode,
     }),
