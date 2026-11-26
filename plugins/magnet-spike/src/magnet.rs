@@ -1,13 +1,16 @@
 //! Magnetic shot and attached mark, updated on the GU scene clock.
-use crate::program;
+use crate::{
+    motion,
+    program::{self, Mode},
+};
 use alloc::vec::Vec;
 use mhgu_sdk::{
     combat::collision::hurt::{HurtScene, Target},
     geometry::{Angle, Bearing},
     sync::Shared,
     weapon::style::{
-        action,
-        hud::{Meter, Signal},
+        action::{self, melee::StrikePower},
+        hud::{Meter, MeterTrack, Signal},
         hunter, movement, particle,
     },
 };
@@ -62,12 +65,63 @@ impl Gauge {
     }
 }
 
+const BOOST_CAPACITY: u16 = program::parameter(56);
+const BOOST_DURATION: f32 = program::parameter(60) as f32 * 2.;
+const BOOST_COOLDOWN: f32 = program::parameter(59) as f32 * 2.;
+
+#[derive(Clone, Copy)]
+enum Boost {
+    Charging(u16),
+    Active(f32),
+    Cooling(f32),
+}
+
+impl Boost {
+    fn hit(&mut self, power: u16) {
+        if let Self::Charging(units) = self {
+            // FZ 812283D8 adds 80% of the effective motion power on contact.
+            let gain = u32::from(power) * u32::from(program::parameter(58)) / 100;
+            *units = (u32::from(*units) + gain).min(BOOST_CAPACITY.into()) as u16;
+        }
+    }
+
+    fn ready(self) -> bool {
+        matches!(self, Self::Charging(BOOST_CAPACITY))
+    }
+
+    fn advance(&mut self, frames: f32) {
+        // FZ 8122880E advances both forms, including while the other is in use.
+        *self = match *self {
+            Self::Active(left) if left > frames => Self::Active(left - frames),
+            Self::Active(left) if left + BOOST_COOLDOWN > frames => {
+                Self::Cooling(left + BOOST_COOLDOWN - frames)
+            }
+            Self::Cooling(left) if left > frames => Self::Cooling(left - frames),
+            Self::Active(_) | Self::Cooling(_) => Self::Charging(0),
+            charging => charging,
+        };
+    }
+
+    fn track(self, color: u32) -> MeterTrack {
+        let (fraction, color) = match self {
+            Self::Charging(units) => (f32::from(units) / f32::from(BOOST_CAPACITY), color),
+            Self::Active(left) => (left / BOOST_DURATION, 0xffffc76b),
+            Self::Cooling(left) => (left / BOOST_COOLDOWN, 0xff8d8d8d),
+        };
+        MeterTrack {
+            percent: (100. * fraction) as u8,
+            color,
+        }
+    }
+}
+
 struct Magnet {
     owner: u32,
     shots: Vec<Projectile>,
     mark: Option<Mark>,
     gauge: Gauge,
     range: Option<MarkRange>,
+    boosts: [Boost; 2],
 }
 
 impl Magnet {
@@ -78,6 +132,7 @@ impl Magnet {
             mark: None,
             gauge: Gauge::new(),
             range: None,
+            boosts: [Boost::Charging(0); 2],
         }
     }
 
@@ -87,6 +142,7 @@ impl Magnet {
             self.mark = None;
             self.gauge = Gauge::new();
             self.range = None;
+            self.boosts = [Boost::Charging(0); 2];
             self.owner = owner;
         }
     }
@@ -98,9 +154,40 @@ pub fn reset() {
     LOCAL.with(|state| state.select_owner(0));
 }
 
+pub fn boost_ready(actor: u32, mode: Mode) -> bool {
+    LOCAL.with(|state| state.owner == actor && state.boosts[mode as usize].ready())
+}
+
+pub fn activate_boost(actor: u32, mode: Mode) -> bool {
+    LOCAL.with(|state| {
+        if state.owner != actor || !state.boosts[mode as usize].ready() {
+            return false;
+        }
+        state.boosts[mode as usize] = Boost::Active(BOOST_DURATION);
+        true
+    })
+}
+
+pub fn boosts(actor: u32) -> u8 {
+    LOCAL.with(|state| {
+        if state.owner != actor {
+            return 0;
+        }
+        let [slash, impact] = state
+            .boosts
+            .map(|boost| u8::from(matches!(boost, Boost::Active(_))));
+        slash | impact << 1
+    })
+}
+
 pub extern "C" fn meter(actor: u32) -> Meter {
     LOCAL.with(|state| {
         let current = state.owner == actor;
+        let [slash, impact] = if current {
+            state.boosts
+        } else {
+            [Boost::Charging(0); 2]
+        };
         Meter {
             charge: if current {
                 state.gauge.units
@@ -114,6 +201,7 @@ pub extern "C" fn meter(actor: u32) -> Meter {
                 Some(MarkRange::Attract) => Signal::Far,
                 None => Signal::None,
             },
+            tracks: [slash.track(0xfff26752), impact.track(0xff71b6ef)],
         }
     })
 }
@@ -189,13 +277,21 @@ pub fn spend(actor: u32, segments: u8) -> bool {
     })
 }
 
-pub extern "C" fn melee_contact(actor: u32, power: u16) {
+pub extern "C" fn melee_contact(actor: u32, power: StrikePower, affinity: f32) {
+    // FZ 81EC73F0 truncates motion power after affinity. 812281D4
+    // applies the gauge rate and then the charge skill, truncating each step.
+    let power = power.adjusted(affinity);
+    let mode = motion::local_pose(actor).unwrap_or_default().mode;
+    let skill = match unsafe { action::ChargeSkill::equipped(actor) } {
+        action::ChargeSkill::Focus => program::parameter(53),
+        action::ChargeSkill::Slow => program::parameter(55),
+        action::ChargeSkill::Normal => 100,
+    };
+    let gain = u32::from(power) * u32::from(program::parameter(37)) / 100;
     LOCAL.with(|state| {
         state.select_owner(actor);
-        // FZ 812281D4 converts the contact's motion power to charge.
-        state
-            .gauge
-            .add(u32::from(power) * u32::from(program::parameter(37)) / 100);
+        state.gauge.add(gain * u32::from(skill) / 100);
+        state.boosts[mode as usize].hit(power);
     });
 }
 
@@ -234,6 +330,9 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
             return;
         }
         state.gauge.refill(frames);
+        for boost in &mut state.boosts {
+            boost.advance(frames);
+        }
         let mark = &mut state.mark;
         if let Some(current) = mark {
             let (group, slot) = unsafe { action::current(scene.owner()) };

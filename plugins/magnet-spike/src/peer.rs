@@ -1,6 +1,6 @@
 //! Replay the sender's accepted actions on GU's remote hunters.
 use crate::{
-    combat,
+    combat, magnet,
     motion::{self, WeaponPose},
     program::{self, Mode},
 };
@@ -20,8 +20,8 @@ pub(super) static PLAYBACK: remote::Playback = remote::Playback {
 };
 
 pub(super) static POSITION: remote::ActionState = remote::ActionState {
-    encode: encode_coast,
-    decode: decode_coast,
+    encode: encode_position,
+    decode: decode_position,
 };
 
 static PEERS: PeerStates<Replay> = PeerStates::new();
@@ -48,43 +48,59 @@ unsafe extern "C" fn encode_mode(actor: u32) -> u8 {
     let mode = action::custom_id(group, slot)
         .filter(|&state| program::ACTIONS.contains(state))
         .map_or(previous, |state| previous.for_state(state));
-    u8::from(matches!(mode, Mode::Impact))
+    let mut boosts = magnet::boosts(actor);
+    if let Some(mode) = action::custom_id(group, slot).and_then(program::boost_mode)
+        && magnet::boost_ready(actor, mode)
+    {
+        boosts |= 1 << mode as u8;
+    }
+    mode as u8 | boosts << 1
 }
 
 unsafe extern "C" fn decode_mode(actor: u32, value: u8) {
     let Some(index) = index_of(actor) else { return };
-    let mode = match value {
-        0 => Some(Mode::Slash),
-        1 => Some(Mode::Impact),
-        _ => None,
+    let mode = if value & 1 == 0 {
+        Mode::Slash
+    } else {
+        Mode::Impact
     };
     POSES.update(index, actor, |saved, _| {
-        *saved = mode.map(|mode| WeaponPose { mode, coast: None })
+        *saved = Some(WeaponPose {
+            mode,
+            coast: None,
+            boosts: value >> 1,
+        });
     });
 }
 
-unsafe extern "C" fn encode_coast(actor: u32) -> u8 {
+unsafe extern "C" fn encode_position(actor: u32) -> u8 {
     let (group, slot) = unsafe { action::current(actor) };
-    let coast = action::custom_id(group, slot).filter(|&id| program::is_attraction(id));
-    if coast.is_some() && motion::local_pose(actor).is_some_and(|pose| pose.coast == coast) {
-        1
-    } else {
-        u8::MAX
-    }
+    let Some(id) = action::custom_id(group, slot) else {
+        return u8::MAX;
+    };
+    let coast = motion::local_pose(actor).is_some_and(|pose| pose.coast == Some(id));
+    u8::from(coast) | magnet::boosts(actor) << 1
 }
 
-unsafe extern "C" fn decode_coast(actor: u32, value: u8) {
+unsafe extern "C" fn decode_position(actor: u32, value: u8) {
     let (group, slot) = unsafe { action::current(actor) };
-    let Some(id) =
-        action::custom_id(group, slot).filter(|&id| value == 1 && program::is_attraction(id))
-    else {
+    let Some(id) = action::custom_id(group, slot) else {
         return;
     };
     if let Some(index) = index_of(actor) {
         POSES.update(index, actor, |saved, _| {
-            saved.get_or_insert_with(WeaponPose::default).coast = Some(id);
+            let pose = saved.get_or_insert_with(WeaponPose::default);
+            pose.boosts = value >> 1;
+            if value & 1 != 0 && program::is_attraction(id) {
+                pose.coast = Some(id);
+            }
         });
     }
+}
+
+unsafe fn power_bonus(actor: u32) -> u8 {
+    let pose = unsafe { pose(actor) }.unwrap_or_default();
+    program::power_bonus(pose.boosts, pose.mode)
 }
 
 #[derive(Default)]
@@ -108,7 +124,7 @@ impl Replay {
         };
         self.packed = unsafe { motion::play_step(actor, cursor, step) };
         if self.packed.is_some() {
-            unsafe { combat::events(actor, cursor, |_, _, _| {}) };
+            unsafe { combat::events(actor, cursor, power_bonus(actor), |_, _, _| {}) };
         }
     }
 
@@ -165,7 +181,7 @@ impl Replay {
         };
         let sample = unsafe { action::MotionFrame::sample(actor) };
         let wrapped = cursor.time.observe(sample.frame, sample.blend);
-        unsafe { combat::events(actor, cursor, |_, _, _| {}) };
+        unsafe { combat::events(actor, cursor, power_bonus(actor), |_, _, _| {}) };
         if !self.airborne && matches!(step.clip, 1460 | 1472) && sample.frame >= 34. {
             self.airborne = true;
             unsafe { action::start_airborne_weapon_state(actor) };

@@ -71,6 +71,22 @@ pub fn cost(state: u8) -> u8 {
     DATA[COSTS + 4 + usize::from(state)]
 }
 
+pub fn boost_mode(state: u8) -> Option<Mode> {
+    match state {
+        163 => Some(Mode::Slash),
+        164 => Some(Mode::Impact),
+        _ => None,
+    }
+}
+
+pub fn power_bonus(boosts: u8, mode: Mode) -> u8 {
+    if boosts & (1 << mode as u8) != 0 {
+        parameter(61) as u8
+    } else {
+        0
+    }
+}
+
 pub fn is_attraction(state: u8) -> bool {
     matches!(state, 58 | 61 | 62 | 68 | 71 | 72)
 }
@@ -134,6 +150,7 @@ pub fn cursor(state: u8) -> Cursor {
     Cursor::new(state, records(state, 1, 40), records(state, 2, 12), &RULES)
 }
 
+#[repr(u8)]
 #[derive(Clone, Copy, Default)]
 pub enum Mode {
     #[default]
@@ -175,6 +192,7 @@ impl Mode {
             (Self::Slash, 4, true) => Some(2),
             (Self::Slash, 5, true) => Some(90),
             (Self::Slash, 9, true) => Some(12),
+            (Self::Slash, 11, true) => Some(163),
             (Self::Slash, 19, true) => Some(82),
             (Self::Slash, 23, true) => Some(66),
             (Self::Slash, 24, true) => Some(58),
@@ -183,6 +201,7 @@ impl Mode {
             (Self::Impact, 4, true) => Some(26),
             (Self::Impact, 5, true) => Some(91),
             (Self::Impact, 9, true) => Some(38),
+            (Self::Impact, 11, true) => Some(164),
             (Self::Impact, 19, true) => Some(84),
             (Self::Impact, 23, true) => Some(67),
             (Self::Impact, 24, true) => Some(68),

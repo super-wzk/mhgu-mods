@@ -16,6 +16,7 @@ const A: u8 = 3;
 const CHORD: u8 = 4;
 const CHANGE_MODE: u8 = 5;
 const MAGNET_ATTACK: u8 = 9;
+const BOOST: u8 = 11;
 const SHOT: u8 = 19;
 const REPEL: u8 = 23;
 const ATTRACT: u8 = 24;
@@ -29,7 +30,9 @@ unsafe fn commands(actor: u32, input: &Input) -> u32 {
         // GU's resolved pad path is shared across weapon kinds. The weapon
         // command bank is produced by the retail fallback weapon's mapper.
         let buttons = input::attack_buttons_pressed(actor);
-        let auxiliary = action::weapon_drawn(actor) && input::auxiliary_shoulder_held(actor);
+        let drawn = action::weapon_drawn(actor);
+        let auxiliary = drawn && input::auxiliary_shoulder_held(actor);
+        let boost = drawn && !auxiliary && input.command(27) && input.command(8);
         let shot = auxiliary && buttons & 0x100 != 0;
         let magnet_attack = auxiliary && !shot && buttons & 0x20 != 0;
         let chord = !shot
@@ -50,7 +53,8 @@ unsafe fn commands(actor: u32, input: &Input) -> u32 {
             (REPEL, auxiliary && special),
             (ATTRACT, attract),
             (MAGNET_ATTACK, magnet_attack),
-            (CHANGE_MODE, !auxiliary && special),
+            (BOOST, boost),
+            (CHANGE_MODE, !auxiliary && !boost && special),
             (EVADE, evade),
         ]
         .into_iter()
@@ -100,7 +104,9 @@ impl Battle {
     unsafe fn events(actor: u32, cursor: &mut Cursor, aim: &mut Option<[f32; 3]>) {
         let state = cursor.state;
         unsafe {
-            combat::events(actor, cursor, |event, value, late| match event {
+            let mode = motion::local_pose(actor).unwrap_or_default().mode;
+            let bonus = program::power_bonus(magnet::boosts(actor), mode);
+            combat::events(actor, cursor, bonus, |event, value, late| match event {
                 // FZ 81225CCE / 81225CEA set the hurt immunity timer. Event 8
                 // adds the equipped Evasion bonus from the w13 parameters.
                 7 | 8 => {
@@ -133,6 +139,12 @@ impl Battle {
 
     unsafe fn start(&mut self, actor: u32, id: u8, aim: Option<AimedMark>) -> bool {
         unsafe {
+            if let Some(mode) = program::boost_mode(id)
+                && !magnet::activate_boost(actor, mode)
+            {
+                self.finish(actor);
+                return true;
+            }
             if !program::is_attraction(id) && program::flight_landing(id).is_some() {
                 let Some(flight) = self.flight.as_mut().filter(|flight| flight.launched()) else {
                     self.finish(actor);
@@ -188,6 +200,11 @@ impl Battle {
             return false;
         };
         if !program::ACTIONS.contains(id) {
+            return false;
+        }
+        if let Some(mode) = program::boost_mode(id)
+            && !magnet::boost_ready(actor, mode)
+        {
             return false;
         }
         let cost = program::cost(id);
@@ -328,6 +345,7 @@ impl Battle {
             SHOT,
             ATTRACT,
             MAGNET_ATTACK,
+            BOOST,
             CHORD,
             X,
             A,
@@ -348,6 +366,7 @@ impl Battle {
             (unsafe { self.branch(actor, u16::from(id)) })
                 || pressed(commands, ATTRACT)
                 || pressed(commands, REPEL)
+                || pressed(commands, BOOST)
         } else if unsafe { action::enter_draw_attack(actor, id) } {
             unsafe { self.start(actor, id, None) }
         } else {

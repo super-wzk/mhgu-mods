@@ -41,7 +41,7 @@ def capture_position(g, actor):
 
 
 def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_action, tick, meter,
-                flight_packets):
+                flight_packets, boost_packets):
     manager, equipment = g.get(0x1885B58), g.get(local + 5060)
     g.put(0x18843F0, g.alloc(0x16280))
     actions = g.alloc(200)
@@ -211,7 +211,7 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
     flight_action, guided, coast = flight_packets
     serial = struct.unpack_from("<I", flight_action, 16)[0] >> 26
     assert serial and struct.unpack_from("<H", flight_action, 56)[0] == 0x8000 + 68
-    assert struct.unpack_from("<I", guided, 44)[0] < 256
+    assert struct.unpack_from("<I", guided, 44)[0] >> 16 == 0x0844
     flags = struct.unpack_from("<I", coast, 44)[0]
     assert flags >> 16 == 0x0944 and (flags >> 8) & 63 == serial
     position_packet = g.alloc(48)
@@ -244,6 +244,23 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
     frame(first, 2.)
     assert motions.count((first, 1461)) == 1
     assert all(owner != second for owner, clip in motions if clip == 1461)
+
+    # Strengthened hits are constructed from the sender's active forms.
+    for actor, packet, state, contact, power in (
+        (first, boost_packets[0], 78, 40., 47), (second, boost_packets[1], 79, 30., 48),
+    ):
+        receive(actor, packet)
+        assert g.half(actor + 9482) == 0x8000 + state
+        frame(actor, 0.)
+        frame(actor, 60., ended=True)
+        frame(actor, contact)
+        assert g.half(actor + 12320 + 56) == power
+    receive(first, boost_packets[1])
+    frame(first, 0.)
+    position(first, boost_packets[2])
+    frame(first, 60., ended=True)
+    frame(first, 30.)
+    assert g.half(first + 12320 + 56) == 44
 
     receive(first, repeated_flight)
     frame(first, 8.)

@@ -6,7 +6,7 @@ use mhgu_sdk::{
     sync::Shared,
     weapon::style::action::{
         self, Attack,
-        melee::{self, BLADE_CONTACT_OFFSETS, Strike, StrikeContact},
+        melee::{self, BLADE_CONTACT_OFFSETS, Strike, StrikeContact, StrikePower},
     },
 };
 
@@ -23,7 +23,12 @@ struct RegisteredStrike {
     actor: u32,
     style: u32,
     serial: u16,
-    power: u16,
+    power: StrikePower,
+}
+
+struct MeleeRow {
+    row: [u32; 14],
+    power: StrikePower,
 }
 
 static LOCAL_STRIKES: Shared<[Option<RegisteredStrike>; 2]> = Shared::new([None; 2]);
@@ -46,7 +51,7 @@ extern "C" fn bind_contact(id: u32, callback: StrikeContact) -> bool {
     true
 }
 
-pub(super) unsafe fn notify_contact(actor: u32, hit: u32, target: u32) {
+unsafe fn notify_contact(actor: u32, hit: u32, target: u32, affinity: *const f32) {
     if actor == 0 || target == 0 || actor != unsafe { super::local_hunter() } {
         return;
     }
@@ -70,8 +75,23 @@ pub(super) unsafe fn notify_contact(actor: u32, hit: u32, target: u32) {
     let callback = entry.strike_contact.load(Ordering::Acquire);
     if !callback.is_null() {
         let notify: StrikeContact = unsafe { core::mem::transmute(callback) };
-        notify(actor, strike.power);
+        // All three GU damage paths initialize this multiplier to 1.0.
+        notify(actor, strike.power, unsafe { affinity.read() });
     }
+}
+
+#[forge::hook(offset = 0x17885c)]
+unsafe fn resolve_affinity(
+    manager: u32,
+    hit: u32,
+    target: u32,
+    part: u32,
+    actor: u32,
+    affinity: *mut f32,
+) -> u32 {
+    let result = original!(manager, hit, target, part, actor, affinity);
+    unsafe { notify_contact(actor, hit, target, affinity) };
+    result
 }
 
 #[forge::hook(offset = 0x2a8a88)]
@@ -113,7 +133,8 @@ unsafe extern "C" fn submit_melee(actor: u32, strike: *const Strike, shape: u32)
     row[9] = 255 | (u32::from(strike.hitstop) << 8);
     row[10] = 1f32.to_bits();
     row[11] = 1f32.to_bits();
-    row[12] = u32::from(strike.power);
+    let power = strike.power.adjusted(1.);
+    row[12] = u32::from(power);
     // Bits 1 and 2 apply weapon attributes and critical hits. Bit 0
     // also applies retail spirit and shield-strengthening modifiers.
     let mut flags = (Attack::WEAPON_MODIFIERS & !1) | Attack::PUNISHING_DRAW;
@@ -122,7 +143,7 @@ unsafe extern "C" fn submit_melee(actor: u32, strike: *const Strike, shape: u32)
     }
     let attack = Attack {
         template: 0,
-        power: strike.power,
+        power,
         delay: strike.delay,
         duration: strike.duration,
         flags,
@@ -130,14 +151,18 @@ unsafe extern "C" fn submit_melee(actor: u32, strike: *const Strike, shape: u32)
         no_sharpness_cost: 0,
     };
     let stun = (strike.stun != 0).then_some(strike.stun);
-    unsafe { submit_row(actor, &attack, stun, Some(row)) }
+    let melee = MeleeRow {
+        row,
+        power: strike.power,
+    };
+    unsafe { submit_row(actor, &attack, stun, Some(melee)) }
 }
 
 unsafe fn submit_row(
     actor: u32,
     attack: *const Attack,
     stun: Option<u8>,
-    registered: Option<[u32; 14]>,
+    registered: Option<MeleeRow>,
 ) -> u32 {
     unsafe {
         let Some(attack) = attack.as_ref() else {
@@ -159,8 +184,8 @@ unsafe fn submit_row(
         }
         let index = u32::from(attack.template);
         let base = forge::mem::text_addr();
-        let row = if let Some(row) = registered {
-            row
+        let row = if let Some(melee) = &registered {
+            melee.row
         } else {
             let lookup: unsafe extern "C" fn(u32, u32) -> *const [u32; 14] =
                 core::mem::transmute(base + 0x2a8a88);
@@ -248,10 +273,10 @@ unsafe fn submit_row(
                 let hit_flags = (hit + 48) as *mut u32;
                 hit_flags.write(hit_flags.read() | 0x08000000);
             }
-            if let Some(row) = registered {
+            if let Some(melee) = &registered {
                 // 168960 treats factor 1 as zero. Explicit Frontier hitstop
                 // retains the authored factor, as in Attack::submit_with_hitstop.
-                ((hit + 108) as *mut u8).write((row[9] >> 8) as u8);
+                ((hit + 108) as *mut u8).write((melee.row[9] >> 8) as u8);
                 // 169548 reads the computed melee attack only with bit 0x20.
                 // Set it after 2B76CC, without enabling retail weapon bonuses.
                 let hit_flags = (hit + 48) as *mut u32;
@@ -270,11 +295,11 @@ unsafe fn submit_row(
         // displace a pending hit in the local hunter's deflection window.
         if super::local_hunter() == actor {
             LOCAL_STRIKES.with(|strikes| {
-                strikes[hand] = registered.map(|_| RegisteredStrike {
+                strikes[hand] = registered.map(|melee| RegisteredStrike {
                     actor,
                     style: style.id,
                     serial: super::deflection::contact_serial(hit),
-                    power: attack.power,
+                    power: melee.power,
                 });
             });
             let serial = (attack.flags & Attack::DEFLECTABLE != 0)
@@ -295,4 +320,5 @@ pub(super) fn install(base: u32) {
     unsafe { stun::publish(&SERVICE) };
     unsafe { melee::publish_strike(&MELEE) };
     forge::install_hook!(base, weapon_row);
+    forge::install_hook!(base, resolve_affinity);
 }

@@ -18,12 +18,29 @@ pub enum DamageKind {
     Impact = 1,
 }
 
+/// Authored motion power and the bonus percentage captured when the strike starts.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct StrikePower {
+    pub motion: u16,
+    pub bonus: u8,
+}
+
+impl StrikePower {
+    /// Truncate motion power after applying affinity, then apply the bonus.
+    pub fn adjusted(self, affinity: f32) -> u16 {
+        let power = (f32::from(self.motion) * affinity) as u16;
+        let percent = 100 + u32::from(self.bonus);
+        (u32::from(power) * percent / 100).min(u16::MAX.into()) as u16
+    }
+}
+
 /// A melee strike authored for an independent weapon.
 #[repr(C)]
 pub struct Strike {
     pub delay: f32,
     pub duration: f32,
-    pub power: u16,
+    pub power: StrikePower,
     pub damage: DamageKind,
     pub stun: u8,
     pub hitstop: u8,
@@ -41,12 +58,13 @@ impl Strike {
     }
 }
 
-const STRIKE: &core::ffi::CStr = c"mhgu::IndependentMeleeV3";
-const STRIKE_MAGIC: u32 = u32::from_le_bytes(*b"IML3");
+const STRIKE: &core::ffi::CStr = c"mhgu::IndependentMeleeV5";
+const STRIKE_MAGIC: u32 = u32::from_le_bytes(*b"IML5");
 
-/// Called for a registered strike after it reaches native monster damage
-/// calculation. The second argument is the authored motion power.
-pub type StrikeContact = extern "C" fn(actor: u32, power: u16);
+/// Called for a local registered strike during native monster damage calculation.
+/// `power` contains the authored motion power and its per-strike bonus.
+/// `affinity` is GU's resolved damage multiplier (1.0 for a noncritical hit).
+pub type StrikeContact = extern "C" fn(actor: u32, power: StrikePower, affinity: f32);
 
 #[doc(hidden)]
 #[repr(C)]

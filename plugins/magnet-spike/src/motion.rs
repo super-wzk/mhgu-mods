@@ -22,13 +22,20 @@ static BANKS: MotionBanks = MotionBanks::new([
 pub(super) struct WeaponPose {
     pub mode: Mode,
     pub coast: Option<u8>,
+    pub boosts: u8,
 }
 
 static LOCAL_POSE: Shared<Option<(u32, WeaponPose)>> = Shared::new(None);
 
 pub fn set_mode(actor: u32, mode: Mode) {
     LOCAL_POSE.with(|active| {
-        *active = (actor != 0).then_some((actor, WeaponPose { mode, coast: None }));
+        *active = (actor != 0).then_some((
+            actor,
+            WeaponPose {
+                mode,
+                ..WeaponPose::default()
+            },
+        ));
     });
 }
 

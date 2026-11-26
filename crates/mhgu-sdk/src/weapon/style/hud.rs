@@ -7,8 +7,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use crate::memory::entry;
 use core::ffi::CStr;
 
-const METER_SERVICE: &CStr = c"mhgu::WeaponMeterV1";
-const METER_MAGIC: u32 = u32::from_le_bytes(*b"WMH1");
+const METER_SERVICE: &CStr = c"mhgu::WeaponMeterV2";
+const METER_MAGIC: u32 = u32::from_le_bytes(*b"WMH2");
 
 #[repr(u8)]
 #[derive(Clone, Copy)]
@@ -16,6 +16,14 @@ pub enum Signal {
     None,
     Near,
     Far,
+}
+
+/// Optional progress track below the main meter. A zero color hides it.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MeterTrack {
+    pub percent: u8,
+    pub color: u32,
 }
 
 /// Snapshot of the active hunter's weapon meter. The HUD clamps charge to
@@ -27,6 +35,7 @@ pub struct Meter {
     pub units_per_segment: u16,
     pub segments: u8,
     pub signal: Signal,
+    pub tracks: [MeterTrack; 2],
 }
 
 pub type SampleMeter = extern "C" fn(actor: u32) -> Meter;

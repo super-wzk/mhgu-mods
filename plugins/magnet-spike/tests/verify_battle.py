@@ -232,7 +232,7 @@ def replay():
                      + [rf"player\hit\frontier_ms\melee_{i}" for i in range(1, 9)])
     packed = g.run(ENCODE, actor, PRIVATE | 1440)
     assert packed & 255 == 40 and g.run(DECODE, actor, packed) == PRIVATE | 1440
-    for clip in (1014, 1015, 1016, 1017, 1022, 1407, 1408, 1429, 1444, 1460, 1461, 1471, 1472, 1473):
+    for clip in (1014, 1015, 1016, 1017, 1022, 1407, 1408, 1429, 1444, 1451, 1452, 1460, 1461, 1471, 1472, 1473):
         encoded = g.run(ENCODE, actor, PRIVATE | clip)
         assert g.run(DECODE, actor, encoded) == PRIVATE | clip, clip
 
@@ -282,11 +282,11 @@ def verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter, motion
 
     # Keep the native HDP constructor and collision expansion. Supply the
     # matrices GU would have evaluated from the two moving blade joints.
-    monster, status, monster_vt, hurt, collision, credit = damage_target(g, vtable)
+    monster, status, monster_vt, hurt, collision, credit = damage_target(g, vtable, native_affinity=True)
     dti = g.run(g.get(vtable + 20))
     g.put(0x1898674, g.get(dti + 4))
     g.stub(0x13EFDC4, lambda ptr, size, *_: g.cpu.mem_write(ptr, bytes(size)))
-    for address in (0x2AD288, 0x27B918, g.get(vtable + 348), g.get(vtable + 508)):
+    for address in (0x2AD288, 0x27B918, 0x2864E0, 0x27C90C):
         g.stub(address, lambda *_: 0)
     for address, fn in ((0x13EFDE8, math.sin), (0x13EFDF4, math.cos)):
         def trig(*_, fn=fn):
@@ -372,7 +372,9 @@ def verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter, motion
     flight_packets = verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, set_action, tick, meter)
     verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick, meter)
     verify_deflection(g, actor, vtable, monster, hurt, set_action, tick, motions)
-    verify_peer(g, actor, vtable, part, monster, status, collision, credit, set_action, tick, meter, flight_packets)
+    boost_packets = verify_magnetic_boost(g, actor, monster, collision, set_action, tick, meter)
+    verify_peer(g, actor, vtable, part, monster, status, collision, credit, set_action, tick, meter,
+                flight_packets, boost_packets)
 
 
 def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, set_action, tick, meter):
@@ -894,7 +896,7 @@ def setup_magnet_hud(g):
             g.put(bar + 160, 2)
             g.put(members + 4 * (i + 1), bar)
         index = len(groups)
-        assert index < 6, "meter creates five bars and at most one indicator group"
+        assert index < 8, "meter creates five segments, two boost tracks and one distance group"
         groups.append((node, bars))
         g.put(dynamic + 4 * index, node)
         g.put(layout + 648, len(groups))
@@ -907,26 +909,33 @@ def setup_magnet_hud(g):
     g.stub(g.get(0x178FC48 + 80), lambda *_: 0)
     g.stub(0xA4DF54, lambda *_: 0)
 
-    def sample():
+    def sample(*, boost_tracks=False):
         assert g.run(0x544CC8, layout) == 17
         assert g.get(root + 84) == 3
         fills = []
+        tracks = []
         signal = 0
-        for i, (node, bars) in enumerate(groups):
+        for node, bars in groups:
             if g.get(node + 84) & 3 != 3:
                 continue
-            assert struct.unpack("<2f", g.cpu.mem_read(node + 144, 8)) == (136. + 19 * i, 49.)
+            position = struct.unpack("<2f", g.cpu.mem_read(node + 144, 8))
             assert all(g.get(bar + 160) & 15 == 0 for bar in bars)
             sizes = [struct.unpack("<2f", g.cpu.mem_read(bar + 180, 8)) for bar in bars]
-            if i == 5:
-                assert sizes == [(4., 4.), (4., 4.)]
+            if position[1] == 60.:
+                assert position[0] == 136. + 19 * len(tracks)
+                assert math.isclose(sizes[0][0] + sizes[1][0], 16., abs_tol=.0001)
+                assert sizes[0][1] == sizes[1][1] == 4.
+                tracks.append((sizes[0][0], g.get(bars[0] + 164)))
+            elif sizes == [(4., 4.), (4., 4.)]:
+                assert position == (136. + 19 * len(fills), 49.)
                 signal = sum(g.get(bar + 164) != 0 for bar in bars)
             else:
+                assert position == (136. + 19 * len(fills), 49.)
                 assert math.isclose(sizes[0][0] + sizes[1][0], 16., abs_tol=.0001)
                 assert sizes[0][1] == sizes[1][1] == 8.
                 assert struct.unpack("<2f", g.cpu.mem_read(bars[1] + 128, 8)) == (sizes[0][0], 0.)
                 fills.append(sizes[0][0])
-        return fills, signal
+        return tracks if boost_tracks else (fills, signal)
 
     return sample
 
@@ -939,6 +948,25 @@ def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick,
 
     def number(address, value):
         g.cpu.mem_write(address, struct.pack("<f", value))
+
+    def draw(affinity):
+        for hit in (actor + 12320, actor + 12504):
+            g.run(0x1687A8, hit)
+        set_action(1, 0)
+        g.cpu.mem_write(g.get(actor + 5060) + 802, struct.pack("<h", affinity))
+        g.cpu.mem_write(actor + 10057, b"\0")
+        tick(X, native_pad=True)
+        assert g.half(actor + 9482) == 0x8000 + 78
+        tick(frame=60., ended=True)
+        tick(frame=40.)
+        return next(actor + at for at in (12320, 12504) if g.half(actor + at + 56) == 43)
+
+    def damage(hit, affinity, roll, critical):
+        assert g.get(hit + 48) & 0x20000
+        assert g.half(hit + 144) == affinity & 0xffff
+        g.cpu.mem_write(hit + 146, struct.pack("<H", roll))
+        g.run(0x16C0C0, collision, hit, monster)
+        assert g.cpu.mem_read(hit + 84, 1) == bytes([critical])
 
     # Switch shape in place. Entering the same action from neutral spends only
     # once, and having no native stamina rejects it before spending charge.
@@ -959,30 +987,44 @@ def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick,
     assert charge_attack() == 0
     assert 14.4 - 0.001 <= meter()[0][0] < 16.
 
-    # Swinging does not give charge. Only the monster-damage hook for the
-    # native serial submitted by the source event can credit these 43 x 6 units.
-    g.cpu.mem_write(actor + 10057, b"\0")
-    tick(X, native_pad=True)
-    assert g.half(actor + 9482) == 0x8000 + 78
-    tick(frame=60., ended=True)
-    tick(frame=40.)
-    hit = next(actor + at for at in (12320, 12504) if g.half(actor + at + 56) == 43)
+    # Swinging and a stale serial leave the gauge unchanged. The same strike
+    # handled by GU's damage dispatcher can credit these 43 x 6 units.
+    hit = draw(0)
+    before = meter()
     serial = g.half(hit + 52)
     factor = g.alloc(4)
     number(factor, 1.)
-    args = (0, hit, monster, hurt, hurt, actor, factor, g.alloc(4))
     g.cpu.mem_write(hit + 52, struct.pack("<H", serial ^ 1))
-    g.run(g.hooks[0x178030], *args)
-    assert charge_attack() == 0
+    g.run(0x17885C, 0, hit, monster, hurt, actor, factor)
+    assert meter() == before
     g.cpu.mem_write(hit + 52, struct.pack("<H", serial))
-    g.run(g.hooks[0x178030], *args)
+    damage(hit, 0, 0, 0)
+    assert math.isclose(sum(meter()[0]) - sum(before[0]), 258 * 16 / 2000, abs_tol=.001)
     assert charge_attack() == 0x8000 + 12
     assert charge_attack() == 0
+
+    # Affinity is determined by native damage. Truncate the effective motion
+    # power before applying the gauge rate and then the active charge skill.
+    skills = ()
+    g.cpu.hook_del(g.traps.pop(0x2864C4))
+    g.stub(0x2864C4, lambda _, skill, *__: int(skill in skills))
+    for skills, affinity, roll, critical, gain in (
+        ((152,), 100, 0, 2, 381),   # floor(43 * 1.25) * 6 * 120%
+        ((153,), -100, 0, 1, 153),  # floor(43 * 0.75) * 6 * 80%
+        ((150,), 100, 0, 2, 360),   # GU Critical Boost, multiplier 1.4
+        ((), 25, 99, 0, 258),       # No critical hit on this roll
+    ):
+        hit = draw(affinity)
+        before = meter()[0][0]
+        damage(hit, affinity, roll, critical)
+        assert math.isclose(meter()[0][0] - before, gain * 16 / 2000, abs_tol=.001)
+    g.cpu.mem_write(g.get(actor + 5060) + 802, bytes(2))
 
     # The other form uses a distinct original action and spends the same amount.
     number(clock, 600.)
     g.run(g.hooks[0x16_ABAC], collision)
     number(clock, 2.)
+    set_action(1, 0)
     tick(SPECIAL, native_pad=True)
     tick(frame=99., ended=True)
     assert charge_attack() == 0x8000 + 38
@@ -1056,6 +1098,89 @@ def verify_deflection(g, actor, vtable, monster, part, set_action, tick, motions
     assert g.half(actor + 9482) == 0x8000 + 78
 
 
+def verify_magnetic_boost(g, actor, monster, collision, set_action, tick, meter):
+    equipment = g.get(actor + 5060)
+    g.put(actor + 5060, g.alloc(1376))
+    set_action(1, 0)
+    g.run(DISPATCH, actor)
+    g.put(actor + 5060, equipment)
+    tracks = lambda: meter(boost_tracks=True)
+    slash, impact, active, cooling = 0xfff26752, 0xff71b6ef, 0xffffc76b, 0xff8d8d8d
+    assert tracks() == [(0., slash), (0., impact)]
+
+    def hit(buttons, expected, *, contact=True):
+        for slot in (12320, 12504):
+            g.run(0x1687A8, actor + slot)
+        set_action(1, 0)
+        g.cpu.mem_write(actor + 10057, b"\0")
+        tick(buttons, native_pad=True)
+        tick(frame=60., ended=True)
+        tick(frame=40. if buttons == X else 30.)
+        slot = actor + 12320
+        assert g.half(slot + 56) == expected
+        if contact:
+            g.run(0x16C0C0, collision, slot, monster)
+        return slot
+
+    def boost(state, clip=None):
+        set_action(1, 0)
+        assert tick(SPECIAL, common=1 << 27, native_pad=True)
+        assert g.half(actor + 9482) == state
+        if clip:
+            assert g.half(actor + 1204) == clip
+            tick(frame=170., ended=True)
+
+    def elapsed(frames):
+        clock = g.get(0x2126764) + 104
+        g.cpu.mem_write(clock, struct.pack("<f", frames))
+        g.run(g.hooks[0x16_ABAC], collision)
+        g.cpu.mem_write(clock, struct.pack("<f", 2.))
+
+    hit(X, 43, contact=False)
+    assert tracks() == [(0., slash), (0., impact)]
+    for _ in range(29):
+        hit(X, 43)
+    assert 15. < tracks()[0][0] < 16. and tracks()[1] == (0., impact)
+    boost(0)
+    hit(X, 43)
+    assert tracks() == [(16., slash), (0., impact)]
+    boost(0x8000 + 163, 1451)
+    assert tracks() == [(16., active), (0., impact)]
+    set_action(1, 0)
+    tick(X, held=0x800, native_pad=True)
+    assert g.half(actor + 9482) == 0x8000 + 12
+    slot = hit(X, 47, contact=False)
+    boosted_slash = capture_action(g, actor)
+    before = sum(meter()[0])
+    g.cpu.mem_write(slot + 144, struct.pack("<hH", 100, 0))
+    g.run(0x16C0C0, collision, slot, monster)
+    assert g.cpu.mem_read(slot + 84, 1) == b"\x02"
+    # floor(floor(43 * 1.25) * 1.10) * 6 = 348
+    assert math.isclose(sum(meter()[0]) - before, 348 * 16 / 2000, abs_tol=.001)
+
+    for _ in range(29):
+        hit(X | A, 44)
+    assert tracks() == [(16., active), (16., impact)]
+    elapsed(2.)
+    boost(0x8000 + 164, 1452)
+    hit(X | A, 48)
+    boosted_impact = capture_action(g, actor)
+    elapsed(4798.)
+    assert tracks()[0] == (16., cooling) and tracks()[1][1] == active
+    elapsed(2.)
+    expired_impact = capture_position(g, actor)
+    assert [color for _, color in tracks()] == [cooling, cooling]
+    hit(X, 43)
+    boost(0)
+    elapsed(5998.)
+    assert tracks()[0] == (0., slash) and tracks()[1][1] == cooling
+    hit(X, 43)
+    assert tracks()[0][0] > 0.
+    elapsed(2.)
+    assert tracks()[1] == (0., impact)
+    return boosted_slash, boosted_impact, expired_impact
+
+
 if __name__ == "__main__":
     replay()
-    print("Magnet Spike: dispatch, HUD, melee, deflection, magnetic shot, charge, flight and peer replay passed")
+    print("Magnet Spike: dispatch, HUD, melee, deflection, magnetic shot, charge, boost, flight and peer replay passed")

@@ -3,7 +3,7 @@
 import struct
 
 
-def damage_target(g, weapon_vtable):
+def damage_target(g, weapon_vtable, *, native_affinity=False):
     def half(addr, value):
         g.cpu.mem_write(addr, struct.pack("<H", value))
 
@@ -48,7 +48,6 @@ def damage_target(g, weapon_vtable):
         0x17251C,
         0x1725D8,
         0x16DB68,
-        0x17885C,
         0x172AC4,
         0x1798CC,
         0x18015C,
@@ -63,6 +62,8 @@ def damage_target(g, weapon_vtable):
         0x8172C,
     ):
         g.stub(pc, zero)
+    if not native_affinity:
+        g.stub(g.originals.get(0x17885C, 0x17885C), zero)
     # 178030's two output factors are initialized to 1.0 by the damage dispatcher.
     g.stub(0x178030, zero)
     credit = []

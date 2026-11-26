@@ -13,6 +13,8 @@ const SHARPNESS: u32 = 5; // hud0.gui: Anm_sharp.
 const HUD_ROOT: u32 = 10; // hud0.gui: Nul_hud0.
 const BAR_TEMPLATE: u32 = 5; // hud0.gui: vital_gauge, root and two polygons.
 const MAX_SEGMENTS: usize = 8;
+const SIGNAL_INDEX: usize = MAX_SEGMENTS;
+const TRACK_START: usize = SIGNAL_INDEX + 1;
 const STEP: f32 = 19.;
 const WIDTH: f32 = 16.;
 const HEIGHT: f32 = 8.;
@@ -104,7 +106,7 @@ unsafe fn polygons(node: u32) -> Option<[u32; 2]> {
 struct MeterLayout {
     owner: u32,
     root: u32,
-    groups: [Option<MeterGroup>; MAX_SEGMENTS + 1],
+    groups: [Option<MeterGroup>; TRACK_START + 2],
 }
 
 impl MeterLayout {
@@ -112,7 +114,7 @@ impl MeterLayout {
         Self {
             owner,
             root,
-            groups: [None; MAX_SEGMENTS + 1],
+            groups: [None; TRACK_START + 2],
         }
     }
 }
@@ -186,10 +188,15 @@ unsafe fn update_meter(layout: u32, sample: Option<Meter>) {
                 *state = MeterLayout::new(layout, root);
             }
             for (i, slot) in state.groups.iter_mut().enumerate() {
+                let track = i
+                    .checked_sub(TRACK_START)
+                    .and_then(|column| sample?.tracks.get(column).copied())
+                    .filter(|track| count != 0 && track.color != 0);
                 let show = i < count
-                    || (i == MAX_SEGMENTS
+                    || (i == SIGNAL_INDEX
                         && count != 0
-                        && sample.is_some_and(|m| !matches!(m.signal, Signal::None)));
+                        && sample.is_some_and(|m| !matches!(m.signal, Signal::None)))
+                    || track.is_some();
                 if slot.is_some_and(|g| group(layout, g.index) != g.node) {
                     *slot = None;
                 }
@@ -207,9 +214,14 @@ unsafe fn update_meter(layout: u32, sample: Option<Meter>) {
                     gu!(0x54533c, layout, index, 0);
                     continue;
                 };
-                let xy = [origin[0] + 56. + STEP * i.min(count) as f32, origin[1] + 3.];
+                let (column, y) = if i >= TRACK_START {
+                    (i - TRACK_START, 14.)
+                } else {
+                    (i.min(count), 3.)
+                };
+                let xy = [origin[0] + 56. + STEP * column as f32, origin[1] + y];
                 gu!(0x545bcc, layout, index, xy.as_ptr() as u32);
-                if i == MAX_SEGMENTS {
+                if i == SIGNAL_INDEX {
                     let far = matches!(meter.signal, Signal::Far);
                     rectangle(layout, index, 1, front, [1., 2.], [4., 4.], TARGET);
                     rectangle(
@@ -222,17 +234,29 @@ unsafe fn update_meter(layout: u32, sample: Option<Meter>) {
                         if far { TARGET } else { 0 },
                     );
                 } else {
-                    let units = u32::from(meter.units_per_segment);
-                    let charge = u32::from(meter.charge).saturating_sub(i as u32 * units);
-                    let fill = WIDTH * charge.min(units) as f32 / units as f32;
-                    rectangle(layout, index, 1, front, [0., 0.], [fill, HEIGHT], CHARGE);
+                    let (fill, height, color) = if let Some(track) = track {
+                        (
+                            WIDTH * f32::from(track.percent.min(100)) / 100.,
+                            4.,
+                            track.color,
+                        )
+                    } else {
+                        let units = u32::from(meter.units_per_segment);
+                        let charge = u32::from(meter.charge).saturating_sub(i as u32 * units);
+                        (
+                            WIDTH * charge.min(units) as f32 / units as f32,
+                            HEIGHT,
+                            CHARGE,
+                        )
+                    };
+                    rectangle(layout, index, 1, front, [0., 0.], [fill, height], color);
                     rectangle(
                         layout,
                         index,
                         2,
                         back,
                         [fill, 0.],
-                        [WIDTH - fill, HEIGHT],
+                        [WIDTH - fill, height],
                         TRACK,
                     );
                 }

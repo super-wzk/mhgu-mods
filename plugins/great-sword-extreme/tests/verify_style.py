@@ -209,6 +209,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         HIT_ROW,
         0x53AAD8,
         0x169548,
+        0x17885C,
     } | PROFILE_HOOKS | SET_STYLE_HOOKS | WEAPON_HUD_HOOKS
     g.originals = {}
     install = g.hook
@@ -262,6 +263,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             0x1FED90, 0x1FF308,
             0x9FC3D8, 0x1FFFF4,
             0x1748A8, 0x178030,  # Both GU melee hitzone resolvers.
+            0x17885C,  # Native affinity multiplier.
             0x169548,
             CHANGE_ACTION,
             COMMAND_BIND,

@@ -103,6 +103,7 @@ def verify_payloads(release, *, include_magnet_spike=False):
             lmt = resources[name, KINDS[".lmt"]]
             clip = struct.unpack_from("<I", lmt, 8 + 4 * 35)[0]
             assert clip and struct.unpack_from("<II", lmt, clip + 8) == (frames, 52)
+            assert all(struct.unpack_from("<2I", lmt, 8 + 4 * 51)), (name, "boost motions")
     for name, tag in WEAPONS.items():
         package = f"{name}-extreme"
         nx = PLUGINS / package / "dist" / package / "romfs/nativeNX"
