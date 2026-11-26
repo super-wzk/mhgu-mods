@@ -59,6 +59,7 @@ def verify_manual(g):
     g.run(g.hooks[0x5CB780], panel)
     assert len(guide) == 2 and "显示剩余磁力" in guide[1]
     assert "标记在磁力反弹的距离内" in guide[1] and "标记在磁力突进的距离内" in guide[1]
+    assert "首次接触硬部位时按当前形态弹刀" in guide[1]
     g.stub(0x64C600, lambda *_: 0)
     g.put(pressed, 0x4000)
     g.run(g.hooks[0x5CB780], panel)

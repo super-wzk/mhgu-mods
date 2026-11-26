@@ -6,12 +6,13 @@ mod combat;
 mod flight;
 mod magnet;
 mod motion;
+mod peer;
 mod program;
 
 use mhgu_sdk::weapon::{
     Element, EquipmentId, EquipmentLevel, EquipmentModel, Weapon, WeaponEquipment, WeaponId,
     registry::{self, WeaponRegistry},
-    style::{RegisterError, Style, hud, manual, part_motion, world_contact},
+    style::{RegisterError, Style, hud, manual, part_motion, remote, rules, world_contact},
     trade::{self, Material, Recipe},
 };
 
@@ -46,6 +47,11 @@ static STYLE: Style = Style {
     actions: program::ACTIONS,
     guard: None,
     commands: None,
+};
+
+static RULES: rules::Rules = rules::Rules {
+    deflection: Some(mhfz_sdk::combat::deflection),
+    ..rules::Rules::EMPTY
 };
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -99,6 +105,9 @@ fn register_weapon() -> Result<(), RegisterError> {
         return Err(RegisterError::Invalid);
     }
     if !part_motion::bind(STYLE.id, &motion::PARTS)
+        || !rules::bind(STYLE.id, &RULES)
+        || !unsafe { remote::bind_playback(STYLE.id, &peer::PLAYBACK) }
+        || !remote::bind_position_state(STYLE.id, &peer::POSITION)
         || !hud::bind_meter(STYLE.id, magnet::meter)
         || !world_contact::bind_hurt(STYLE.id, magnet::update)
         || !mhgu_sdk::weapon::style::action::melee::bind_strike_contact(

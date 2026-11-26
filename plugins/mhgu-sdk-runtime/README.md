@@ -75,6 +75,10 @@ JSON 版本 1 包含 `slot`、`generation` 和 `data`。`weapons` 按 GU 武器�
 
 联机由 [multiplayer 模块](src/weapon/style/multiplayer.rs) 转接 GU 的 `netPlAction` 收发、远端风格查找、私有动作与逐帧观察派发。风格注册成功后通过 [`remote::bind_playback`](../../crates/mhgu-sdk/src/weapon/style/remote.rs) 登记一次回放描述符。注册器按当前名册和远端猎人的装备武器选择回放。每把武器负责自己的动作、附加状态值与效果清理。动作包格式沿用现有 GU 布局。运行时与武器 NRO 使用同次构建的成品。
 
+扩展武器通过装备资料包识别实际武器类型和装备 ID。其三位可选动作状态值和存在标记放在 `mPlAttr` 的位 22–25，确保回退武器仍按原版解读位 16–19，与收刀标记的位 20–21 也互不重叠。
+
+绑定 `remote::bind_position_state` 的扩展武器在私有动作包的位 26–31 携带动作序号。GU `200438` 的周期位置包在 `mPlAttr` 的位 8–13、16–23、24–26、27 分别携带序号、私有动作 ID、状态值和存在标记。GU `1FFFF4` 继续负责更新位置与朝向。确认收到对应动作后，注册器再派发其附加状态。[位置包实现](src/weapon/style/multiplayer/position.rs)
+
 [风格资料同步](src/weapon/profile.rs)通过 `netPlData::mAttr` 携带完整的注册编号，保留 GU 的装备风格字节和回包请求位。注册器核对接收槽位、当前装备记录和武器类型后再显示名称。替换装备资料或离开房间会清除对应记录。
 
 带冲刺收刀的风格通过 `remote::bind_sheathe` 登记冲刺动作与两种收刀片段。双方使用本版时，队友可直接从收刀包确定片段。未携带收刀标记的旧版动作包沿用接收端的动作历史。[冲刺收刀联机回放](tests/verify_sheathe_multiplayer.py)覆盖六种极之型、错过冲刺或刹停、两名队友以及收刀结束。
@@ -91,4 +95,4 @@ JSON 版本 1 包含 `slot`、`generation` 和 `data`。`weapons` 按 GU 武器�
 
 按[开发指引](../../docs/development.md#验证范围)打包全部武器后，运行 `python3 plugins/mhgu-sdk-runtime/tests/verify_weapon_styles.py`。该入口覆盖 SDK 最后启动、猎人笔记与暂停菜单中的手册显示和返回，以及各武器的任务预读与粒子资源。手册文字随武器 NRO 更新。
 
-内容插件可通过 [StyleRulesV1](../../crates/mhgu-sdk/src/weapon/style/rules.rs) 登记格挡半角、公共动作结束条件、弹刀与镜头回调。注册器在 GU 近战解算后按猎人、动作槽和刀身的打击序号匹配 `Attack::DEFLECTABLE` 标记的命中，并用 GU 的斩味修正、心眼与相关豁免完成判定。动作控制器通过 `mhgu::BladeDeflectionV1` 取得结果。
+内容插件可通过 [StyleRulesV1](../../crates/mhgu-sdk/src/weapon/style/rules.rs) 登记格挡半角、公共动作结束条件、弹刀与镜头回调。注册器在 GU 近战解算后按猎人、动作槽和刀身的打击序号匹配 `Attack::DEFLECTABLE` 或 `Strike::deflectable` 标记的命中，并用 GU 的斩味修正、心眼与相关豁免完成判定。动作控制器通过 `mhgu::BladeDeflectionV1` 取得结果。

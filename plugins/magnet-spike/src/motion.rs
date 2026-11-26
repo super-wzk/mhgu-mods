@@ -1,5 +1,8 @@
 use crate::program::Mode;
-use mhfz_sdk::motion::MotionBanks;
+use mhfz_sdk::{
+    action::{Cursor, Step},
+    motion::MotionBanks,
+};
 use mhgu_sdk::{
     sync::Shared,
     weapon::style::{
@@ -15,10 +18,34 @@ static BANKS: MotionBanks = MotionBanks::new([
     c"player\\mot\\frontier_ms\\4",
 ]);
 
-static MODE: Shared<Option<(u32, Mode)>> = Shared::new(None);
+#[derive(Clone, Copy, Default)]
+pub(super) struct WeaponPose {
+    pub mode: Mode,
+    pub coast: Option<u8>,
+}
+
+static LOCAL_POSE: Shared<Option<(u32, WeaponPose)>> = Shared::new(None);
 
 pub fn set_mode(actor: u32, mode: Mode) {
-    MODE.with(|active| *active = (actor != 0).then_some((actor, mode)));
+    LOCAL_POSE.with(|active| {
+        *active = (actor != 0).then_some((actor, WeaponPose { mode, coast: None }));
+    });
+}
+
+pub fn local_pose(actor: u32) -> Option<WeaponPose> {
+    LOCAL_POSE.with(|active| {
+        active
+            .filter(|&(owner, _)| owner == actor)
+            .map(|(_, pose)| pose)
+    })
+}
+
+pub fn coast(actor: u32, state: u8) {
+    LOCAL_POSE.with(|active| {
+        if let Some((_, pose)) = active.as_mut().filter(|(owner, _)| *owner == actor) {
+            pose.coast = Some(state);
+        }
+    });
 }
 
 pub static PARTS: Motions = Motions {
@@ -47,8 +74,8 @@ extern "C" fn part_clip(pose: Pose) -> Clip {
             slot: (source % 100) as u8,
         };
     }
-    let impact =
-        MODE.with(|active| matches!(active, Some((actor, Mode::Impact)) if *actor == pose.actor));
+    let pose_state = local_pose(pose.actor).or_else(|| unsafe { crate::peer::pose(pose.actor) });
+    let impact = pose_state.is_some_and(|state| matches!(state.mode, Mode::Impact));
     Clip {
         bank: 1,
         slot: if pose.drawn { 1 + u8::from(impact) } else { 0 },
@@ -77,11 +104,19 @@ pub unsafe extern "C" fn decode(actor: u32, packed: u32) -> u32 {
         .map_or(PASS, |source| PRIVATE | u32::from(source))
 }
 
-pub unsafe fn play(actor: u32, clip: u16, start: u16, blend: u16) -> bool {
+pub unsafe fn play(actor: u32, clip: u16, start: u16, blend: u16) -> Option<u16> {
     let request = if clip < 1000 {
         u32::from(clip)
     } else {
         PRIVATE | u32::from(clip)
     };
-    unsafe { action::play_motion(actor, request, f32::from(start), f32::from(blend / 2)) }.is_some()
+    unsafe { action::play_motion(actor, request, f32::from(start), f32::from(blend / 2)) }
+}
+
+pub unsafe fn play_step(actor: u32, cursor: &mut Cursor, step: Step) -> Option<u16> {
+    let packed = unsafe { play(actor, step.clip, step.start, step.blend) }?;
+    cursor.time.cycles = 0;
+    cursor.time.frame = f32::from(step.start);
+    cursor.time.blend = f32::from(step.blend / 2);
+    Some(packed)
 }

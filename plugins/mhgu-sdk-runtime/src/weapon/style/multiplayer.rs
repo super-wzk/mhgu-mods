@@ -9,9 +9,12 @@ use mhgu_sdk::weapon::style::{
     remote::{self, Sheathe},
 };
 
+mod position;
+
 pub(super) struct Bindings {
     playback: AtomicPtr<remote::Playback>,
     sheathe: AtomicPtr<Sheathe>,
+    position: AtomicPtr<remote::ActionState>,
 }
 
 impl Bindings {
@@ -19,6 +22,7 @@ impl Bindings {
         Self {
             playback: AtomicPtr::new(ptr::null_mut()),
             sheathe: AtomicPtr::new(ptr::null_mut()),
+            position: AtomicPtr::new(ptr::null_mut()),
         }
     }
 
@@ -66,7 +70,10 @@ unsafe extern "C" fn bind_playback(id: u32, playback: &'static remote::Playback)
         return false;
     };
     // These weapons leave the packet flag nibble at bits 16..19 free.
-    if playback.action_state.is_some() && !matches!(entry.style.weapon, 0 | 1 | 8 | 9 | 11) {
+    if playback.action_state.is_some()
+        && entry.kind.is_none()
+        && !matches!(entry.style.weapon, 0 | 1 | 8 | 9 | 11)
+    {
         return false;
     }
     entry
@@ -86,6 +93,17 @@ const STATE_SHIFT: u32 = 16;
 // cannot inherit a stale sprint from a receiver that missed the brake.
 const SHEATHE_PRESENT: u32 = 1 << 20;
 const SHEATHE_SPRINT: u32 = 1 << 21;
+// An expanded weapon can use any retail fallback, including 4, 6 or 14.
+// Keep its state above the retail nibble and the SDK's sheathe bits.
+const EXPANDED_STATE_SHIFT: u32 = 22;
+
+fn action_state_shift(entry: &Entry) -> u32 {
+    if entry.kind.is_some() {
+        EXPANDED_STATE_SHIFT
+    } else {
+        STATE_SHIFT
+    }
+}
 
 struct PeerSheathe {
     style_id: u32,
@@ -136,12 +154,12 @@ unsafe fn pack_action(packet: u32, actor: u32, flags: u32) -> u32 {
         if let Some(codec) = entry.multiplayer.action_state() {
             let value = (codec.encode)(actor);
             if value <= STATE_VALUE {
-                let mask = u32::from(STATE_PRESENT | STATE_VALUE) << STATE_SHIFT;
-                word.write(
-                    (word.read() & !mask) | (u32::from(STATE_PRESENT | value) << STATE_SHIFT),
-                );
+                let shift = action_state_shift(entry);
+                let mask = u32::from(STATE_PRESENT | STATE_VALUE) << shift;
+                word.write((word.read() & !mask) | (u32::from(STATE_PRESENT | value) << shift));
             }
         }
+        position::stamp_action(packet, actor, entry);
     }
     result
 }
@@ -174,10 +192,11 @@ unsafe fn unpack_action(packet: u32, actor: u32) -> u32 {
         if packet == 0 || actor == 0 {
             return result;
         }
-        if let Some(codec) = peer_binding(actor, |entry| entry.multiplayer.action_state())
-            && action::current(actor) == packet_action(packet)
+        if let Some((shift, codec)) = peer_binding(actor, |entry| {
+            Some((action_state_shift(entry), entry.multiplayer.action_state()?))
+        }) && action::current(actor) == packet_action(packet)
         {
-            let bits = (*((packet + 16) as *const u32) >> STATE_SHIFT) as u8;
+            let bits = (*((packet + 16) as *const u32) >> shift) as u8;
             let value = if bits & STATE_PRESENT != 0 {
                 bits & STATE_VALUE
             } else {
@@ -185,6 +204,7 @@ unsafe fn unpack_action(packet: u32, actor: u32) -> u32 {
             };
             (codec.decode)(actor, value);
         }
+        position::accept_action(packet, actor);
     }
     result
 }
@@ -224,6 +244,7 @@ pub(super) unsafe fn observe_peers(actor: u32) {
         let roster = unsafe { remote::Roster::current() };
         for index in 0..remote::PLAYER_COUNT {
             let peer = roster.as_ref().and_then(|r| r.peer(index)).unwrap_or(0);
+            position::observe(index, peer);
             PEER_SHEATHE.update(index, peer, |saved, _| {
                 if saved.is_some()
                     && (!unsafe { hunter::is_quest(peer) }
@@ -260,5 +281,6 @@ pub(super) fn install(base: u32) {
         unsafe { remote::publish_sheathe(&SHEATHE) };
         forge::install_hook!(base, pack_action);
         forge::install_hook!(base, unpack_action);
+        position::install(base);
     }
 }

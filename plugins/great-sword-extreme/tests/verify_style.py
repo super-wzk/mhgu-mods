@@ -198,6 +198,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         HUNTER_COLLISION,
         BLOCK,
         0x1FED90, 0x1FF308,
+        0x9FC3D8, 0x1FFFF4,
         MODEL_DEPTH,
         GUARD_REACTION,
         DRAW_MODEL,
@@ -259,6 +260,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             FX_RELEASE,
             HUNTER_COLLISION,
             0x1FED90, 0x1FF308,
+            0x9FC3D8, 0x1FFFF4,
             0x1748A8, 0x178030,  # Both GU melee hitzone resolvers.
             0x169548,
             CHANGE_ACTION,

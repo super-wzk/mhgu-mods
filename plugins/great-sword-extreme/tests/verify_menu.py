@@ -186,7 +186,7 @@ def verify_status(g):
         sent.append(bytes(g.cpu.mem_read(p, 1472)))
 
     g.stub(0x9FC394, capture)
-    g.stub(0x9FC3D8, capture)
+    g.stub(g.originals[0x9FC3D8], capture)
     g.run(0x202640, process, local, 1)
     g.run(0x202764, process, local, 0, 1)
     g.run(0x202640, process, local, 0x101)

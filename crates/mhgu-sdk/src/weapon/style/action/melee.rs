@@ -27,6 +27,8 @@ pub struct Strike {
     pub damage: DamageKind,
     pub stun: u8,
     pub hitstop: u8,
+    /// Let the registered style's deflection rule classify the first contact.
+    pub deflectable: bool,
 }
 
 impl Strike {
@@ -39,8 +41,8 @@ impl Strike {
     }
 }
 
-const STRIKE: &core::ffi::CStr = c"mhgu::IndependentMeleeV2";
-const STRIKE_MAGIC: u32 = u32::from_le_bytes(*b"IML2");
+const STRIKE: &core::ffi::CStr = c"mhgu::IndependentMeleeV3";
+const STRIKE_MAGIC: u32 = u32::from_le_bytes(*b"IML3");
 
 /// Called for a registered strike after it reaches native monster damage
 /// calculation. The second argument is the authored motion power.

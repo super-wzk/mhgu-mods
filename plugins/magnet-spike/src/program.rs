@@ -142,6 +142,14 @@ pub enum Mode {
 }
 
 impl Mode {
+    pub fn recoil(self) -> u16 {
+        // FZ 8121F57C branches to the recoil state for the current form.
+        match self {
+            Self::Slash => 92,
+            Self::Impact => 93,
+        }
+    }
+
     pub fn coast_clip(self) -> u16 {
         match self {
             Self::Slash => 1471,

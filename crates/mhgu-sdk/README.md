@@ -70,10 +70,16 @@ GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提�
 
 扩展武器可用 [melee::Strike](src/weapon/style/action/melee.rs) 提交斩击或打击，提供动作值、命中窗口、眩晕积蓄、命中停顿和一组已加载的 HTS。SDK 通过 GU 构造命中，在可用的两槽中保留重叠窗口。同一 HTS 组的多个形状共用一个命中编号。HTS 可以使用 `0x4000 + 关节编号` 锚定猎人的主武器部件，GU 在每次展开时读取对应骨骼矩阵。
 
+设置 `Strike::deflectable` 后，已登记的 `Rules::deflection` 会处理匹配的近战接触。运行时检查 GU 的心眼等豁免，风格控制器用 `melee::take_deflection` 取得结果并切换动作。
+
 [world_contact::bind_hurt](src/weapon/style/world_contact.rs) 可为当前本地任务猎人的风格登记受击检测回调。回调通过 [HurtScene](src/combat/collision/hurt.rs) 使用 GU 的地形、受击形状展开和相交函数，适合磁力标记一类只需要接触位置的效果。命中返回可跨帧保存的部位标记。在猎人动作回调中可用 `Target::position_for` 查询，SDK 会重新检查怪物身份、区域和部位，再解析当前骨骼位置。
 
 独立武器可用 [melee::bind_strike_contact](src/weapon/style/action/melee.rs) 监听已提交的近战判定进入原版怪物伤害计算。回调来源按猎人、碰撞槽和原生命中编号匹配，提供该判定提交时的动作值。
 
 [rules](src/weapon/style/rules.rs) 为已注册的风格提供可选的格挡半角、公共动作结束条件、弹刀和镜头回调。[particle](src/weapon/style/particle.rs) 提供模型粒子绘制与释放回调的登记接口。
+
+扩展武器通过 [`remote::bind_playback`](src/weapon/style/remote.rs) 登记队友动作回放。`ActionState` 可随动作包携带一个 0–7 的值，例如用于选择共有动作下的武器部件姿势。注册器根据收到的装备资料选择回放，内容插件按队友分别保存游标。[磁斩锤回放实现](../../plugins/magnet-spike/src/peer.rs)
+
+`remote::bind_position_state` 可在同一个私有动作内随 GU 周期位置包更新一个 0–7 的值。SDK 按队友、武器风格、动作 ID 与动作序号核对，位置与朝向由 GU 接收。磁斩锤用它同步突进转入滑落的时机。[位置包实现](../../plugins/mhgu-sdk-runtime/src/weapon/style/multiplayer/position.rs)
 
 `Style::commands` 可在 GU 装载命令表时追加一组有序的武器派生，由 GU 缓冲先接收的输入并在指定帧切换动作。`action::enter` 走 GU 的公共动作切换。已判定的单条派生可通过 `action::transition` 提交，狩技使用 `Transition::HUNTER_ART`。`action::play_motion` 使用猎人的原生动作编码。`Attack::submit` 把动作值和形状交给 GU 的攻击构造器及武器修正。注册器在大剑的首个有效攻击事件处理兽魂附身。`guard::Policy` 提供一次格挡结果，注册器负责把结果交给 GU 的受击、斩味和回正流程，内容插件可以用 `guard::take` 进入后续招式。

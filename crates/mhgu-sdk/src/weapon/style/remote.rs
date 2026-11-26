@@ -210,3 +210,26 @@ pub unsafe fn bind_playback(id: u32, playback: &'static Playback) -> bool {
         && unsafe { service::find::<Service>(NAME, MAGIC) }
             .is_some_and(|api| unsafe { (api.0)(id, playback) })
 }
+
+const POSITION_NAME: &core::ffi::CStr = c"mhgu::StylePositionStateV1";
+const POSITION_MAGIC: u32 = u32::from_le_bytes(*b"SPS1");
+
+#[doc(hidden)]
+#[repr(C)]
+pub struct PositionService(pub extern "C" fn(u32, &'static ActionState) -> bool);
+
+/// # Safety
+/// Publish a resident service during Forge initialization.
+#[doc(hidden)]
+pub unsafe fn publish_position(api: &'static PositionService) -> bool {
+    unsafe { service::publish(POSITION_NAME, POSITION_MAGIC, api) }
+}
+
+/// Carry a value on GU's periodic position updates during a private action.
+/// This binding is for expanded weapons with registered playback. Encode
+/// 0..=7 to attach a value. Decode runs only for the matching accepted action.
+pub fn bind_position_state(id: u32, codec: &'static ActionState) -> bool {
+    service::on_game_thread()
+        && unsafe { service::find::<PositionService>(POSITION_NAME, POSITION_MAGIC) }
+            .is_some_and(|api| (api.0)(id, codec))
+}

@@ -89,27 +89,21 @@ impl Battle {
             unsafe { self.branch(actor, step.clip) };
             return false;
         }
-        if !unsafe { motion::play(actor, step.clip, step.start, step.blend) } {
+        if unsafe { motion::play_step(actor, cursor, step) }.is_none() {
             unsafe { self.finish(actor) };
             return false;
         }
-        cursor.time.cycles = 0;
-        cursor.time.frame = f32::from(step.start);
-        cursor.time.blend = f32::from(step.blend / 2);
         unsafe { Self::events(actor, cursor, &mut self.aim) };
         true
     }
 
     unsafe fn events(actor: u32, cursor: &mut Cursor, aim: &mut Option<[f32; 3]>) {
-        while let Some((event, value, late)) = cursor.next_event() {
-            match event {
-                // FZ 81225C5C writes the drawn byte used by 8121DA12.
-                2 => unsafe { action::set_weapon_drawn(actor, value != 0) },
-                // FZ 81225C60 spawns a single family-120 contact.
-                3 => unsafe { combat::strike(actor, value, cursor.time.frame, late) },
+        let state = cursor.state;
+        unsafe {
+            combat::events(actor, cursor, |event, value, late| match event {
                 // FZ 81225CCE / 81225CEA set the hurt immunity timer. Event 8
                 // adds the equipped Evasion bonus from the w13 parameters.
-                7 | 8 => unsafe {
+                7 | 8 => {
                     let bonus = if event == 8 {
                         match hunter::evasion_level(actor) {
                             2.. => program::parameter(10),
@@ -123,17 +117,17 @@ impl Battle {
                         actor,
                         f32::from(value + bonus) * 2. - late,
                     );
-                },
+                }
                 // FZ 81225D6A consumes the discrete evade cost.
-                11 => unsafe { movement::stamina(actor, -150., false) },
+                11 => movement::stamina(actor, -150., false),
                 // Use the aiming cue at event 17 to save GU's camera direction.
-                17 if matches!(cursor.state, 82 | 84) => *aim = Some(unsafe { magnet::aim(actor) }),
-                4 if value == 1 => unsafe {
+                17 if matches!(state, 82 | 84) => *aim = Some(magnet::aim(actor)),
+                4 if value == 1 => {
                     let direction = aim.take().unwrap_or_else(|| magnet::aim(actor));
                     magnet::launch(actor, direction);
-                },
+                }
                 _ => {}
-            }
+            });
         }
     }
 
@@ -230,7 +224,8 @@ impl Battle {
         let sample = unsafe { action::MotionFrame::sample(actor) };
         let landing = program::flight_landing(state);
         let launch_clip = matches!(step.clip, 1460 | 1472);
-        let in_coast_pose = launch_clip && self.flight.as_ref().is_some_and(Flight::coasting);
+        let in_coast_pose =
+            launch_clip && motion::local_pose(actor).is_some_and(|pose| pose.coast == Some(state));
         let wrapped = if in_coast_pose {
             // The new pose has its own loop. Keep checking the authored
             // action's pending branches and events on its uninterrupted clock.
@@ -255,8 +250,12 @@ impl Battle {
                 unsafe { self.branch(actor, u16::from(landing)) };
                 return true;
             }
-            if launch_clip && !in_coast_pose && flight.coasting() {
-                unsafe { motion::play(actor, self.mode.coast_clip(), 0, 0) };
+            if launch_clip
+                && !in_coast_pose
+                && flight.coasting()
+                && unsafe { motion::play(actor, self.mode.coast_clip(), 0, 0) }.is_some()
+            {
+                motion::coast(actor, state);
             }
         } else if program::step_complete(step, cursor.time, sample, wrapped) {
             // FZ 8121F57C advances 81815D60 before checking branch windows.
@@ -264,6 +263,12 @@ impl Battle {
             if !unsafe { self.play_step(actor) } {
                 return true;
             }
+        }
+        if unsafe { action::melee::take_deflection(actor) }
+            && unsafe { self.branch(actor, self.mode.recoil()) }
+        {
+            unsafe { action::melee::clear_hitstop(actor) };
+            return true;
         }
         let Some(cursor) = self.cursor.as_mut() else {
             return true;

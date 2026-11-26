@@ -114,14 +114,18 @@ unsafe extern "C" fn submit_melee(actor: u32, strike: *const Strike, shape: u32)
     row[10] = 1f32.to_bits();
     row[11] = 1f32.to_bits();
     row[12] = u32::from(strike.power);
+    // Bits 1 and 2 apply weapon attributes and critical hits. Bit 0
+    // also applies retail spirit and shield-strengthening modifiers.
+    let mut flags = (Attack::WEAPON_MODIFIERS & !1) | Attack::PUNISHING_DRAW;
+    if strike.deflectable {
+        flags |= Attack::DEFLECTABLE;
+    }
     let attack = Attack {
         template: 0,
         power: strike.power,
         delay: strike.delay,
         duration: strike.duration,
-        // Bits 1 and 2 apply weapon attributes and critical hits. Bit 0
-        // also applies retail spirit and shield-strengthening modifiers.
-        flags: (Attack::WEAPON_MODIFIERS & !1) | Attack::PUNISHING_DRAW,
+        flags,
         shape,
         no_sharpness_cost: 0,
     };

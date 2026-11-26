@@ -8,6 +8,7 @@ import sys
 from unicorn.arm_const import UC_ARM_REG_S0, UC_ARM_REG_S1, UC_ARM_REG_SP
 
 from verify_magnet_spike import PLUGIN, REPO
+from verify_peer import capture_action, capture_position, verify_peer
 from damage_target import damage_target
 from verify_style import (
     CHANGE_ACTION, DECODE, DISPATCH, ENCODE, INIT_HUNTER, MANAGER, SAVE,
@@ -39,9 +40,9 @@ def replay():
     equipment = manager + 124
     g.put(0x1885B58, manager)
     g.put(manager + 28, actor)
-    vtable = g.alloc(2000)
+    vtable = g.alloc(2224)
     # Exercise GU's shared weapon dispatch with the fallback's original virtual table.
-    g.cpu.mem_write(vtable, bytes(g.cpu.mem_read(0x174D838, 2000)))
+    g.cpu.mem_write(vtable, bytes(g.cpu.mem_read(0x174D838, 2224)))
     g.put(actor, vtable)
     g.put(actor + 240, g.alloc(128))
     g.put(actor + 5060, equipment)
@@ -272,10 +273,10 @@ def replay():
     g.cpu.mem_write(actor + 1280, struct.pack("<f", 100.))
     g.run(update_part, part, actor, WEAPON)
     assert tracks[-1] == (0, 35, 2., 61.), tracks
-    verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter)
+    verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter, motions)
 
 
-def verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter):
+def verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter, motions):
     def byte(address):
         return g.cpu.mem_read(address, 1)[0]
 
@@ -368,8 +369,10 @@ def verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter):
     assert (byte(hit + 86), byte(second + 86)) == (50, 65)
     assert g.get(hit + 64) & 3 == g.get(second + 64) & 3 == 1
     assert g.half(hit + 52) != g.half(second + 52)
-    verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, set_action, tick, meter)
+    flight_packets = verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, set_action, tick, meter)
     verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick, meter)
+    verify_deflection(g, actor, vtable, monster, hurt, set_action, tick, motions)
+    verify_peer(g, actor, vtable, part, monster, status, collision, credit, set_action, tick, meter, flight_packets)
 
 
 def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, set_action, tick, meter):
@@ -711,10 +714,13 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     tick(frame=36.)
     tick(frame=38.)
     assert position(actor + 64)[2] > 0.
+    flight_packet = capture_action(g, actor)
+    guided_position = capture_position(g, actor)
     last = position(actor + 64)
     wall = True
     tick(frame=40.)
     assert position(actor + 64)[2] == last[2] and g.half(actor + 1204) == 1461
+    coast_position = capture_position(g, actor)
     for frame in range(2, 46, 2):
         tick(frame=frame, ended=True)
         if state() == 0x8000 + 75:
@@ -779,6 +785,7 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     assert spent == [-150.] and landings == [(actor, 0)] * 4, (spent, landings)
     for contact in contacts:
         g.run(0x1687A8, contact)
+    return flight_packet, guided_position, coast_position
 
 
 def apply_repel_root(g, actor, clip, start, end):
@@ -961,7 +968,9 @@ def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick,
     tick(frame=40.)
     hit = next(actor + at for at in (12320, 12504) if g.half(actor + at + 56) == 43)
     serial = g.half(hit + 52)
-    args = (0, hit, monster, hurt, hurt, actor, g.alloc(4), g.alloc(4))
+    factor = g.alloc(4)
+    number(factor, 1.)
+    args = (0, hit, monster, hurt, hurt, actor, factor, g.alloc(4))
     g.cpu.mem_write(hit + 52, struct.pack("<H", serial ^ 1))
     g.run(g.hooks[0x178030], *args)
     assert charge_attack() == 0
@@ -979,6 +988,74 @@ def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick,
     assert charge_attack() == 0x8000 + 38
 
 
+def verify_deflection(g, actor, vtable, monster, part, set_action, tick, motions):
+    skills = set()
+    g.cpu.hook_del(g.traps.pop(0x2864C4))
+    g.stub(0x2864C4, lambda _, skill, *__: int(skill in skills))
+    g.stub(g.get(vtable + 440), lambda *_: 0)
+    g.stub(g.get(vtable + 520), lambda *_: 0)
+    g.stub(0xDF814, lambda *_: g.get(actor + 5060))
+    g.stub(0xDD4C4, lambda *_: 0)
+    factor, element = g.alloc(4), g.alloc(4)
+    hit = actor + 12320
+
+    def draw(buttons, state, frame):
+        for slot in (hit, actor + 12504):
+            g.run(0x1687A8, slot)
+        set_action(1, 0)
+        g.cpu.mem_write(actor + 10057, b"\0")
+        tick(buttons, native_pad=True)
+        assert g.half(actor + 9482) == 0x8000 + state
+        tick(frame=60., ended=True)
+        tick(frame=frame)
+        assert g.cpu.mem_read(hit + 5, 1) == b"\x01"
+
+    def contact(ratio, slot=hit):
+        g.cpu.mem_write(factor, struct.pack("<f", ratio))
+        g.run(g.hooks[0x178030], 0, slot, monster, part, part, actor, factor, element)
+
+    # The previous replay left the impact-form magnetic attack active. Its
+    # second strike re-arms deflection while the first strike is still live.
+    second = actor + 12504
+    for slot in (hit, second):
+        g.run(0x1687A8, slot)
+    tick(frame=40.)
+    contact(.7)
+    tick(frame=48.)
+    assert g.cpu.mem_read(hit + 5, 1) == g.cpu.mem_read(second + 5, 1) == b"\x01"
+    contact(.1, second)
+    tick(frame=49.)
+    assert g.half(actor + 9482) == 0x8000 + 93 and motions[-1][0] == 1223
+
+    # A soft contact spends the window and a ghost contact from another serial
+    # must leave it armed. A fresh hard contact chooses the active form's recoil.
+    draw(X, 78, 40.)
+    contact(.23)
+    contact(.1)
+    tick(frame=41.)
+    assert g.half(actor + 9482) == 0x8000 + 78
+
+    for buttons, state, frame, recoil, clip in ((X, 78, 40., 92, 1221), (X | A, 79, 30., 93, 1223)):
+        draw(buttons, state, frame)
+        serial = g.half(hit + 52)
+        g.cpu.mem_write(hit + 52, struct.pack("<H", serial ^ 1))
+        contact(.1)
+        tick(frame=frame + 1.)
+        assert g.half(actor + 9482) == 0x8000 + state
+        g.cpu.mem_write(hit + 52, struct.pack("<H", serial))
+        contact(.22)
+        g.cpu.mem_write(actor + 10156, struct.pack("<2f", 3., 4.))
+        tick(frame=frame + 2.)
+        assert g.half(actor + 9482) == 0x8000 + recoil and motions[-1][0] == clip
+        assert struct.unpack("<2f", g.cpu.mem_read(actor + 10156, 8)) == (0., 0.)
+
+    skills.add(87)  # Mind's Eye.
+    draw(X, 78, 40.)
+    contact(.1)
+    tick(frame=41.)
+    assert g.half(actor + 9482) == 0x8000 + 78
+
+
 if __name__ == "__main__":
     replay()
-    print("Magnet Spike: dispatch, magnet HUD, melee, magnetic shot, charge, attraction and repulsion passed")
+    print("Magnet Spike: dispatch, HUD, melee, deflection, magnetic shot, charge, flight and peer replay passed")

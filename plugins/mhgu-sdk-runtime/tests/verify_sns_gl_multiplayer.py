@@ -89,7 +89,7 @@ def sword_shield():
 
     condition = g.alloc(32)
     g.stub(0x9FBA6C, lambda *_: 0)
-    g.stub(0x9FC3D8, lambda _, __, payload, ___:
+    g.stub(g.originals[0x9FC3D8], lambda _, __, payload, ___:
            g.cpu.mem_write(condition, bytes(g.cpu.mem_read(payload, 32))) or 1)
     # Populate the packet RTTI identity normally registered at game startup.
     dti_getter = g.get(0x17431D8 + 20)

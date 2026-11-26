@@ -68,6 +68,24 @@ impl MotionFrame {
     }
 }
 
+/// Whether GU just accepted this action and its dispatcher has yet to run.
+///
+/// # Safety
+/// The actor must be a live GU hunter on the game thread.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn waiting_to_start(actor: u32) -> bool {
+    unsafe { ((actor + 5) as *const u8).read() == 0 }
+}
+
+/// GU's packed primary motion slot, including its bound bank.
+///
+/// # Safety
+/// The actor must be a live GU hunter on the game thread.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn packed_motion(actor: u32) -> u16 {
+    unsafe { ((actor + 1204) as *const u16).read() }
+}
+
 /// Set the hunter's base animation rate. GU 29BF34 combines it with hitstop
 /// and resets it on action change (28E538).
 /// # Safety
