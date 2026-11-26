@@ -61,11 +61,11 @@ unsafe fn write<T>(address: u32, offset: u32, value: T) {
 }
 #[cfg(target_arch = "arm")]
 fn local_actor() -> Option<u32> {
-    if mhgu_sdk::style::selected(WEAPON) != Some(STYLE_ID) {
+    if mhgu_sdk::weapon::style::selected(WEAPON) != Some(STYLE_ID) {
         return None;
     }
     unsafe {
-        let actor = mhgu_sdk::style::hunter::local()?;
+        let actor = mhgu_sdk::weapon::style::hunter::local()?;
         (read::<u32>(actor, 0) == forge::mem::text_addr() + 0x174cf64).then_some(actor)
     }
 }
@@ -102,7 +102,7 @@ unsafe extern "C" fn expand_world_contact(owner: u32, hit: u32) -> u32 {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 mod entry {
     use super::{STYLE_ID, WEAPON, battle, motion};
-    use mhgu_sdk::style::{
+    use mhgu_sdk::weapon::style::{
         Style, StyleRegistry, remote,
         rules::{self, Rules},
     };
@@ -131,7 +131,7 @@ mod entry {
 
     #[forge::entry]
     fn main() {
-        mhgu_sdk::style::registry::when_ready(install_style);
+        mhgu_sdk::weapon::style::registry::when_ready(install_style);
     }
 
     extern "C" fn install_style() {
@@ -151,14 +151,14 @@ mod entry {
             forge::log::prelude::warn!("Extreme LS registration failed: {err:?}");
             return;
         }
-        mhgu_sdk::style::manual::bind(STYLE_ID, include_str!("manual.txt"));
+        mhgu_sdk::weapon::style::manual::bind(STYLE_ID, include_str!("manual.txt"));
         unsafe { remote::bind_sheathe(STYLE_ID, &motion::SHEATHE_MOTIONS) };
         if !rules::bind(STYLE_ID, &RULES) {
             forge::log::prelude::warn!("Style {}: GU rule service unavailable", STYLE_ID);
         }
         mhfz_sdk::effects::model::install();
         let bound =
-            unsafe { mhgu_sdk::style::world_contact::bind(STYLE_ID, super::expand_world_contact) };
+            unsafe { mhgu_sdk::weapon::style::world_contact::bind(STYLE_ID, super::expand_world_contact) };
         super::WORLD_CONTACT.store(bound, super::Relaxed);
         if !bound {
             forge::log::prelude::warn!("Extreme LS: world contact service unavailable");
@@ -166,7 +166,7 @@ mod entry {
         if !unsafe { remote::bind_playback(STYLE_ID, &super::peer::PLAYBACK) } {
             forge::log::prelude::warn!("Style {}: remote action playback unavailable", STYLE_ID);
         }
-        unsafe { mhgu_sdk::style::preload::bind(STYLE_ID, motion::preload) };
+        unsafe { mhgu_sdk::weapon::style::preload::bind(STYLE_ID, motion::preload) };
         battle::install();
         super::hud::install();
     }

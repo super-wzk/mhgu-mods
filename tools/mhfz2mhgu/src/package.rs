@@ -52,8 +52,31 @@ pub fn build(
     let model_path = format!("{base}\\mod\\{name}");
     let (pac, pair, rig) = source.open()?;
     let source = pac::member(&pair, 0)?;
-    let f = Fmod::parse(&source)?;
     let images = pac::member(&pac, texture_member)?;
+    let mut assets = appearance(&source, &images, &rig, &model_path, template_path)?;
+    assets.push(Asset {
+        name: format!("{base}\\mot\\{name}_{group}"),
+        kind: arc::MOTION,
+        data: motion::convert(
+            &pac::member(&pac, motion_member)?,
+            &rig,
+            group,
+            None,
+            None,
+            None,
+        )?,
+    });
+    arc::encode(&assets)
+}
+
+fn appearance(
+    source: &[u8],
+    images: &[u8],
+    rig: &mhf_resource::rig::Rig,
+    model_path: &str,
+    template_path: &Path,
+) -> Result<Vec<Asset>> {
+    let f = Fmod::parse(source)?;
     let textures: Vec<_> = f.textures().collect();
     let mut assets = vec![];
     let mut paths = vec![];
@@ -73,7 +96,7 @@ pub fn build(
         let (idx, cutout, w, h) = if let Some(&record) = by_id.get(&id) {
             record
         } else {
-            let img = image::decode(&pac::member(&images, id as usize)?)
+            let img = image::decode(&pac::member(images, id as usize)?)
                 .with_context(|| format!("decode PAC image {id} as PNG"))?;
             let cutout = img.rgba.as_chunks::<4>().0.iter().any(|p| p[3] != 255);
             let path = format!("{model_path}_BM{id:03}");
@@ -106,26 +129,28 @@ pub fn build(
         data: tex::rgba8(1, 1, &[0, 0, 0, 255])?,
     });
     assets.push(Asset {
-        name: model_path.clone(),
+        name: model_path.to_owned(),
         kind: arc::MATERIAL,
         data: mrl::encode(&template(template_path)?, &paths, &materials, specular)?,
     });
     assets.push(Asset {
-        name: model_path,
+        name: model_path.to_owned(),
         kind: arc::MODEL,
-        data: model::convert(&source, &rig)?,
+        data: model::convert(source, rig)?,
     });
-    assets.push(Asset {
-        name: format!("{base}\\mot\\{name}_{group}"),
-        kind: arc::MOTION,
-        data: motion::convert(
-            &pac::member(&pac, motion_member)?,
-            &rig,
-            group,
-            None,
-            None,
-            None,
-        )?,
-    });
-    arc::encode(&assets)
+    Ok(assets)
+}
+
+pub fn weapon(path: &Path, member: &str, material: &Path, name: &str) -> Result<Vec<u8>> {
+    let source = read(path)?;
+    let pac = pac::decode(pac::mha_member(&source, member)?.to_vec())?;
+    let model = pac::member(&pac, 0)?;
+    let rig = mhf_resource::rig::Rig::parse(&pac::member(&pac, 1)?)?;
+    arc::encode(&appearance(
+        &model,
+        &pac::member(&pac, 2)?,
+        &rig,
+        name,
+        material,
+    )?)
 }

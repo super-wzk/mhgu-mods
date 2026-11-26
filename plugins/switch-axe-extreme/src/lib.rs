@@ -48,7 +48,7 @@ unsafe fn write<T>(address: u32, offset: u32, value: T) {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 mod entry {
     use super::{STYLE_ID, WEAPON_ID, battle, motion, program};
-    use mhgu_sdk::style::{
+    use mhgu_sdk::weapon::style::{
         Style, StyleRegistry, remote,
         rules::{self, Rules},
     };
@@ -75,7 +75,7 @@ mod entry {
     };
     #[forge::entry]
     fn main() {
-        mhgu_sdk::style::registry::when_ready(install_style);
+        mhgu_sdk::weapon::style::registry::when_ready(install_style);
     }
 
     extern "C" fn install_style() {
@@ -95,7 +95,7 @@ mod entry {
             forge::log::prelude::warn!("Extreme Switch Axe registration failed: {error:?}");
             return;
         }
-        mhgu_sdk::style::manual::bind(STYLE_ID, include_str!("manual.txt"));
+        mhgu_sdk::weapon::style::manual::bind(STYLE_ID, include_str!("manual.txt"));
         unsafe { remote::bind_sheathe(STYLE_ID, &motion::SHEATHE_MOTIONS) };
         if !rules::bind(STYLE_ID, &RULES) {
             forge::log::prelude::warn!("Style {}: GU rule service unavailable", STYLE_ID);
@@ -105,6 +105,6 @@ mod entry {
             forge::log::prelude::warn!("Style {}: remote action playback unavailable", STYLE_ID);
         }
         battle::install();
-        unsafe { mhgu_sdk::style::preload::bind(STYLE_ID, motion::preload) };
+        unsafe { mhgu_sdk::weapon::style::preload::bind(STYLE_ID, motion::preload) };
     }
 }

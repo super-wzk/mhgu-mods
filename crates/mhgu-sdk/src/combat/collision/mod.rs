@@ -74,8 +74,8 @@ impl<'a> Contact<'a> {
                 core::mem::transmute(entry(0x2b76cc));
             init(self.as_raw(), 0, actor, row.as_ptr(), shape, 0, 15, 1);
             let mut flags = 0x0a00_0428;
-            let mut modifiers = crate::style::action::Attack::WEAPON_MODIFIERS;
-            if crate::style::hunter::equipped_weapon(actor) == Some(1) {
+            let mut modifiers = crate::weapon::style::action::Attack::WEAPON_MODIFIERS;
+            if crate::weapon::style::hunter::equipped_weapon(actor) == Some(1) {
                 // Match the SnS weapon bit from 2B72D4 and the draw check in 2B7ED8.
                 flags |= 0x800;
                 if *((actor + 10057) as *const u8) & 8 != 0 {

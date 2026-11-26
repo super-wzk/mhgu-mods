@@ -6,7 +6,7 @@ use crate::{
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use mhfz_sdk::effects::{MotionClock, world_pose_angles};
-use mhgu_sdk::style::{
+use mhgu_sdk::weapon::style::{
     action::MotionFrame,
     particle::{self, Anchor, Bank},
 };

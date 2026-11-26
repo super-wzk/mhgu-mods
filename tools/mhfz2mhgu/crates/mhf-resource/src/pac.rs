@@ -36,6 +36,38 @@ pub fn member(bytes: &[u8], index: usize) -> Result<Vec<u8>> {
     decode(part.to_vec()).with_context(|| format!("decode PAC member {index}"))
 }
 
+/// Find an exact member in a Frontier MHA archive. Several names may share a payload.
+pub fn mha_member<'a>(bytes: &'a [u8], name: &str) -> Result<&'a [u8]> {
+    ensure!(
+        bytes.starts_with(b"mha\x01"),
+        "expected a Frontier MHA archive"
+    );
+    let table = word(bytes, 4)? as usize;
+    let count = word(bytes, 8)? as usize;
+    let names = bytes
+        .get(word(bytes, 12)? as usize..)
+        .context("invalid MHA names")?;
+    let rows = bytes
+        .get(table..)
+        .and_then(|s| s.get(..count.checked_mul(20)?))
+        .context("short MHA directory")?;
+    for row in rows.chunks_exact(20) {
+        let field = names
+            .get(word(row, 0)? as usize..)
+            .context("invalid MHA name")?;
+        if field
+            .strip_prefix(name.as_bytes())
+            .is_some_and(|s| s.first() == Some(&0))
+        {
+            return bytes
+                .get(word(row, 4)? as usize..)
+                .and_then(|s| s.get(..word(row, 8).ok()? as usize))
+                .context("short MHA member");
+        }
+    }
+    anyhow::bail!("missing MHA member {name}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

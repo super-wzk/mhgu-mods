@@ -1,5 +1,5 @@
 use mhfz_sdk::sound::Clock;
-use mhgu_sdk::style::sound::Bank;
+use mhgu_sdk::weapon::style::sound::Bank;
 
 static BANKS: [Bank; 3] = [
     Bank::new(c"sound\\se\\pl\\frontier_gl\\blade"),

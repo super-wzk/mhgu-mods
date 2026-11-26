@@ -1,6 +1,6 @@
 //! Source action, equipment, parameter and SDT tables for Frontier weapon 12.
 use mhfz_sdk::action::{BranchRules, Cursor, Step, Time};
-use mhgu_sdk::style::action::{Actions, MotionFrame};
+use mhgu_sdk::weapon::style::action::{Actions, MotionFrame};
 
 const DATA: &[u8] = include_bytes!("../target/assets/switch_axe.fsaa");
 const COUNT: usize = 178;

@@ -15,7 +15,12 @@ QUEST, PLAYER, MANAGER = 0x7010000, 0x7020000, 0x7030000
 
 class Game:
     # Tests may add GU entries whose first ARM instruction is PC-independent.
-    inline_hooks = {0x50B64, 0x152960, 0x4A858, 0x3D7E90, 0x3A75C8, 0x3A3178, 0x56EF50}
+    inline_hooks = {0x50B64, 0x152960, 0x4A858, 0x3D7E90, 0x3A75C8, 0x3A3178, 0x56EF50, 0x592FE0, 0x593514, 0x6EB9FC, 0x6EB6C0, 0x6EC2CC, 0x6ECE8C, 0x6ED128, 0x6ED200, 0x6F53E4, 0x6F8648, 0x6F9B18, 0x6FCABC, 0x6FB224, 0x6FB364, 0x6ED344, 0x6FBF4C, 0x54F260, 0x6ED600, 0x6FC2C8, 0x6F9438, 0x6E8558, 0x6F1AE8}
+    inline_hooks |= {0x714B20, 0x718084, 0x1418E0, 0x14394C, 0x143894,
+                     0x144C04, 0x1440C8, 0x144190, 0x141944, 0x144590, 0x1449B4,
+                     0x144B68, 0x145B58, 0x144768, 0x14935C, 0x1424EC, 0x149E6C,
+                     0x72AA48, 0x72AB38, 0x56EA38, 0x5B973C, 0x5B6C78}
+
     def __init__(self, elf):
         self.cpu = c = Uc(UC_ARCH_ARM, UC_MODE_ARM)
         c.ctl_set_cpu_model(arm.UC_CPU_ARM_MAX)
@@ -35,6 +40,7 @@ class Game:
         self.traps, self.files, self.opened = {}, {}, {}
         self.logs = []
         self.write_success, self.io_mount = True, False
+        self.mount_available = True
         self.put(0x188AD90, QUEST)
         self.put(0x1897F78, PLAYER)
         # Run GU's actual startup initializer, including the allocator's owner-thread
@@ -201,6 +207,8 @@ class Game:
 
     def mount(self, *_):
         assert not self.io_mount
+        if not self.mount_available:
+            return 0
         self.io_mount = True
         return 1
 

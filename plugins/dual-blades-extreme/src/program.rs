@@ -1,6 +1,6 @@
 //! Frontier w06 Extreme action program, in authored motion frames.
 use mhfz_sdk::action::{BranchRules, Cursor, Step};
-use mhgu_sdk::style::action::Actions;
+use mhgu_sdk::weapon::style::action::Actions;
 
 const DATA: &[u8] = include_bytes!("../target/assets/dual_blades.fdba");
 const PARAMETERS: usize = DATA.len() - 216;

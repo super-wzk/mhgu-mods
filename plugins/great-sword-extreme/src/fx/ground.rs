@@ -1,7 +1,7 @@
 use super::{Attachment, field, route};
 use mhgu_sdk::{
     geometry::Angle,
-    style::particle::{ground_heights, joint_matrix},
+    weapon::style::particle::{ground_heights, joint_matrix},
 };
 
 const SURFACE: usize = 16;

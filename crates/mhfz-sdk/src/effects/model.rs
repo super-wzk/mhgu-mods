@@ -1,7 +1,7 @@
 //! Adapt Frontier model-particle draws to GU 1.4.
 
 use core::ffi::c_void;
-use mhgu_sdk::style::particle::{self, DrawModel, ModelRenderer};
+use mhgu_sdk::weapon::style::particle::{self, DrawModel, ModelRenderer};
 
 const SUBMIT: u32 = 0xc90380;
 const MODEL_PATH: u32 = 80;

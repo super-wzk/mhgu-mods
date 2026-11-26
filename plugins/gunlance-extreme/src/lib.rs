@@ -45,7 +45,7 @@ unsafe fn write<T: Copy>(actor: u32, offset: u32, value: T) {
 
 #[cfg(target_arch = "arm")]
 unsafe fn active(actor: u32) -> bool {
-    use mhgu_sdk::style::{hunter, selected};
+    use mhgu_sdk::weapon::style::{hunter, selected};
     unsafe {
         actor != 0
             && hunter::local() == Some(actor)
@@ -59,7 +59,7 @@ unsafe fn active(actor: u32) -> bool {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 mod entry {
     use super::*;
-    use mhgu_sdk::style::{Style, StyleRegistry, preload, remote, rules};
+    use mhgu_sdk::weapon::style::{Style, StyleRegistry, preload, remote, rules};
 
     static STYLE: Style = Style {
         id: STYLE_ID,
@@ -84,7 +84,7 @@ mod entry {
 
     #[forge::entry]
     fn main() {
-        mhgu_sdk::style::registry::when_ready(install_style);
+        mhgu_sdk::weapon::style::registry::when_ready(install_style);
     }
 
     extern "C" fn install_style() {
@@ -103,7 +103,7 @@ mod entry {
             forge::log::prelude::warn!("Extreme Gunlance registration failed: {error:?}");
             return;
         }
-        mhgu_sdk::style::manual::bind(STYLE_ID, include_str!("manual.txt"));
+        mhgu_sdk::weapon::style::manual::bind(STYLE_ID, include_str!("manual.txt"));
         unsafe { remote::bind_sheathe(STYLE_ID, &motion::SHEATHE_MOTIONS) };
         rules::bind(STYLE_ID, &RULES);
         if !unsafe { remote::bind_playback(STYLE_ID, &battle::PLAYBACK) } {

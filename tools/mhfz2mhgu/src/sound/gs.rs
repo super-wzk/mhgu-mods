@@ -33,24 +33,8 @@ pub(super) fn model_bank(
     cues: impl IntoIterator<Item = u8>,
 ) -> Result<Bank> {
     let bytes = fs::read(dat.join("extend").join(archive))?;
-    ensure!(
-        bytes.starts_with(b"mha\x01"),
-        "expected weapon sound archive"
-    );
-    let names = word(&bytes, 12)?;
-    for i in 0..word(&bytes, 8)? {
-        let row = word(&bytes, 4)? + 20 * i;
-        let name = names + word(&bytes, row)?;
-        if bytes.get(name..name + model.len()) != Some(model) {
-            continue;
-        }
-        let start = word(&bytes, row + 4)?;
-        let data = bytes
-            .get(start..start + word(&bytes, row + 8)?)
-            .context("short weapon model bank")?;
-        return Bank::player_bytes(data, cues);
-    }
-    anyhow::bail!("missing weapon model request in {archive}")
+    let name = std::ffi::CStr::from_bytes_with_nul(model)?.to_str()?;
+    Bank::player_bytes(pac::mha_member(&bytes, name)?, cues)
 }
 
 // FGSE: clip-indexed spans of 12-byte records. Four (cue, weight) pairs

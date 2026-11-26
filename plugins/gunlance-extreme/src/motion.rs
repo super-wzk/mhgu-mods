@@ -1,10 +1,10 @@
 use mhfz_sdk::motion::{MotionBanks, sprint_sheathe};
-use mhgu_sdk::style::{PASS, action};
+use mhgu_sdk::weapon::style::{PASS, action};
 
 const PRIVATE: u32 = 0x1_0000;
 // FZ common action 202, weapon row in 825901F4.
 const SPRINT_SHEATHE: u16 = 1032;
-pub(super) static SHEATHE_MOTIONS: mhgu_sdk::style::remote::Sheathe =
+pub(super) static SHEATHE_MOTIONS: mhgu_sdk::weapon::style::remote::Sheathe =
     mhfz_sdk::motion::sheathe_motions(&[crate::program::SPRINT], SPRINT_SHEATHE);
 
 static BANKS: MotionBanks = MotionBanks::new([

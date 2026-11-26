@@ -3,9 +3,9 @@
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub mod model;
 
-use mhgu_sdk::style::action::MotionFrame;
+use mhgu_sdk::weapon::style::action::MotionFrame;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
-use mhgu_sdk::style::particle::{Anchor, ground_heights, world_offset};
+use mhgu_sdk::weapon::style::particle::{Anchor, ground_heights, world_offset};
 
 pub struct MotionEvent {
     pub frame: f32,
@@ -99,8 +99,8 @@ fn half(data: &[u8], at: usize) -> u16 {
 /// # Safety
 /// Call on the game thread with a live hunter.
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
-pub unsafe fn sword_flash(bank: &mhgu_sdk::style::particle::Bank, actor: u32, first: usize) {
-    use mhgu_sdk::style::particle;
+pub unsafe fn sword_flash(bank: &mhgu_sdk::weapon::style::particle::Bank, actor: u32, first: usize) {
+    use mhgu_sdk::weapon::style::particle;
     unsafe {
         if let Some(parent) = particle::parent(actor) {
             bank.emit(

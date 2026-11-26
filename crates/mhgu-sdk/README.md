@@ -4,24 +4,64 @@ MHGU Switch 1.4 的 Rust 引擎绑定。插件通过路径依赖引用 `mhgu-sdk
 
 风格插件需要安装 [mhgu-sdk.nro](../../plugins/mhgu-sdk-runtime/README.md)。Cargo 依赖提供 Rust 类型和调用接口，进程内的版本化服务由该 NRO 提供。运行时可先于或晚于内容加载。
 
+## 武器类型
+
+用 `WeaponId` 登记武器类型，用 `EquipmentId` 登记一件可制造的武器。磁斩锤类型是 16，试制磁斩锤装备是 `0x1001`。`weapon::WeaponEquipment` 是武器专用数据结构，防具和护石继续使用 GU 原版装备系统。同一类型的多件武器共用风格，每件都有自己的名称、模型和等级表。武器插件通过 `weapon::registry::when_ready` 初始化，调用 `register(&WEAPON, &STYLE, weapon_name, style_name, description)`，风格的 `weapon` 填武器类型的 `style_key()`。购买和生产类别显示 `weapon_name` 和 `Weapon.icon` 指定的图标。
+
+自定义图标通过 `register_icon(slot, texture)` 把 128–255 的全局槽位绑定到一张独立的 64×64 GU TEX。路径相对于 `nativeNX`，使用 GU 反斜杠且省略 `.tex`。同一类型的装备均继承 `Weapon.icon`，运行时按各自的稀有度应用 GU 颜色。原生图集槽位仍可直接使用。
+
+`register_equipment(&EQUIPMENT, LEVELS, name, description, model)` 接收常驻数据。`WeaponEquipment` 对应 GU 基础表中的稀有度、两路属性或异常类型、固有技能号、音效请求号和打击音色。`EquipmentModel` 指定 ARC 和 MOD 的无扩展名资源路径。每个 `EquipmentLevel` 对应一个强化等级，依次声明攻击、防御、会心、属性值、孔数、斩味表编号和斩味等级。第 0 行为游戏里的 Lv.1，最后一行决定强化上限。
+
+GU 原生固有技能由 `mSpecialSkill` 选择。属性、异常和固有技能可以由游戏的命中与装备逻辑消费。音效请求号、音色目前可通过装备定义查询。自定义招式的刀光、粒子和时间点由风格的动作事件提供。
+
+在游戏线程用 `registry.equipment(id)`、`registry.level(id, upgrade)`、`registry.model(id)` 查询注册值。用 `grant(equipment_id)` 发放实例，`upgrade(instance_id)` 提升强化等级，`equipped_instance()` 查询当前实例。存档仅保存装备 ID、实例号和强化等级。[磁斩锤注册示例](../../plugins/magnet-spike/src/lib.rs)
+
+在同一次初始化回调中，给已注册的装备登记获取途径。三类登记相互独立，每把武器可有一条购买价格、一条制造配方，以及每个起始等级一条强化配方。商店购买与工房制造会生成一个未强化实例。强化配方的起始等级从 0 计，对应游戏显示的 Lv.1。
+
+```rust
+use mhgu_sdk::weapon::trade::{self, Material, Recipe};
+
+trade::register_purchase(EQUIPMENT.id, 1800)?;
+trade::register_recipe(EQUIPMENT.id, Recipe {
+    zenny: 1200,
+    materials: [
+        Material { item: 100, quantity: 3 },
+        Material::EMPTY,
+        Material::EMPTY,
+        Material::EMPTY,
+    ],
+})?;
+trade::register_upgrade(EQUIPMENT.id, 0, Recipe {
+    zenny: 2000,
+    materials: [
+        Material { item: 101, quantity: 2 },
+        Material::EMPTY,
+        Material::EMPTY,
+        Material::EMPTY,
+    ],
+})?;
+```
+
+材料填写 GU 道具编号，每项数量为 1–255，同一配方内编号不重复。金额为 0–9,999,999z。运行时在确认页用游戏的道具表检查编号，同时检查角色的余额、持有量和装备箱容量。
+
 ## 武器风格插件
 
 [mhfz-sdk](../mhfz-sdk/README.md) 在本 SDK 的 GU 接口上提供极型武器共用的 Frontier 动作、输入及表现逻辑。
 
-[StyleRegistry](src/style/registry.rs) 在 GU 游戏线程访问风格注册器。内容插件在 Forge 入口调用 `registry::when_ready`，在回调中执行一次 `registry.register(&STYLE, name, description)`。常驻的 `Style` 描述符提供动作编号、狩技槽位数及可选的请求、更新和防御规则。`Style.id` 是从 10 起分配的自定义风格编号，角色存档和联机共用。用 `style::selected(weapon)` 查询启用的自定义风格，返回 `None` 时沿用 GU 原版。实际用法见[极型大剑](../../plugins/great-sword-extreme/src/lib.rs)。
+[StyleRegistry](src/weapon/style/registry.rs) 在 GU 游戏线程访问风格注册器。内容插件在 Forge 入口调用 `registry::when_ready`，在回调中执行一次 `registry.register(&STYLE, name, description)`。常驻的 `Style` 描述符提供动作编号、狩技槽位数及可选的请求、更新和防御规则。`Style.id` 是从 10 起分配的自定义风格编号，角色存档和联机共用。用 `style::selected(weapon)` 查询启用的自定义风格，返回 `None` 时沿用 GU 原版。实际用法见[极型大剑](../../plugins/great-sword-extreme/src/lib.rs)。
 
 GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提供 GU 已解析的公共和武器指令，`request` 处理 GU 已接受的拔刀和武器切招请求。公共动作可返回 `PASS` 交给 GU。空输入通知插件结束，actor 为 0 时代表旧猎人已失效。
 
-[input](src/style/input.rs) 读取 GU 的组合键状态、过滤后的 X／A 按下沿和当前附加肩键。通过 [movement](src/style/movement.rs) 查询摇杆方向、应用朝向和使用原生耐力入口。回避准入复用 `has_evade_stamina` 检查体术、料理和免耗效果。读取任务专用字段前，用 [hunter::is_quest](src/style/hunter.rs) 核对角色类型。
+[input](src/weapon/style/input.rs) 读取 GU 的组合键状态、过滤后的 X／A 按下沿和当前附加肩键。通过 [movement](src/weapon/style/movement.rs) 查询摇杆方向、应用朝向和使用原生耐力入口。回避准入复用 `has_evade_stamina` 检查体术、料理和免耗效果。读取任务专用字段前，用 [hunter::is_quest](src/weapon/style/hunter.rs) 核对角色类型。
 
-[preload](src/style/preload.rs) 登记本地风格在 GU 完成任务猎人初始化后执行的资源准备回调。[MotionBanks](src/style/action/motion_bank.rs) 缓存男女模型共用的 LMT。首次播放时才绑定运行时 bank，按装备模型选择基础片段或槽号加 128 的专用片段。私有 HTS 可通过 [CachedHitShape](src/combat/collision/shapes.rs) 复用已加载资源。
+[preload](src/weapon/style/preload.rs) 登记本地风格在 GU 完成任务猎人初始化后执行的资源准备回调。[MotionBanks](src/weapon/style/action/motion_bank.rs) 缓存男女模型共用的 LMT。首次播放时才绑定运行时 bank，按装备模型选择基础片段或槽号加 128 的专用片段。私有 HTS 可通过 [CachedHitShape](src/combat/collision/shapes.rs) 复用已加载资源。
 
-[remote](src/style/remote.rs) 提供 GU 名册查询和远端状态存储。风格注册成功后，用 `bind_playback` 一次提交常驻的 `Playback` 描述符，包含动作回放 `tick`、可选的逐帧观察 `observe` 和动作包状态 `action_state`。注册器校验当前武器的动作包是否有可用位，校验通过后才登记整份描述符。插件定义状态值及回放逻辑。读取远端装备前按当前名册核对猎人，角色离场、换武器或槽位更换时释放旧状态。
+[remote](src/weapon/style/remote.rs) 提供 GU 名册查询和远端状态存储。风格注册成功后，用 `bind_playback` 一次提交常驻的 `Playback` 描述符，包含动作回放 `tick`、可选的逐帧观察 `observe` 和动作包状态 `action_state`。注册器校验当前武器的动作包是否有可用位，校验通过后才登记整份描述符。插件定义状态值及回放逻辑。读取远端装备前按当前名册核对猎人，角色离场、换武器或槽位更换时释放旧状态。
 
 使用 GU 公共收刀的风格可通过 `bind_sheathe` 登记常驻 `Sheathe` 描述符，提供冲刺动作 ID 和两种片段的显式编码请求。注册器把收刀变体加到原生动作包，并将接收到的变体交给风格的动作编码回调。
 
-[physical](src/style/physical.rs) 提供统一的物理攻击力回调登记。回调可限定在 GU 的左右刀身碰撞槽，也可覆盖同一猎人的独立武器碰撞。风格插件负责数值与生效条件。
+[physical](src/weapon/style/physical.rs) 提供统一的物理攻击力回调登记。回调可限定在 GU 的左右刀身碰撞槽，也可覆盖同一猎人的独立武器碰撞。风格插件负责数值与生效条件。
 
-[rules](src/style/rules.rs) 为已注册的风格提供可选的格挡半角、公共动作结束条件、弹刀和镜头回调。[particle](src/style/particle.rs) 提供模型粒子绘制与释放回调的登记接口。
+[rules](src/weapon/style/rules.rs) 为已注册的风格提供可选的格挡半角、公共动作结束条件、弹刀和镜头回调。[particle](src/weapon/style/particle.rs) 提供模型粒子绘制与释放回调的登记接口。
 
 `Style::commands` 可在 GU 装载命令表时追加一组有序的武器派生，由 GU 缓冲先接收的输入并在指定帧切换动作。`action::enter` 走 GU 的公共动作切换。已判定的单条派生可通过 `action::transition` 提交，狩技使用 `Transition::HUNTER_ART`。`action::play_motion` 使用猎人的原生动作编码。`Attack::submit` 把动作值和形状交给 GU 的攻击构造器及武器修正。注册器在大剑的首个有效攻击事件处理兽魂附身。`guard::Policy` 提供一次格挡结果，注册器负责把结果交给 GU 的受击、斩味和回正流程，内容插件可以用 `guard::take` 进入后续招式。

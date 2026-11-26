@@ -1,6 +1,6 @@
 //! Disable stock heat mechanics and reuse GU's gunlance presentation for ignition.
 use crate::{battle, native, read, write};
-use mhgu_sdk::{style::hunter, sync::Shared};
+use mhgu_sdk::{weapon::style::hunter, sync::Shared};
 
 const HEAT: u32 = 13152;
 const HEAT_LEVEL: u32 = 13164;

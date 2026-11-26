@@ -10,8 +10,8 @@ pub const fn attacker_hitstop(source_ticks: u8) -> u8 {
 /// FZ 816FD8A2 consumes the first matching contact of either blade, even
 /// when the effective hitzone is soft enough to keep swinging.
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
-pub extern "C" fn deflection(factor: f32) -> mhgu_sdk::style::rules::Deflection {
-    use mhgu_sdk::style::rules::Deflection;
+pub extern "C" fn deflection(factor: f32) -> mhgu_sdk::weapon::style::rules::Deflection {
+    use mhgu_sdk::weapon::style::rules::Deflection;
     if factor < 0.23 {
         Deflection::Recoil
     } else {
@@ -26,7 +26,7 @@ pub extern "C" fn deflection(factor: f32) -> mhgu_sdk::style::rules::Deflection 
 /// The actor must be a live, equipped GU hunter on the game thread.
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub unsafe fn guard_bonus_frames(actor: u32) -> u16 {
-    use mhgu_sdk::style::hunter::has_skill;
+    use mhgu_sdk::weapon::style::hunter::has_skill;
     if [168, 279, 297]
         .into_iter()
         .any(|id| unsafe { has_skill(actor, id) })
@@ -45,7 +45,7 @@ pub unsafe fn guard_bonus_frames(actor: u32) -> u16 {
 /// The actor must be a live, equipped GU hunter on the game thread.
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub unsafe fn evade_bonus_frames(actor: u32) -> f32 {
-    match unsafe { mhgu_sdk::style::hunter::evasion_level(actor) } {
+    match unsafe { mhgu_sdk::weapon::style::hunter::evasion_level(actor) } {
         2.. => 10.,
         1 => 6.,
         _ => 0.,
@@ -61,10 +61,10 @@ pub unsafe fn knockback_recovery(
     actor: u32,
     current: (u16, u16),
     drawn: bool,
-    input: &mhgu_sdk::style::Input,
+    input: &mhgu_sdk::weapon::style::Input,
     states: [u8; 2],
 ) -> Option<u8> {
-    use mhgu_sdk::style::movement;
+    use mhgu_sdk::weapon::style::movement;
     if !drawn || !input.command(3) || !matches!(current, (64, 6 | 7)) {
         return None;
     }

@@ -25,7 +25,7 @@ const STYLE_ID: u32 = 10;
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 mod entry {
     use super::motion;
-    use mhgu_sdk::style::{
+    use mhgu_sdk::weapon::style::{
         Style, StyleRegistry, remote,
         rules::{self, Rules},
     };
@@ -61,7 +61,7 @@ mod entry {
 
     #[forge::entry]
     fn main() {
-        mhgu_sdk::style::registry::when_ready(install_style);
+        mhgu_sdk::weapon::style::registry::when_ready(install_style);
     }
 
     extern "C" fn install_style() {
@@ -84,19 +84,19 @@ mod entry {
             );
             return;
         }
-        mhgu_sdk::style::manual::bind(EXTREME.id, include_str!("manual.txt"));
+        mhgu_sdk::weapon::style::manual::bind(EXTREME.id, include_str!("manual.txt"));
         unsafe { remote::bind_sheathe(EXTREME.id, &motion::SHEATHE_MOTIONS) };
         if !rules::bind(EXTREME.id, &RULES) {
             forge::log::prelude::warn!("Style {}: GU rule service unavailable", EXTREME.id);
         }
         super::guard_body::install();
         mhfz_sdk::effects::model::install();
-        unsafe { mhgu_sdk::style::preload::bind(EXTREME.id, motion::preload) };
+        unsafe { mhgu_sdk::weapon::style::preload::bind(EXTREME.id, motion::preload) };
         motion::install();
         if !unsafe { remote::bind_playback(EXTREME.id, &super::battle::PLAYBACK) } {
             forge::log::prelude::warn!("Style {}: remote action playback unavailable", EXTREME.id);
         }
-        if !unsafe { mhgu_sdk::style::world_contact::bind(EXTREME.id, super::combat::expand) } {
+        if !unsafe { mhgu_sdk::weapon::style::world_contact::bind(EXTREME.id, super::combat::expand) } {
             forge::log::prelude::warn!("Extreme GS: world contact service unavailable");
         }
         super::fx::install(EXTREME.id);

@@ -1,0 +1,107 @@
+//! Magnet Spike transaction test weapon for GU 1.4.
+#![no_std]
+
+use mhgu_sdk::weapon::{
+    Element, EquipmentId, EquipmentLevel, EquipmentModel, Weapon, WeaponEquipment, WeaponId,
+    registry::{self, WeaponRegistry},
+    style::{RegisterError, Style, action::Actions},
+    trade::{self, Material, Recipe},
+};
+
+const MAGNET_SPIKE: WeaponId = WeaponId::new(16).unwrap();
+const MAGNET_SPIKE_ICON: u8 = 255;
+
+static WEAPON: Weapon = Weapon {
+    id: MAGNET_SPIKE,
+    ranged: false,
+    icon: MAGNET_SPIKE_ICON,
+};
+
+static TRIAL_SPIKE: WeaponEquipment = WeaponEquipment {
+    id: EquipmentId::new(0x1001).unwrap(),
+    weapon: MAGNET_SPIKE,
+    rarity: 1,
+    elements: [Element::NONE; 2],
+    special_skill: 0,
+    sound_material: 0,
+    sound_request: 0,
+};
+
+static STYLE: Style = Style {
+    id: 16,
+    weapon: MAGNET_SPIKE.style_key(),
+    encode: None,
+    decode: None,
+    independent: true,
+    art_slots: 3,
+    controller: None,
+    request: None,
+    actions: Actions::new(0),
+    guard: None,
+    commands: None,
+};
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+mod entry {
+    use super::*;
+
+    #[forge::entry]
+    fn main() {
+        registry::when_ready(register);
+    }
+
+    extern "C" fn register() {
+        match register_weapon() {
+            Ok(()) => {
+                forge::log::prelude::info!("Magnet Spike: weapon, icon and trade offers registered")
+            }
+            Err(error) => forge::log::prelude::warn!("Magnet Spike registration failed: {error:?}"),
+        }
+    }
+}
+
+fn register_weapon() -> Result<(), RegisterError> {
+    let registry = WeaponRegistry::current().ok_or(RegisterError::Invalid)?;
+    registry.register_icon(MAGNET_SPIKE_ICON, c"GUI\\frontier_magnet_spike\\icon")?;
+    registry.register(
+        &WEAPON,
+        &STYLE,
+        c"磁斩锤",
+        c"极之型磁斩锤",
+        c"磁斩锤专属极之型。\r\n          工房消耗回复药，武器商店可直接购买。",
+    )?;
+    registry.register_equipment(
+        &TRIAL_SPIKE,
+        &[EquipmentLevel {
+            attack: 100,
+            defense: 0,
+            affinity: 0,
+            element_values: [0; 2],
+            slots: 0,
+            sharpness_type: 10,
+            sharpness_level: 0,
+        }],
+        c"试制磁斩锤",
+        c"用于验证制造和购买的磁斩锤。",
+        Some(EquipmentModel {
+            archive: c"arc\\frontier\\magnet_spike",
+            model: c"weapon\\frontier\\magnet_spike\\wk451",
+        }),
+    )?;
+    trade::register_purchase(TRIAL_SPIKE.id, 100)?;
+    trade::register_recipe(
+        TRIAL_SPIKE.id,
+        Recipe {
+            zenny: 0,
+            materials: [
+                Material {
+                    item: 9,
+                    quantity: 1,
+                },
+                Material::EMPTY,
+                Material::EMPTY,
+                Material::EMPTY,
+            ],
+        },
+    )
+}

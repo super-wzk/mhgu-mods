@@ -21,7 +21,7 @@ use mhfz_sdk::{
     sound::Clock,
     sprint::{self, Flick, Resume, STICK_DEADZONE},
 };
-use mhgu_sdk::style::{
+use mhgu_sdk::weapon::style::{
     ActionRequest, Input, NATIVE_ACTION, PASS,
     action::{
         self, Attack,
@@ -1519,7 +1519,7 @@ pub(super) fn install() {
     fx::install();
     crate::trail::install();
     let base = forge::mem::text_addr();
-    use mhgu_sdk::style::physical::{self as power, Rule, Scope};
+    use mhgu_sdk::weapon::style::physical::{self as power, Rule, Scope};
     static POWER: Rule = Rule {
         scope: Scope::WeaponContacts,
         adjust: physical,

@@ -190,6 +190,24 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Convert an original Frontier weapon model, skeleton and textures to a GU ARC.
+    WeaponModel {
+        archive: PathBuf,
+        #[arg(long)]
+        member: String,
+        #[arg(long)]
+        material_template: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Import the retail Magnet Spike icon from the Frontier UI atlas.
+    MagnetSpikeIcon {
+        dat: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Build a visual resource ARC (model, materials, textures and a motion group)
     Package {
         #[command(flatten)]
@@ -375,6 +393,34 @@ fn main() -> Result<()> {
                 );
             }
             Ok(())
+        }
+        Command::WeaponModel {
+            archive,
+            member,
+            material_template,
+            name,
+            output,
+        } => save(
+            &output,
+            package::weapon(&archive, &member, &material_template, &name)?,
+        ),
+        Command::MagnetSpikeIcon { dat, output } => {
+            // MHF-Z's 64 px weapon icon sheet is PNG member 54 in mhf.bin.
+            let atlas = pac::member(&read(&dat.join("mhf.bin"))?, 54)?;
+            let image = mhf_resource::image::decode(&atlas)?;
+            anyhow::ensure!(
+                (image.width, image.height) == (512, 1024),
+                "unexpected Frontier weapon icon sheet"
+            );
+            let mut icon = Vec::with_capacity(64 * 64 * 4);
+            for y in 896..960 {
+                let start = (y * 512 + 192) * 4;
+                icon.extend_from_slice(&image.rgba[start..start + 64 * 4]);
+            }
+            save(
+                &output,
+                mhgu_resource::tex::rgba8_unmipped(64, 64, &icon)?,
+            )
         }
         Command::Package {
             source,

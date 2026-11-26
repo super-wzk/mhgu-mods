@@ -1,11 +1,11 @@
 use crate::{WEAPON_ID, fx, native, program, read, sound, write};
 use mhfz_sdk::motion::{MotionBanks, sprint_sheathe};
-use mhgu_sdk::style::{PASS, action};
+use mhgu_sdk::weapon::style::{PASS, action};
 
 // GU 11A91E0 reads this field when choosing the equipped weapon's pose.
 pub(super) const SWORD_POSE: u32 = 13096;
 pub(super) const SPRINT_SHEATHE: u16 = 1499;
-pub(super) static SHEATHE_MOTIONS: mhgu_sdk::style::remote::Sheathe =
+pub(super) static SHEATHE_MOTIONS: mhgu_sdk::weapon::style::remote::Sheathe =
     mhfz_sdk::motion::sheathe_motions(program::SPRINT_STATES, SPRINT_SHEATHE);
 pub(super) const SHEATHE_ACTION: (u16, u16) = (1, 2);
 const GU_SHEATHE_MOTION: u32 = 5003;
@@ -58,7 +58,7 @@ unsafe extern "C" {
 unsafe fn weapon_tracks(model: u32, actor: u32) -> u32 {
     unsafe {
         if action::current(actor) != (action::GROUP, action::slot(program::SWORD_TO_AXE))
-            || mhgu_sdk::style::hunter::equipped_weapon(actor) != Some(WEAPON_ID)
+            || mhgu_sdk::weapon::style::hunter::equipped_weapon(actor) != Some(WEAPON_ID)
             || read::<u32>(actor, 9120) != model
         {
             return original!(model, actor);

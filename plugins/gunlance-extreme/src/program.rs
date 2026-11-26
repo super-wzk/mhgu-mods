@@ -1,6 +1,6 @@
 //! Frontier w09 action steps, input windows and melee rows.
 use mhfz_sdk::action::{BranchRules, Cursor, Step};
-use mhgu_sdk::style::action::Actions;
+use mhgu_sdk::weapon::style::action::Actions;
 
 const DATA: &[u8] = include_bytes!("../target/assets/gunlance.fgla");
 const STATES: u8 = 82;

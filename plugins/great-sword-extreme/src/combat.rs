@@ -3,7 +3,7 @@
 use mhfz_sdk::combat::{HitWindow, attacker_hitstop};
 use mhgu_sdk::{
     combat::collision::{CachedHitShape, Contact, HitShape},
-    style::action::Attack,
+    weapon::style::action::Attack,
 };
 
 static GUARD_COUNTER: CachedHitShape =

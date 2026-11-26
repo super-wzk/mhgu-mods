@@ -1,7 +1,7 @@
 //! Frontier blade-polish stacks and their bonus at GU's melee physical-attack lookup.
 use super::{OWNER, Relaxed};
 use core::sync::atomic::AtomicU32;
-use mhgu_sdk::style::{
+use mhgu_sdk::weapon::style::{
     action::melee,
     physical::{self, Rule, Scope},
 };

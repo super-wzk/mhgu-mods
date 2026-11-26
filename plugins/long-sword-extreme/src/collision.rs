@@ -68,5 +68,5 @@ unsafe extern "C" fn collision_pass(manager: u32) {
 }
 
 pub(super) fn install() {
-    unsafe { mhgu_sdk::style::world_contact::bind_pass(crate::STYLE_ID, collision_pass) };
+    unsafe { mhgu_sdk::weapon::style::world_contact::bind_pass(crate::STYLE_ID, collision_pass) };
 }

@@ -1,6 +1,6 @@
 //! Frontier sprint input, braking and resume policy.
 
-use mhgu_sdk::style::Input;
+use mhgu_sdk::weapon::style::Input;
 
 pub const STICK_DEADZONE: i16 = 48;
 
@@ -157,7 +157,7 @@ mod tests {
 
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 mod native {
-    use mhgu_sdk::style::{action, movement::CLIMBS};
+    use mhgu_sdk::weapon::style::{action, movement::CLIMBS};
 
     pub fn can_brake(frame: f32, cycles: u16) -> bool {
         frame >= 30. || cycles != 0

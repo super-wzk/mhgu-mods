@@ -11,7 +11,7 @@ use super::{
 };
 use mhgu_sdk::{
     geometry::Angle,
-    style::{
+    weapon::style::{
         self, hunter,
         remote::{PLAYER_COUNT, Roster},
     },

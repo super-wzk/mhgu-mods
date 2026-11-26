@@ -3,7 +3,7 @@ use crate::peer::{COUNT, Slot};
 use crate::{collision, fx, motion, native, read, sound, write};
 use core::cell::{Cell, UnsafeCell};
 use mhgu_sdk::combat::collision::{Contact, ContactPool};
-use mhgu_sdk::style::action;
+use mhgu_sdk::weapon::style::action;
 
 // All accesses run on GU's game thread. Copy values out before calling GU,
 // which can reenter the style from a collision or action transition.

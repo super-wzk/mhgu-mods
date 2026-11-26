@@ -1,6 +1,6 @@
 //! Direction of a Frontier attack cancel, retained across GU's drawn roll transition.
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
-use mhgu_sdk::style::action;
+use mhgu_sdk::weapon::style::action;
 
 pub struct DrawnRoll {
     clips: [u16; 2],

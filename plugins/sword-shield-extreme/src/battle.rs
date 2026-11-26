@@ -17,7 +17,7 @@ use mhfz_sdk::{
     sound::Clock,
     sprint::{self, Flick, Resume},
 };
-use mhgu_sdk::style::{
+use mhgu_sdk::weapon::style::{
     self, ActionRequest, Input, NATIVE_ACTION, PASS,
     action::{self, MotionFrame, command::CommandSet, melee},
     hunter, movement,

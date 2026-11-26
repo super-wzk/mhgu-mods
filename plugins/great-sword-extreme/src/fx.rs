@@ -1,7 +1,7 @@
 //! Event requests for converted Frontier EFL resources. GU owns emission,
 //! particle curves, attachment, rendering and destruction.
 use mhfz_sdk::effects::{self, MotionClock, MotionEvent};
-use mhgu_sdk::style::{
+use mhgu_sdk::weapon::style::{
     action::MotionFrame,
     particle::{self, Anchor, Bank, TrackedUnits},
 };

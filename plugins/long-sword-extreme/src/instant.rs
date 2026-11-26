@@ -4,7 +4,7 @@ use crate::{collision, program, read};
 use core::cell::UnsafeCell;
 use mhgu_sdk::{
     combat::collision::{Contact, ContactPool},
-    style::action,
+    weapon::style::action,
 };
 
 pub(super) const ACTION: u8 = 77;

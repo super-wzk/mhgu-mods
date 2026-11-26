@@ -1,6 +1,6 @@
 //! Frontier w07 Extreme action program, in authored motion frames.
 use mhfz_sdk::action::{BranchRules, Cursor, Step};
-use mhgu_sdk::style::action::Actions;
+use mhgu_sdk::weapon::style::action::Actions;
 
 const DATA: &[u8] = include_bytes!("../target/assets/long_sword.flsa");
 const PARAMETERS: usize = DATA.len() - 64;

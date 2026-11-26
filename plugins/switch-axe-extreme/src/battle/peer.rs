@@ -5,7 +5,7 @@ use crate::{
     read,
 };
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering::Relaxed};
-use mhgu_sdk::style::{
+use mhgu_sdk::weapon::style::{
     self,
     action::{self, MotionFrame},
     remote,

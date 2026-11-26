@@ -6,7 +6,7 @@ use mhfz_sdk::combat::{HitWindow, attacker_hitstop};
 use mhgu_sdk::{
     combat::collision::{CachedHitShape, ContactPool},
     geometry::Angle,
-    style::{action::Attack, particle, remote::PLAYER_COUNT},
+    weapon::style::{action::Attack, particle, remote::PLAYER_COUNT},
 };
 
 const SPRINT_SLASH_FINISH_HIT: u16 = 221;
@@ -76,7 +76,7 @@ pub unsafe fn strike(actor: u32, state: u8, id: u16, frame: f32, late: f32, defl
         };
         let hitstop = attacker_hitstop(row.source_hitstop);
         if shield {
-            mhgu_sdk::style::action::stun::submit_with_hitstop(actor, &attack, row.stun, hitstop);
+            mhgu_sdk::weapon::style::action::stun::submit_with_hitstop(actor, &attack, row.stun, hitstop);
         } else {
             attack.submit_with_hitstop(actor, hitstop);
         }

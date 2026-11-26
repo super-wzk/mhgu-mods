@@ -1,6 +1,6 @@
 use crate::{battle, native, program, read, write};
 use mhfz_sdk::sync::Shared;
-use mhgu_sdk::style::hud::GaugePlate;
+use mhgu_sdk::weapon::style::hud::GaugePlate;
 
 const BASE: u32 = 0x4000_0400;
 const fn plate(id: u32) -> GaugePlate {

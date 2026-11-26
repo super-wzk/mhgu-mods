@@ -5,7 +5,7 @@ use mhfz_sdk::{
     sync::Shared,
     trail::{self, Blade, Sample},
 };
-use mhgu_sdk::style::{action::melee, particle, remote::PLAYER_COUNT};
+use mhgu_sdk::weapon::style::{action::melee, particle, remote::PLAYER_COUNT};
 
 const SPAN: f32 = f32::from_le_bytes(*include_bytes!("../target/assets/effects/trail_span.bin"));
 static VERSION: AtomicU32 = AtomicU32::new(0);

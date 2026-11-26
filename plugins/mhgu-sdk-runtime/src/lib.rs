@@ -4,7 +4,7 @@ extern crate alloc;
 mod save;
 
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
-mod style;
+mod weapon;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 mod world_contact;
 
@@ -12,16 +12,16 @@ mod world_contact;
 // Forge 1.5 generates a safe extern handler that dereferences its ABI argument.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 mod entry {
-    use super::{save, style, world_contact};
+    use super::{save, weapon, world_contact};
 
     #[forge::entry]
     fn start() {
         let base = forge::mem::text_addr();
-        style::install(base);
+        weapon::install(base);
         save::install(base);
         world_contact::install(base);
         unsafe {
-            mhgu_sdk::style::registry::finish_startup();
+            mhgu_sdk::weapon::style::registry::finish_startup();
         }
     }
 }

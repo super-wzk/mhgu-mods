@@ -1,7 +1,7 @@
 //! Frontier action event and buffered branch records in authored motion frames.
 
 use core::ops::RangeInclusive;
-use mhgu_sdk::style::action::MotionFrame;
+use mhgu_sdk::weapon::style::action::MotionFrame;
 
 const fn half(data: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([data[at], data[at + 1]])

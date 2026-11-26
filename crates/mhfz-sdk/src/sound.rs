@@ -1,5 +1,5 @@
 //! Trigger cues from the converted Frontier sound timeline.
-use mhgu_sdk::style::sound::{Bank, random_u32};
+use mhgu_sdk::weapon::style::sound::{Bank, random_u32};
 
 #[derive(Clone, Copy, Default)]
 pub struct Clock {

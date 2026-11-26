@@ -1,7 +1,7 @@
 //! Play the action accepted from netPlAction. The sender selects all branches.
 use super::*;
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
-use mhgu_sdk::style::remote::{self, PeerStates, Roster};
+use mhgu_sdk::weapon::style::remote::{self, PeerStates, Roster};
 
 static PEERS: PeerStates<Battle> = PeerStates::new();
 static LEVEL: AtomicU32 = AtomicU32::new(0);

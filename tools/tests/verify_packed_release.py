@@ -1,18 +1,19 @@
 """Check packed ARC directory ordering, shared references and runtime mounting."""
 from collections import Counter
 from pathlib import Path
+import argparse
 import struct
 import sys
 import zlib
 
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
-from package_weapon_styles import KINDS, PLUGINS, RELEASE_DIR, REPO, WEAPONS
+from package_weapon_styles import KINDS, MAGNET_SPIKE, PLUGINS, RELEASE_DIR, REPO, WEAPONS
 
 sys.path.insert(0, str(PLUGINS / "great-sword-extreme/tests"))
 sys.path.insert(0, str(PLUGINS / "mhgu-sdk-runtime/tests"))
 from gu_replay import SDK_NRO
-from verify_style import boot
+from verify_style import MANAGER, boot
 
 def assets(path):
     b = path.read_bytes()
@@ -48,13 +49,30 @@ def sound_refs(data):
     assert at == len(data)
 
 
-def verify_payloads(release):
+def verify_payloads(release, *, include_magnet_spike=False):
     path = "romfs/nativeNX/arc/frontier"
     sdk = release / "mhgu-sdk"
     assert (sdk / "romfs/nativeNX/plugins/mhgu-sdk.nro").read_bytes() == SDK_NRO.read_bytes()
     common = assets(sdk / path / "common.arc")
     used = Counter()
-    assert len([f for f in release.rglob("*") if f.is_file()]) == 14
+    expected_files = 14 + 3 * int(include_magnet_spike)
+    assert len([f for f in release.rglob("*") if f.is_file()]) == expected_files
+    if include_magnet_spike:
+        relative = Path(MAGNET_SPIKE) / "romfs/nativeNX/plugins/magnet_spike.nro"
+        assert (release / relative).read_bytes() == (
+            PLUGINS / MAGNET_SPIKE / "dist" / relative
+        ).read_bytes()
+        arc = Path(MAGNET_SPIKE) / path / "magnet_spike.arc"
+        assert (release / arc).read_bytes() == (PLUGINS / MAGNET_SPIKE / "dist" / arc).read_bytes()
+        icon = Path(MAGNET_SPIKE) / "romfs/nativeNX/GUI/frontier_magnet_spike/icon.tex"
+        assert (release / icon).read_bytes() == (PLUGINS / MAGNET_SPIKE / "dist" / icon).read_bytes()
+        resources = assets(release / arc)
+        model = r"weapon\frontier\magnet_spike\wk451"
+        mesh = resources[model, KINDS[".mod"]]
+        assert mesh[:5] == b"MOD\0\xd4" and all(struct.unpack_from("<3H", mesh, 6))
+        refs = material_refs(resources[model, KINDS[".mrl"]])
+        assert len(refs) == 2 and all((ref, KINDS[".tex"]) in resources for ref in refs)
+        assert list(resources)[-2:] == [(model, KINDS[".mrl"]), (model, KINDS[".mod"])]
     for name, tag in WEAPONS.items():
         package = f"{name}-extreme"
         nx = PLUGINS / package / "dist" / package / "romfs/nativeNX"
@@ -94,7 +112,7 @@ def verify_payloads(release):
             available[name, kind] = data
         assert private.keys() | resolved == source.keys(), (tag, source.keys() - (private.keys() | resolved))
     assert used.keys() == common.keys()
-    print(f"14 installed files, {len(common)} common resources, all original payloads accounted for")
+    print(f"{expected_files} installed files, {len(common)} common resources, all original payloads accounted for")
 
 
 def verify_hooks():
@@ -154,12 +172,20 @@ def verify_hooks():
     print("GU registry NRO mounts common before the requested weapon, once per archive")
 
 
-def verify_native_directory(release):
+def verify_native_directory(release, *, include_magnet_spike=False):
     # Run GU's actual rArchive parser for both the common bundle and the
     # largest private bundle. The child-loading callback substitutes resource
     # creation and GPU/audio services, retaining the native directory order.
     elf = (REPO / "mhgu/main.elf").read_bytes()
     g = boot(elf, None, ("registry",))
+    bundles = [("mhgu-sdk", "common"), ("switch-axe-extreme", "sa")]
+    if include_magnet_spike:
+        bundles.append((MAGNET_SPIKE, "magnet_spike"))
+        # Register the actual equipment archive so the runtime selects sequential loading.
+        nro = release / MAGNET_SPIKE / "romfs/nativeNX/plugins/magnet_spike.nro"
+        plugin = g.load(nro, 0x9200000)
+        for callback in ("forge_onLoad", "forge_onInit"):
+            g.run(plugin[callback], MANAGER)
     heap, heap_vt = g.alloc(4), g.alloc(56)
     g.put(heap, heap_vt)
     g.put(0x18A6308, heap)
@@ -190,7 +216,7 @@ def verify_native_directory(release):
     g.put(manager_vt + 52, child_fn)
     g.stub(child_fn, child)
 
-    for directory, tag in (("mhgu-sdk", "common"), ("switch-axe-extreme", "sa")):
+    for directory, tag in bundles:
         path = release / directory / "romfs/nativeNX/arc/frontier" / f"{tag}.arc"
         blob = path.read_bytes()
         expected = list(assets(path))
@@ -214,10 +240,13 @@ def verify_native_directory(release):
             g.stub(fnptr, fn)
         assert g.run(g.hooks[PARSE], archive, stream) == 1
         assert observed == expected and g.get(archive + 104) == len(expected)
-    print("Native rArchive parser consumed the common and Switch Axe directories in order")
+    print("Native rArchive parser consumed in dependency order:", ", ".join(tag for _, tag in bundles))
 
 
 if __name__ == "__main__":
-    verify_payloads(RELEASE_DIR)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--include-magnet-spike", action="store_true")
+    args = parser.parse_args()
+    verify_payloads(RELEASE_DIR, include_magnet_spike=args.include_magnet_spike)
     verify_hooks()
-    verify_native_directory(RELEASE_DIR)
+    verify_native_directory(RELEASE_DIR, include_magnet_spike=args.include_magnet_spike)

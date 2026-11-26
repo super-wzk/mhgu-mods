@@ -1,6 +1,6 @@
 //! Frontier's release gauge and four blade-polish marks on GU's twin-sword HUD.
 use crate::{battle, local_actor, native, program, read, write};
-use mhgu_sdk::style::hud::GaugePlate;
+use mhgu_sdk::weapon::style::hud::GaugePlate;
 static PLATE: GaugePlate = GaugePlate::new(
     0x4000_0002,
     c"GUI\\frontier_db\\gauge",

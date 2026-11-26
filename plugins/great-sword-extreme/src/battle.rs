@@ -16,7 +16,7 @@ use mhfz_sdk::{
     sound::Clock,
     sprint::{self, Flick},
 };
-use mhgu_sdk::style::{
+use mhgu_sdk::weapon::style::{
     ActionRequest, Input, NATIVE_ACTION, PASS, action,
     action::{
         MotionFrame,
@@ -172,9 +172,9 @@ pub(super) unsafe fn local(p: u32) -> bool {
         if p == 0 || read::<u32>(p, 0) != forge::mem::text_addr() + 0x1749a88 {
             return false;
         }
-        mhgu_sdk::style::hunter::local() == Some(p)
-            && mhgu_sdk::style::hunter::equipped_weapon(p) == Some(0)
-            && mhgu_sdk::style::selected(0) == Some(crate::STYLE_ID)
+        mhgu_sdk::weapon::style::hunter::local() == Some(p)
+            && mhgu_sdk::weapon::style::hunter::equipped_weapon(p) == Some(0)
+            && mhgu_sdk::weapon::style::selected(0) == Some(crate::STYLE_ID)
     }
 }
 mod peer;

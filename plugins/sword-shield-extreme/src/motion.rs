@@ -1,7 +1,7 @@
 use crate::{program::JUMP_SLASH, read, write};
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use mhfz_sdk::motion::{DrawnRoll, MotionBanks, sprint_sheathe};
-use mhgu_sdk::style::{PASS, action};
+use mhgu_sdk::weapon::style::{PASS, action};
 
 static BANKS: MotionBanks = MotionBanks::new([
     c"player\\mot\\frontier_sns\\0",
@@ -23,7 +23,7 @@ pub(super) unsafe fn source_clip(actor: u32, packed: u16) -> Option<u16> {
 }
 
 const SPRINT_SHEATHE: u16 = 1450;
-pub(super) static SHEATHE_MOTIONS: mhgu_sdk::style::remote::Sheathe =
+pub(super) static SHEATHE_MOTIONS: mhgu_sdk::weapon::style::remote::Sheathe =
     mhfz_sdk::motion::sheathe_motions(&[crate::program::SPRINT], SPRINT_SHEATHE);
 
 const PRIVATE: u32 = 0x1_0000;

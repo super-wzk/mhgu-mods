@@ -1,6 +1,6 @@
 //! Long-sword state and persistent contacts for each receiving hunter.
 use crate::battle::Battle;
-use mhgu_sdk::style::{
+use mhgu_sdk::weapon::style::{
     action, hunter,
     remote::{PLAYER_COUNT, PeerStates, Playback, Roster},
 };

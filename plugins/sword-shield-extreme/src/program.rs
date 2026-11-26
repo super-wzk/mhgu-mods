@@ -1,6 +1,6 @@
 //! Paired motion steps, buffered branches and melee events from the w04 tables.
 use mhfz_sdk::action::{BranchRules, Cursor, Step};
-use mhgu_sdk::style::action::Actions;
+use mhgu_sdk::weapon::style::action::Actions;
 
 const DATA: &[u8] = include_bytes!("../target/assets/sword_shield.fsns");
 const STATES: u8 = 53;

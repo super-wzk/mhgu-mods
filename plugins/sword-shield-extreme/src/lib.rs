@@ -53,7 +53,7 @@ unsafe fn write<T>(address: u32, offset: u32, value: T) {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 mod entry {
     use super::*;
-    use mhgu_sdk::style::{Style, StyleRegistry, preload, remote, rules, world_contact};
+    use mhgu_sdk::weapon::style::{Style, StyleRegistry, preload, remote, rules, world_contact};
     static RULES: rules::Rules = rules::Rules {
         deflection: Some(mhfz_sdk::combat::deflection),
         ground_motion: Some(finish_ground),
@@ -81,7 +81,7 @@ mod entry {
     };
     #[forge::entry]
     fn main() {
-        mhgu_sdk::style::registry::when_ready(install_style);
+        mhgu_sdk::weapon::style::registry::when_ready(install_style);
     }
 
     extern "C" fn install_style() {
@@ -100,7 +100,7 @@ mod entry {
             forge::log::prelude::warn!("Extreme SnS registration failed: {err:?}");
             return;
         }
-        mhgu_sdk::style::manual::bind(STYLE_ID, include_str!("manual.txt"));
+        mhgu_sdk::weapon::style::manual::bind(STYLE_ID, include_str!("manual.txt"));
         unsafe { remote::bind_sheathe(STYLE_ID, &motion::SHEATHE_MOTIONS) };
         rules::bind(STYLE_ID, &RULES);
         if !unsafe { remote::bind_playback(STYLE_ID, &battle::PLAYBACK) } {

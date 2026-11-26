@@ -6,22 +6,22 @@
 
 | 主题 | 当前实现 | 修改时核对 |
 | --- | --- | --- |
-| 风格选择与原版隔离 | SDK JSON 按角色槽保存各武器当前风格和装备组合中的风格。缺少自定义记录时沿用 GU 原版风格。注册器只对本地任务猎人启用当前风格的武器控制、命令、预加载及状态发送。退出控制器时传空输入，旧猎人已失效时再将 actor 置零。 | 验证同武器切回原版的装备箱、狩技、HUD 与攻击，也验证任务 → 集会所 → 任务。集会所角色共享 `282DA8` 派发入口。见[注册器运行时](../plugins/mhgu-sdk-runtime/src/style/mod.rs)。 |
+| 风格选择与原版隔离 | SDK JSON 按角色槽保存各武器当前风格和装备组合中的风格。缺少自定义记录时沿用 GU 原版风格。注册器只对本地任务猎人启用当前风格的武器控制、命令、预加载及状态发送。退出控制器时传空输入，旧猎人已失效时再将 actor 置零。 | 验证同武器切回原版的装备箱、狩技、HUD 与攻击，也验证任务 → 集会所 → 任务。集会所角色共享 `282DA8` 派发入口。见[注册器运行时](../plugins/mhgu-sdk-runtime/src/weapon/style/mod.rs)。 |
 | 游戏内手册 | 六个武器插件在风格注册后各自绑定 `src/manual.txt`，猎人笔记与暂停菜单共用同一份内容。 | 核对两个入口的显示、翻页和返回，用成品 NRO 跑[共用武器验收](../plugins/mhgu-sdk-runtime/tests/verify_weapon_styles.py)。 |
-| 肩键、踢键与组合键 | 附加肩键用 GU `65FA04` 解析，默认 ZR，交换布局后跟随 GU。奔跑时从原生过滤前的按键恢复附加肩键。聊天钩子只暂时屏蔽 UI 的快捷键按下位，手动菜单和触屏仍可打开聊天。收刀踢击走 GU，持刀时按各风格的特殊攻击键派生。 | 用默认和交换布局分别检查站定、普通奔跑、背对怪物逃跑冲刺及滞空。组合键要试同时按下、先按 X／A 再补另一键，以及 R 与 X+A 重叠。见[输入接口](../crates/mhgu-sdk/src/style/input.rs)和[聊天钩子](../plugins/mhgu-sdk-runtime/src/style/chat.rs)。 |
-| 预输入与转向 | GU 命令表负责固定窗口，FZ 动作游标负责武器动态派生。预输入、可执行帧与关闭帧独立，接招后写入当前与目标朝向。斩斧在 GU 已判定摇杆有方向时使用实时镜头方位，允许缓冲转向的招式可在回中后沿用排队期间的最后有效方向。 | 核对 GU 先选中的表号、目标动作组与槽、风格排队动作及执行帧。方向同时记录当时镜头、摇杆和猎人朝向，连测推住、转相机、回中和重新推杆。见[命令表钩子](../plugins/mhgu-sdk-runtime/src/style/commands.rs)和[移动接口](../crates/mhgu-sdk/src/style/movement.rs)。 |
+| 肩键、踢键与组合键 | 附加肩键用 GU `65FA04` 解析，默认 ZR，交换布局后跟随 GU。奔跑时从原生过滤前的按键恢复附加肩键。聊天钩子只暂时屏蔽 UI 的快捷键按下位，手动菜单和触屏仍可打开聊天。收刀踢击走 GU，持刀时按各风格的特殊攻击键派生。 | 用默认和交换布局分别检查站定、普通奔跑、背对怪物逃跑冲刺及滞空。组合键要试同时按下、先按 X／A 再补另一键，以及 R 与 X+A 重叠。见[输入接口](../crates/mhgu-sdk/src/weapon/style/input.rs)和[聊天钩子](../plugins/mhgu-sdk-runtime/src/weapon/style/chat.rs)。 |
+| 预输入与转向 | GU 命令表负责固定窗口，FZ 动作游标负责武器动态派生。预输入、可执行帧与关闭帧独立，接招后写入当前与目标朝向。斩斧在 GU 已判定摇杆有方向时使用实时镜头方位，允许缓冲转向的招式可在回中后沿用排队期间的最后有效方向。 | 核对 GU 先选中的表号、目标动作组与槽、风格排队动作及执行帧。方向同时记录当时镜头、摇杆和猎人朝向，连测推住、转相机、回中和重新推杆。见[命令表钩子](../plugins/mhgu-sdk-runtime/src/weapon/style/commands.rs)和[移动接口](../crates/mhgu-sdk/src/weapon/style/movement.rs)。 |
 | 持刀冲刺的狩技 | 大剑、双剑、太刀、片手和铳枪在普通持刀冲刺时可发动已就绪的 GU 狩技。大剑和铳枪的刹停同样开放狩技，斩斧的斧与光剑冲刺按 w12 状态 103／148 的窗口从第 46 帧开放。 | 核对三个狩技槽、冲刺和刹停各自的切招，以及没有狩技指令时的移动。见[大剑回放](../plugins/great-sword-extreme/tests/verify_style.py)和[铳枪回放](../plugins/gunlance-extreme/tests/verify_port.py)。 |
-| 防御和回避技能 | `mhfz-sdk` 给 FZ 防御窗口应用 GU 防御性能档位，+1／+2 分别延长 2／4 个 GU 时钟单位。可受回避性能加成的动作事件加 6／10 个单位。注册器保留 GU 的攻击排除与防御强化条件，风格通过 `StyleRulesV1` 声明补判半角。 | 窗口、正背面、技能资格、成功后的无敌计时和防御斩味消耗分别测。FZ 专属装备效果与特殊攻击类型按当前适配范围处理，例如太刀事件 18 的 FZ 专属装备加成没有接入。见[技能帧数](../crates/mhfz-sdk/src/combat.rs)和[GU 格挡转接](../plugins/mhgu-sdk-runtime/src/style/guard.rs)。 |
-| 弹刀与命中停顿 | 注册器按猎人、动作和刀身接触序号监听命中。`mhfz-sdk` 提供 FZ 肉质边界，GU 先应用斩味和相关原生豁免，风格再选反弹动作及特殊招式的豁免。六种极型按各自打击行的 FZ 30 Hz 停顿换算攻击者系数，GU 根据命中结果应用原生全停或减速。全停每系数 3 个 GU 帧，按最接近源时长的整数系数取值。独立追击与瓶爆等已有零停顿的判定继续为零。 | 测首次硬部位接触、同招后续接触、左右刀身、豁免招式和被打断。检查全停与减速两个原生计时器。见[弹刀钩子](../plugins/mhgu-sdk-runtime/src/style/deflection.rs)和[刀身接口](../crates/mhgu-sdk/src/style/action/melee.rs)。 |
+| 防御和回避技能 | `mhfz-sdk` 给 FZ 防御窗口应用 GU 防御性能档位，+1／+2 分别延长 2／4 个 GU 时钟单位。可受回避性能加成的动作事件加 6／10 个单位。注册器保留 GU 的攻击排除与防御强化条件，风格通过 `StyleRulesV1` 声明补判半角。 | 窗口、正背面、技能资格、成功后的无敌计时和防御斩味消耗分别测。FZ 专属装备效果与特殊攻击类型按当前适配范围处理，例如太刀事件 18 的 FZ 专属装备加成没有接入。见[技能帧数](../crates/mhfz-sdk/src/combat.rs)和[GU 格挡转接](../plugins/mhgu-sdk-runtime/src/weapon/style/guard.rs)。 |
+| 弹刀与命中停顿 | 注册器按猎人、动作和刀身接触序号监听命中。`mhfz-sdk` 提供 FZ 肉质边界，GU 先应用斩味和相关原生豁免，风格再选反弹动作及特殊招式的豁免。六种极型按各自打击行的 FZ 30 Hz 停顿换算攻击者系数，GU 根据命中结果应用原生全停或减速。全停每系数 3 个 GU 帧，按最接近源时长的整数系数取值。独立追击与瓶爆等已有零停顿的判定继续为零。 | 测首次硬部位接触、同招后续接触、左右刀身、豁免招式和被打断。检查全停与减速两个原生计时器。见[弹刀钩子](../plugins/mhgu-sdk-runtime/src/weapon/style/deflection.rs)和[刀身接口](../crates/mhgu-sdk/src/weapon/style/action/melee.rs)。 |
 | 资源预加载 | 在 GU `29B7D4` 后调用本地当前风格的回调，发布包在首次私有资源请求时加载通用及对应武器 ARC，再缓存男女模型共用的三组 LMT，再按需缓存音库、PEL、私有 HTS 和 HUD。首次播放才绑定动作库。 | 记录准备与首次播放两阶段的加载路径，对照男女共用缓存、差异片段选择、已占用的原生 bank、重复初始化、未选风格和远端角色。见[共用武器验收](../plugins/mhgu-sdk-runtime/tests/verify_weapon_styles.py)。 |
-| 联机动作与资源 | 六把武器通过 `remote::bind_playback` 登记回放。注册器通过 GU `netPlAction` 同步武器动作，接收端按发送者的装备和名册槽播放。大剑同步蓄力档位及精防成功标记，双剑同步鬼人阶段和满火位，斩斧同步亮瓶位和放出档位，片手同步刃药标记，铳枪同步动作起手时的弹数。太刀根据接收的动作槽和片段回放，刀身、瞬斩、冲击波和追击分别保留命中归属。 | 房主装备其他武器、两个队员同时行动、换装、换人和换区都要覆盖。额外状态仅在注册器核对过的武器上使用原生包可用位。离线覆盖动作包、回放和伤害归属，双机任务另行验证。见[远端接口](../crates/mhgu-sdk/src/style/remote.rs)和[动作包钩子](../plugins/mhgu-sdk-runtime/src/style/multiplayer.rs)。 |
+| 联机动作与资源 | 六把武器通过 `remote::bind_playback` 登记回放。注册器通过 GU `netPlAction` 同步武器动作，接收端按发送者的装备和名册槽播放。大剑同步蓄力档位及精防成功标记，双剑同步鬼人阶段和满火位，斩斧同步亮瓶位和放出档位，片手同步刃药标记，铳枪同步动作起手时的弹数。太刀根据接收的动作槽和片段回放，刀身、瞬斩、冲击波和追击分别保留命中归属。 | 房主装备其他武器、两个队员同时行动、换装、换人和换区都要覆盖。额外状态仅在注册器核对过的武器上使用原生包可用位。离线覆盖动作包、回放和伤害归属，双机任务另行验证。见[远端接口](../crates/mhgu-sdk/src/weapon/style/remote.rs)和[动作包钩子](../plugins/mhgu-sdk-runtime/src/weapon/style/multiplayer.rs)。 |
 
 ## 动作特效与材质
 
 - 动作事件用 `MotionClock` 在混合结束后扫描 `[当前姿势帧, 下一播放帧)`，按源记录顺序发射。检查非零起播帧、半速播放、停顿、回绕及同一姿势重复取样。蓄力、耐力等逻辑计时另按其实际经过量更新。见[动作特效游标](../crates/mhfz-sdk/src/effects.rs)。
 - 转换器按 FZ 局部 X、Y、Z 顺序生成可旋转的模型粒子。世界粒子用 `world_pose_angles` 将取样姿势拆成 GU 所需的角度，随武器移动的效果启用 PEL 的关节旋转。测试时至少对比两个猎人朝向，分别看发射位置、刀身是否移动、角度是否跟随和当前关节是否可用。见[斩斧挥斩和挂点](../plugins/switch-axe-extreme/src/fx.rs)和[双剑刀光](../plugins/dual-blades-extreme/src/fx.rs)。
-- 亮度按粒子层核对颜色、源 Alpha、MRL 技法、混合及叠加次数。大剑蓄力和升段闪光的 m66 层使用 t3 图集的原始 Alpha 和源 Alpha 加法混合。`mhfz-sdk` 的场景深度淡化在支持的粒子层使用两次 GU 原生深度测试近似 FZ 淡化。检查淡化时也要逐层对比颜色和混合。注册器在模型粒子绘制结束时恢复 GU 绘制状态。见[大剑材质回放](../plugins/great-sword-extreme/tests/verify_native_material.py)、[FZ 模型适配](../crates/mhfz-sdk/src/effects/model.rs)和[GU 绘制转接](../plugins/mhgu-sdk-runtime/src/style/effect.rs)。
-- 持续效果按动作和猎人槽跟踪，取样型世界效果保留发射时姿势。收刀、受击、换区和名册更换时分别核对退出回调。粒子由 GU 先释放时，通过释放回调移除保存的句柄。见[粒子接口](../crates/mhgu-sdk/src/style/particle.rs)。
+- 亮度按粒子层核对颜色、源 Alpha、MRL 技法、混合及叠加次数。大剑蓄力和升段闪光的 m66 层使用 t3 图集的原始 Alpha 和源 Alpha 加法混合。`mhfz-sdk` 的场景深度淡化在支持的粒子层使用两次 GU 原生深度测试近似 FZ 淡化。检查淡化时也要逐层对比颜色和混合。注册器在模型粒子绘制结束时恢复 GU 绘制状态。见[大剑材质回放](../plugins/great-sword-extreme/tests/verify_native_material.py)、[FZ 模型适配](../crates/mhfz-sdk/src/effects/model.rs)和[GU 绘制转接](../plugins/mhgu-sdk-runtime/src/weapon/style/effect.rs)。
+- 持续效果按动作和猎人槽跟踪，取样型世界效果保留发射时姿势。收刀、受击、换区和名册更换时分别核对退出回调。粒子由 GU 先释放时，通过释放回调移除保存的句柄。见[粒子接口](../crates/mhgu-sdk/src/weapon/style/particle.rs)。
 
 ## 冲刺收刀与受身
 
@@ -39,7 +39,7 @@ FZ `817E9CB4`／`817EAA30` 分别派发两个受身方向。GU `64:6/7` 落地�
 | 终结纵斩 | FZ `811D5188` 直接执行 w00 状态 40／43／44。三者分别用 1451／1453／1452 起手，再播 1454。地面派生在片段 1428 从第 68 帧收点按 X，第 80 帧执行，第 102 帧关闭。GU `11630E0` 跳劈的空中 X 保留 12 个 GU 时钟单位，落地片段 5135 中第 54 帧起执行，第 158 帧关闭。出招时按实时相机方向读取摇杆。回中时沿当前朝向出刀，小角度直接修正朝向，达到 45° 时使用原版侧向转身派生。见[终结纵斩回放](../plugins/great-sword-extreme/tests/verify_style.py)。 |
 | 精准防御与辉烈剑 | 大剑精防在低耐力时仍可按 GU 可防性挡下攻击。防御动作第 56 帧起可滚，成功后 X 接下劈、A 接横扫。三次怪物格挡可发动辉烈剑，首波从挥剑片段第 84 帧产生，连续 17 波，各自固定发射位置，攻击者停顿为零。见[大剑说明](../plugins/great-sword-extreme/README.md)和[资源回放](../plugins/great-sword-extreme/tests/verify_assets.py)。 |
 | 精防位移阻挡 | 成功后的保护窗口裁剪地面怪物正面推进。核对正撞与擦边、侧向脱开、防御接反击和时间到期。负责怪物位移的一端也处理队友的有效精防，并沿用 GU 怪物位置同步。见[阻挡实现](../plugins/great-sword-extreme/src/guard_body.rs)和[联机回放](../plugins/mhgu-sdk-runtime/tests/verify_gs_db_multiplayer.py)。 |
-| 原生狩技与联机 | 下一击强化在 GU 首次有效大剑攻击构造时消费。队员蓄力按各自收到的动作及档位结算，独立光波继续检查所属猎人。见[武器原生接入](../plugins/mhgu-sdk-runtime/src/style/weapon.rs)和[联机回放](../plugins/mhgu-sdk-runtime/tests/verify_gs_db_multiplayer.py)。 |
+| 原生狩技与联机 | 下一击强化在 GU 首次有效大剑攻击构造时消费。队员蓄力按各自收到的动作及档位结算，独立光波继续检查所属猎人。见[武器原生接入](../plugins/mhgu-sdk-runtime/src/weapon/style/routes.rs)和[联机回放](../plugins/mhgu-sdk-runtime/tests/verify_gs_db_multiplayer.py)。 |
 
 ## 双剑
 

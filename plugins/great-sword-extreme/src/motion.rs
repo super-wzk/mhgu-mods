@@ -1,5 +1,5 @@
 use mhfz_sdk::motion::{DrawnRoll, MotionBanks, sprint_sheathe};
-use mhgu_sdk::style::{PASS, movement::relative_stick_yaw};
+use mhgu_sdk::weapon::style::{PASS, movement::relative_stick_yaw};
 
 fn base() -> u32 {
     forge::mem::text_addr()
@@ -17,7 +17,7 @@ macro_rules! call {
 
 // FZ common action 202, weapon row in 825901F4.
 const SPRINT_SHEATHE: u16 = 1032;
-pub(super) static SHEATHE_MOTIONS: mhgu_sdk::style::remote::Sheathe =
+pub(super) static SHEATHE_MOTIONS: mhgu_sdk::weapon::style::remote::Sheathe =
     mhfz_sdk::motion::sheathe_motions(&[crate::battle::DASH], SPRINT_SHEATHE);
 
 static BANKS: MotionBanks = MotionBanks::new([
@@ -158,7 +158,7 @@ pub(super) fn install() {
 
 pub(super) unsafe fn play(player: u32, source: u16, start: u16, blend: u16) -> Option<u16> {
     unsafe {
-        mhgu_sdk::style::action::play_motion(
+        mhgu_sdk::weapon::style::action::play_motion(
             player,
             0x10000 | u32::from(source),
             f32::from(start),

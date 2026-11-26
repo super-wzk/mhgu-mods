@@ -1,7 +1,7 @@
 //! Map paired Frontier motion groups to GU hunter LMT slots.
 use core::ffi::CStr;
-use mhgu_sdk::style::action::MotionBanks as GuMotionBanks;
-use mhgu_sdk::style::{action, remote::Sheathe};
+use mhgu_sdk::weapon::style::action::MotionBanks as GuMotionBanks;
+use mhgu_sdk::weapon::style::{action, remote::Sheathe};
 
 mod drawn_roll;
 pub use drawn_roll::DrawnRoll;

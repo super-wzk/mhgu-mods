@@ -2,7 +2,7 @@
 use super::{Battle, OWNER, with_local};
 use crate::{STYLE_ID, WEAPON_ID, motion, native, program, read, write};
 use core::sync::atomic::Ordering::Relaxed;
-use mhgu_sdk::style::{self, action, movement};
+use mhgu_sdk::weapon::style::{self, action, movement};
 
 const SLASH_GAUGE: u32 = 13100;
 const SLASH_RECOVERY_TIMER: u32 = 13104;

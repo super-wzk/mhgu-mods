@@ -6,7 +6,7 @@ use mhfz_sdk::{
     sync::Shared,
     trail::{self, Blade, Sample},
 };
-use mhgu_sdk::style::{action::melee, particle};
+use mhgu_sdk::weapon::style::{action::melee, particle};
 unsafe fn sample_blade(actor: u32, hand: usize, joint: u8) -> Option<Blade> {
     unsafe {
         let tip_z = melee::equipped_tip(actor, hand, joint)?;

@@ -1,6 +1,6 @@
 //! Received actions replay the w06 program on an independent hunter clock.
 use super::*;
-use mhgu_sdk::style::remote::{self, PeerStates, Roster};
+use mhgu_sdk::weapon::style::remote::{self, PeerStates, Roster};
 
 static PEERS: PeerStates<Battle> = PeerStates::new();
 static DEMON: [AtomicU32; remote::PLAYER_COUNT] =

@@ -12,7 +12,7 @@ use mhfz_sdk::{
     sprint::{self, Flick, Resume},
 };
 use mhgu_sdk::{
-    style::{
+    weapon::style::{
         ActionRequest, Input, NATIVE_ACTION, PASS,
         action::{self, Attack, MotionFrame, command::CommandSet, melee},
         hunter,

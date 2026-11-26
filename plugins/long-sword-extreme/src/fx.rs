@@ -7,7 +7,7 @@ use crate::{
 use mhfz_sdk::effects::{self, MotionEvent};
 use mhgu_sdk::{
     geometry::Angle,
-    style::{
+    weapon::style::{
         action,
         particle::{self, Anchor, Bank, TrackedUnits},
     },
@@ -370,7 +370,7 @@ pub(super) unsafe fn motion_events(
     slot: Slot,
     trail: &mut crate::trail::History,
     clip: u16,
-    sample: mhgu_sdk::style::action::MotionFrame,
+    sample: mhgu_sdk::weapon::style::action::MotionFrame,
 ) {
     const ROWS: &[[u8; 18]] = include_bytes!("../target/assets/effects/motion_fx.bin")
         .as_chunks::<18>()
@@ -514,7 +514,7 @@ pub(super) fn clear_impact() {
 }
 
 pub(super) unsafe fn remember_impact(actor: u32) {
-    if let Some(pos) = unsafe { mhgu_sdk::style::guard::impact_position(actor) } {
+    if let Some(pos) = unsafe { mhgu_sdk::weapon::style::guard::impact_position(actor) } {
         IMPACT.with(|impact| *impact = Some((actor, pos)));
     }
 }

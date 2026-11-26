@@ -8,6 +8,7 @@
 | [crates/mhfz-sdk](../crates/mhfz-sdk/README.md) | 极型武器共用的 Frontier 动作程序、动作库预加载、技能帧数补正、弹刀、镜头震动和表现时序。 |
 | [plugins/mhgu-sdk-runtime](../plugins/mhgu-sdk-runtime/README.md) | 构建共享 Forge 插件 `mhgu-sdk.nro`，提供武器风格注册和角色存档服务，管理 GU 共用钩子和持久化。 |
 | [极之型大剑](../plugins/great-sword-extreme/README.md)、[极之型双剑](../plugins/dual-blades-extreme/README.md)、[极之型太刀](../plugins/long-sword-extreme/README.md)、[极之型斩斧F](../plugins/switch-axe-extreme/README.md)、[极之型单手剑](../plugins/sword-shield-extreme/README.md)、[极之型铳枪](../plugins/gunlance-extreme/README.md) | 各武器的动作编号、派生优先级、精准防御规则、槽、专属狩技及表现资源。 |
+| [极之型磁斩锤交易测试](../plugins/magnet-spike/README.md) | 用 MHF-Z 磁斩锤验证独立装备、模型、购买、制造与存档。 |
 | [tools/mhfz2mhgu](../tools/mhfz2mhgu/README.md) | 宿主资源转换 CLI。`mhf-resource` 读 FZ 格式，`mhgu-resource` 读写 GU 格式，`src/hunter.rs` 等负责具体移植映射。 |
 | [tools/package_weapon_styles.py](../tools/package_weapon_styles.py) | 组装 SDK 和六个武器的安装产物，在仓库根目录生成极之型整合包。 |
 
@@ -67,13 +68,13 @@ python3 tools/package_weapon_styles.py
 
 新增 SDK 接口优先接收值类型或经 SDK 验证的借用句柄，并在 SDK 内完成原生指针读写与调用。碰撞展开等时机敏感的接口可接收模组返回的形状参数，由 SDK 在原生回调内校验并提交。直接挂接原生回调时，原始地址到借用句柄的转换仍须确认对象、线程和生命周期。
 
-运行时通过版本化函数表向内容 NRO 提供服务。模组在 Cargo 中依赖 `crates/mhgu-sdk`，可在各自的 Forge 入口用 `style::registry::when_ready` 登记初始化函数。修改共用接口后，一起重建并安装运行时和使用该接口的插件。
+运行时通过版本化函数表向内容 NRO 提供服务。模组在 Cargo 中依赖 `crates/mhgu-sdk`，可在各自的 Forge 入口用 `weapon::style::registry::when_ready` 登记风格初始化函数，自定义武器用 `weapon::registry::when_ready`。修改共用接口后，一起重建并安装运行时和使用该接口的插件。
 
 ## 安装和确认
 
 启用 Forge 后，把 `dist/weapon-styles/` 下的 `mhgu-sdk/` 和所需武器目录分别装入 MHGURecomp 的模组目录，保留完整的 `romfs/nativeNX` 层级。使用开发散文件版时，可以使用 `plugins/mhgu-sdk-runtime/dist/mhgu-sdk/`。同一游戏只需一份 SDK，武器可在 SDK 前后加载。升级时移除旧的 `style-registry`，保留原有存档。共用钩子或资源布局变化时，整目录更新 SDK 和关联内容模组，保证 NRO、`common.arc` 和武器 ARC 来自同一包。仅修改代码且资源匹配时可以只更新对应的 NRO。
 
-完整极之型合包包含 SDK 和当前六个武器模组目录。归档前核对每个目录的 NRO 和配套资源。已有合包的命名格式为 `mhgu边境风格-YYYYMMDDHHMM.7z`。
+完整极之型合包包含 SDK 和当前六个武器模组目录。验证磁斩锤时，先用 `python3 plugins/magnet-spike/package.py "$MHFZ_DAT" "$MHGU_ROMFS"` 构建，再用 `python3 tools/package_weapon_styles.py --include-magnet-spike` 组装含磁斩锤 NRO、模型 ARC 和专用图标 TEX 的整合包（17 个文件）。打包回归 `tools/tests/verify_packed_release.py` 同样传入 `--include-magnet-spike`。归档前核对每个目录的 NRO 和配套资源。已有合包的命名格式为 `mhgu边境风格-YYYYMMDDHHMM.7z`。
 
 重启游戏后，在原版装备箱按当前武器选风格。风格和装备组合随 GU 角色存档写入 [SDK 的 A/B JSON](../plugins/mhgu-sdk-runtime/README.md#角色存档)。升级后可在装备箱重新选择并保存游戏。查错误时依次确认 **安装包的 NRO 和资源、Forge 初始化和钩子日志、装备箱选择、任务内执行路径**。看到模组被列出或 NRO 被加载，只能确认到了加载阶段。
 
@@ -83,7 +84,8 @@ python3 tools/package_weapon_styles.py
 | --- | --- |
 | 单个速度、距离或计时参数 | 构建受影响的插件。需要安装时对照安装文件与本次产物。手感由任务内观察确认。 |
 | 装备箱选择、肩键与 GU 命令优先级 | [装备箱与保存](../plugins/great-sword-extreme/tests/verify_menu.py)、[聊天快捷键与肩键交换](../plugins/mhgu-sdk-runtime/tests/verify_chat_shortcut.py)、[大剑输入及动作生命周期](../plugins/great-sword-extreme/tests/verify_style.py)。 |
-| 个人和队友状态、装备组合风格名称 | [状态与装备资料回放](../plugins/great-sword-extreme/tests/verify_menu.py)覆盖 GU 状态页面、装备资料的广播与单播、队友换风格和槽位复用。实机用同版本 SDK 的两台客户端在集会所和任务中互查状态，切回原版后再检查一次。 |
+| 个人和队友状态、装备组合风格名称、自定义武器 | [状态与装备资料回放](../plugins/great-sword-extreme/tests/verify_menu.py)覆盖 GU 状态页面、装备资料收发、队友槽位复用、扩展装备箱原版控制器的打开、翻页、排序确认、换装、原版装备数据完整性、组合应用、存档重载和缺少武器插件时的回退。实机用同版本 SDK 的两台客户端在集会所和任务中互查状态，切回原版后再检查一次。 |
+| 扩展武器购买、制造和强化 | [交易与存档回放](../plugins/great-sword-extreme/tests/verify_trade.py)覆盖原版工房与商店入口、翻页、原版成功音效和立即装备分支、配方、余额、道具袋和道具箱扣除、实例强化、库存满与存档中断恢复。实机用已登记交易的内容插件检查原版工房与商店的列表布局、确认、取消和重进角色。 |
 | 冲刺收刀和击飞受身 | [公共动作回放](../plugins/mhgu-sdk-runtime/tests/verify_ground_recovery.py)核对冲刺、刹停和普通收刀选片、GU 的收刀退出，以及双剑、斩斧和铳枪的前后受身。[收刀联机回放](../plugins/mhgu-sdk-runtime/tests/verify_sheathe_multiplayer.py)使用 `MHGU_ROMFS` 验证队友跳过冲刺或刹停时的选片。 |
 | 攻击、防御、狩技和武器专属派生 | [大剑精防、蓄力与派生](../plugins/great-sword-extreme/tests/verify_style.py)、[大剑与双剑弹刀、刃打和双手刀光](../plugins/mhgu-sdk-runtime/tests/verify_deflection.py)、[专属狩技](../plugins/mhgu-sdk-runtime/tests/verify_weapon_arts.py)、[太刀](../plugins/long-sword-extreme/tests/verify_port.py)、[斩斧](../plugins/switch-axe-extreme/tests/verify_port.py)、[单手剑](../plugins/sword-shield-extreme/tests/verify_port.py)及[铳枪](../plugins/gunlance-extreme/tests/verify_port.py)的动作回放。 |
 | 动作、音效、特效与材质 | 对照输出槽位、事件帧、挂点或材质字段。参考[资源检查](../plugins/great-sword-extreme/tests/verify_assets.py)、[原生粒子](../plugins/great-sword-extreme/tests/verify_native_fx.py)和[材质绘制](../plugins/great-sword-extreme/tests/verify_native_material.py)。 |

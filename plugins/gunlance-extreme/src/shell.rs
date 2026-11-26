@@ -1,6 +1,6 @@
 //! Use GU's equipped shell receiver, effects and delayed native hit requests.
 use crate::{native, program, read, write};
-use mhgu_sdk::style::{action, hunter};
+use mhgu_sdk::weapon::style::{action, hunter};
 
 const AMMO: u32 = 11138;
 const MAX_AMMO: u32 = 11140;

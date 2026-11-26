@@ -12,6 +12,6 @@ pub mod motion;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 #[doc(hidden)]
 pub mod service;
-pub mod style;
+pub mod weapon;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub mod sync;

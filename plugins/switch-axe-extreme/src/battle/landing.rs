@@ -1,5 +1,5 @@
 use crate::{program::Gauges, read};
-use mhgu_sdk::style::{action, input as pad, movement};
+use mhgu_sdk::weapon::style::{action, input as pad, movement};
 
 const AIR_WINDOW: f32 = 8.;
 const X_BUTTON: u16 = 0x20;

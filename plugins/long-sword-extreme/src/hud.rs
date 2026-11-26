@@ -1,7 +1,7 @@
 //! Frontier's cut and spirit gauges on GU's long-sword widget.
 use crate::{battle, local_actor, native, read, write};
 use mhfz_sdk::sync::Shared;
-use mhgu_sdk::style::hud::{GaugePlate, weapon_children};
+use mhgu_sdk::weapon::style::hud::{GaugePlate, weapon_children};
 
 const ID: u32 = 0x4000_0003;
 const FLIP_Y: u32 = 1 << 22;

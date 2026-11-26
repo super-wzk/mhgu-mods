@@ -1,7 +1,7 @@
 //! Frontier effects played by GU's native particle manager.
 use crate::read;
 use mhfz_sdk::effects::{self, MotionClock};
-use mhgu_sdk::style::{
+use mhgu_sdk::weapon::style::{
     action::MotionFrame,
     particle::{self, Anchor, Bank, TrackedUnits},
 };

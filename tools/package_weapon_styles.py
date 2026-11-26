@@ -1,5 +1,6 @@
 """Assemble the built SDK runtime and weapon overlays as a packed release."""
 
+import argparse
 from collections import defaultdict
 from hashlib import sha256
 from pathlib import Path
@@ -12,6 +13,7 @@ REPO = Path(__file__).resolve().parents[1]
 PLUGINS = REPO / "plugins"
 RELEASE_DIR = REPO / "dist/weapon-styles"
 SDK = "mhgu-sdk"
+MAGNET_SPIKE = "magnet-spike"
 WEAPONS = {
     "great-sword": "gs",
     "dual-blades": "db",
@@ -143,11 +145,16 @@ def write_arc(path, resources):
     path.write_bytes(out)
 
 
-def package():
+def package(*, include_magnet_spike=False):
     weapons = {tag: read_overlay(f"{name}-extreme") for name, tag in WEAPONS.items()}
     runtime, other = read_overlay(SDK)
     if other:
         raise ValueError("Unexpected resources in the SDK development overlay")
+    magnet_root = PLUGINS / MAGNET_SPIKE / "dist" / MAGNET_SPIKE / "romfs/nativeNX"
+    magnet_files = ("plugins/magnet_spike.nro", "arc/frontier/magnet_spike.arc",
+                    "GUI/frontier_magnet_spike/icon.tex")
+    if include_magnet_spike and not all((magnet_root / f).is_file() for f in magnet_files):
+        raise ValueError("Build the Magnet Spike NRO, model ARC and icon TEX before assembling the release")
     common, aliases = common_resources(weapons)
     for _, resources in weapons.values():
         for key, data in resources.items():
@@ -170,6 +177,11 @@ def package():
             (nx / "plugins").mkdir(parents=True)
             shutil.copy2(plugin, nx / "plugins")
             write_arc(nx / "arc/frontier" / f"{tag}.arc", resources)
+        if include_magnet_spike:
+            for relative in magnet_files:
+                dst = release / MAGNET_SPIKE / "romfs/nativeNX" / relative
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(magnet_root / relative, dst)
         previous = Path(staging) / "previous"
         if destination.exists():
             destination.rename(previous)
@@ -183,4 +195,8 @@ def package():
 
 
 if __name__ == "__main__":
-    print(package())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--include-magnet-spike", action="store_true",
+                        help="include the Magnet Spike transaction test plugin")
+    args = parser.parse_args()
+    print(package(include_magnet_spike=args.include_magnet_spike))

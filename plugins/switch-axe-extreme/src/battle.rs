@@ -21,7 +21,7 @@ use mhfz_sdk::{
 };
 use mhgu_sdk::{
     combat::collision::{CachedHitShape, Contact},
-    style::{
+    weapon::style::{
         self, ActionRequest, Input,
         action::{self, Attack, MotionFrame},
         guard, input as pad, movement,
