@@ -94,7 +94,7 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
-    /// Convert the local Frontier Magnet Spike motions and battle tables.
+    /// Convert the local Frontier Magnet Spike motions, sound and battle tables.
     MagnetSpikeBattle {
         dat: PathBuf,
         /// Also include the trial weapon model in magnet_spike.arc.
@@ -316,7 +316,7 @@ fn main() -> Result<()> {
             fs::create_dir_all(&output)?;
             let weapon = hunter::Weapon::MagnetSpike;
             let motions = hunter::motion_assets(&dat, weapon)?;
-            let (archive, assets) = if let Some(template) = material_template {
+            let (archive, mut assets) = if let Some(template) = material_template {
                 let mut appearance = package::weapon_assets(
                     &dat.join("extend/wk000.abn"),
                     "wk451.bin",
@@ -329,7 +329,10 @@ fn main() -> Result<()> {
                 ("motions.arc", motions)
             };
             let program = hunter::actions(&dat, weapon)?;
+            let (sounds, timeline) = sound::magnet_spike(&dat)?;
+            assets.extend(sounds);
             save(&output.join(archive), mhgu_resource::arc::encode(&assets)?)?;
+            save(&output.join("frontier_ms_sound.flse"), timeline)?;
             save(&output.join("magnet_spike.fmsa"), program)
         }
         Command::LongSwordSound { dat, output } => {

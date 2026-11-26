@@ -22,10 +22,10 @@ pub type CameraOffset = unsafe extern "C" fn(actor: u32, elapsed: f32, eye: *con
 
 #[repr(C)]
 pub struct Rules {
-    /// Half-angle in GU binary angle units when the native guard rejects a hit.
-    /// A shared GU guard action uses this fallback only with its guard flag set
-    /// and below the native stamina threshold. The style must accept a precise block.
-    /// Zero leaves the native guard decision in force.
+    /// Half-angle in GU binary angle units for in-place blocks or a fallback
+    /// when GU rejects a precise block. A shared GU guard action uses the
+    /// fallback only with its guard flag set and below the native stamina threshold.
+    /// Zero disables the custom cone.
     pub guard_half_angle: u16,
     pub ground_motion: Option<GroundMotion>,
     pub deflection: Option<DeflectionPolicy>,

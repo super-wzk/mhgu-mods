@@ -2,12 +2,12 @@ use crate::{
     combat,
     flight::Flight,
     magnet::{self, AimedMark, MarkRange},
-    motion, program,
+    motion, program, sound,
 };
-use mhfz_sdk::action::Cursor;
+use mhfz_sdk::{action::Cursor, sound::Clock};
 use mhgu_sdk::{
     sync::Shared,
-    weapon::style::{Input, PASS, action, hunter, input, movement},
+    weapon::style::{Input, PASS, action, guard, hunter, input, movement},
 };
 
 const EVADE: u8 = 0;
@@ -17,7 +17,9 @@ const CHORD: u8 = 4;
 const CHANGE_MODE: u8 = 5;
 const MAGNET_ATTACK: u8 = 9;
 const BOOST: u8 = 11;
+const GUARD: u8 = 13;
 const SHOT: u8 = 19;
+const GUARD_FOLLOW_UP: u8 = 20;
 const REPEL: u8 = 23;
 const ATTRACT: u8 = 24;
 
@@ -25,14 +27,16 @@ fn pressed(commands: u32, key: u8) -> bool {
     commands & (1 << key) != 0
 }
 
-unsafe fn commands(actor: u32, input: &Input) -> u32 {
+unsafe fn commands(actor: u32, input: &Input, guard_pressed: bool) -> u32 {
     unsafe {
         // GU's resolved pad path is shared across weapon kinds. The weapon
         // command bank is produced by the retail fallback weapon's mapper.
         let buttons = input::attack_buttons_pressed(actor);
         let drawn = action::weapon_drawn(actor);
         let auxiliary = drawn && input::auxiliary_shoulder_held(actor);
-        let boost = drawn && !auxiliary && input.command(27) && input.command(8);
+        let shoulder = input.command(27);
+        let special = input.command(8);
+        let boost = drawn && !auxiliary && shoulder && special;
         let shot = auxiliary && buttons & 0x100 != 0;
         let magnet_attack = auxiliary && !shot && buttons & 0x20 != 0;
         let chord = !shot
@@ -44,7 +48,6 @@ unsafe fn commands(actor: u32, input: &Input) -> u32 {
         let a = !shot && !chord && buttons & 0x100 != 0;
         let attract = auxiliary && input.command(3);
         let evade = !auxiliary && input.command(3) && movement::has_evade_stamina(actor, 150.);
-        let special = input.command(8);
         [
             (X, x),
             (A, a),
@@ -52,8 +55,9 @@ unsafe fn commands(actor: u32, input: &Input) -> u32 {
             (SHOT, shot),
             (REPEL, auxiliary && special),
             (ATTRACT, attract),
-            (MAGNET_ATTACK, magnet_attack),
+            (MAGNET_ATTACK, magnet_attack || !drawn && shoulder && x),
             (BOOST, boost),
+            (GUARD, drawn && !auxiliary && !special && guard_pressed),
             (CHANGE_MODE, !auxiliary && !boost && special),
             (EVADE, evade),
         ]
@@ -78,6 +82,10 @@ struct Battle {
     cursor: Option<Cursor>,
     aim: Option<[f32; 3]>,
     flight: Option<Flight>,
+    audio: Clock,
+    guard_held: bool,
+    guard_hits: u8,
+    guard_from_idle: bool,
 }
 
 impl Battle {
@@ -93,7 +101,7 @@ impl Battle {
             unsafe { self.branch(actor, step.clip) };
             return false;
         }
-        if unsafe { motion::play_step(actor, cursor, step) }.is_none() {
+        if unsafe { motion::play_step(actor, cursor, step, &mut self.audio) }.is_none() {
             unsafe { self.finish(actor) };
             return false;
         }
@@ -175,6 +183,8 @@ impl Battle {
             }
             self.mode = self.mode.for_state(id);
             self.aim = None;
+            self.guard_hits = 0;
+            self.guard_from_idle = false;
             motion::set_mode(actor, self.mode);
             self.cursor = Some(program::cursor(id));
             self.play_step(actor);
@@ -189,6 +199,17 @@ impl Battle {
     }
 
     unsafe fn branch(&mut self, actor: u32, target: u16) -> bool {
+        let target = if target == 207 {
+            // FZ 8122570A selects the counter attack row by contact count.
+            match self.guard_hits {
+                0 => return false,
+                1 => 57,
+                2 => 76,
+                _ => 77,
+            }
+        } else {
+            target
+        };
         if matches!(target, 202 | 203) {
             if unsafe { action::transition_to(actor, 1, 6) } {
                 self.cursor = None;
@@ -227,6 +248,22 @@ impl Battle {
     }
 
     unsafe fn advance(&mut self, actor: u32, state: u8, commands: u32) -> bool {
+        let sample = unsafe { action::MotionFrame::sample(actor) };
+        // R also modifies Boost. Resolve a staggered chord during an unused
+        // guard started from idle, just as on a simultaneous press.
+        if self.guard_from_idle
+            && self.guard_hits == 0
+            && pressed(commands, BOOST)
+            && self
+                .cursor
+                .as_ref()
+                .is_some_and(|cursor| cursor.state == state)
+            && unsafe { guard_open(actor, state, sample.frame) }
+            && let Some(boost) = self.mode.opener(BOOST, true)
+            && unsafe { self.branch(actor, u16::from(boost)) }
+        {
+            return true;
+        }
         let Some(cursor) = self.cursor.as_mut().filter(|cursor| cursor.state == state) else {
             let aim = mark_range(state).and_then(|range| unsafe { range.aim(actor) });
             return unsafe { self.start(actor, state, aim) };
@@ -238,11 +275,16 @@ impl Battle {
         if step.op == 2 {
             return unsafe { self.branch(actor, step.clip) };
         }
-        let sample = unsafe { action::MotionFrame::sample(actor) };
         let landing = program::flight_landing(state);
         let launch_clip = matches!(step.clip, 1460 | 1472);
         let in_coast_pose =
             launch_clip && motion::local_pose(actor).is_some_and(|pose| pose.coast == Some(state));
+        let clip = if in_coast_pose {
+            self.mode.coast_clip()
+        } else {
+            step.clip
+        };
+        unsafe { sound::sample(&mut self.audio, actor, clip, sample.frame, false) };
         let wrapped = if in_coast_pose {
             // The new pose has its own loop. Keep checking the authored
             // action's pending branches and events on its uninterrupted clock.
@@ -273,6 +315,7 @@ impl Battle {
                 && unsafe { motion::play(actor, self.mode.coast_clip(), 0, 0) }.is_some()
             {
                 motion::coast(actor, state);
+                unsafe { sound::sample(&mut self.audio, actor, self.mode.coast_clip(), 0., true) };
             }
         } else if program::step_complete(step, cursor.time, sample, wrapped) {
             // FZ 8121F57C advances 81815D60 before checking branch windows.
@@ -297,25 +340,33 @@ impl Battle {
             self.cursor = None;
             return true;
         }
-        // FZ 824F0DF4 conditions 1 through 5 check stamina and magnetic segments.
-        if let Some(next) = cursor.branch(commands, |condition| match condition {
-            0 => true,
-            1..=5 => {
-                (unsafe { movement::has_stamina(actor) })
-                    && magnet::can_spend(actor, condition as u8)
-            }
-            10 | 11 => {
-                let range = if condition == 10 {
-                    MarkRange::Attract
-                } else {
-                    MarkRange::Repel
-                };
-                (unsafe { movement::has_stamina(actor) })
-                    && magnet::can_spend(actor, 1)
-                    && unsafe { range.aim(actor) }.is_some()
-            }
-            _ => false,
-        }) {
+        // FZ command 20 is always true. Conditions 6 and 8 read accepted guard
+        // contacts; conditions 1 through 5 check stamina and magnetic segments.
+        let guard_hits = self.guard_hits;
+        if let Some(next) =
+            cursor.branch(
+                commands | (1 << GUARD_FOLLOW_UP),
+                |condition| match condition {
+                    0 => true,
+                    1..=5 => {
+                        (unsafe { movement::has_stamina(actor) })
+                            && magnet::can_spend(actor, condition as u8)
+                    }
+                    6 | 8 => guard_hits != 0,
+                    10 | 11 => {
+                        let range = if condition == 10 {
+                            MarkRange::Attract
+                        } else {
+                            MarkRange::Repel
+                        };
+                        (unsafe { movement::has_stamina(actor) })
+                            && magnet::can_spend(actor, 1)
+                            && unsafe { range.aim(actor) }.is_some()
+                    }
+                    _ => false,
+                },
+            )
+        {
             unsafe { self.branch(actor, next) };
         }
         true
@@ -323,7 +374,10 @@ impl Battle {
 
     unsafe fn tick(&mut self, actor: u32, input: &Input) -> bool {
         let current = unsafe { action::current(actor) };
-        let commands = unsafe { commands(actor, input) };
+        let held = input.command(27);
+        let was_held = core::mem::replace(&mut self.guard_held, held);
+        let guard_pressed = held && !was_held;
+        let commands = unsafe { commands(actor, input, guard_pressed) };
         if let Some(state) = action::custom_id(current.0, current.1) {
             return unsafe { self.advance(actor, state, commands) };
         }
@@ -350,6 +404,7 @@ impl Battle {
             X,
             A,
             CHANGE_MODE,
+            GUARD,
         ]
         .into_iter()
         .find_map(|key| {
@@ -361,12 +416,13 @@ impl Battle {
             return false;
         };
         if drawn {
+            if unsafe { self.branch(actor, u16::from(id)) } {
+                self.guard_from_idle = matches!(id, 14 | 112);
+                return true;
+            }
             // A magnetic command owns its pad edge even when it lacks a mark
             // or charge. Passing it to GU could start a stock ground action.
-            (unsafe { self.branch(actor, u16::from(id)) })
-                || pressed(commands, ATTRACT)
-                || pressed(commands, REPEL)
-                || pressed(commands, BOOST)
+            pressed(commands, ATTRACT) || pressed(commands, REPEL) || pressed(commands, BOOST)
         } else if unsafe { action::enter_draw_attack(actor, id) } {
             unsafe { self.start(actor, id, None) }
         } else {
@@ -380,7 +436,56 @@ static LOCAL: Shared<Battle> = Shared::new(Battle {
     cursor: None,
     aim: None,
     flight: None,
+    audio: Clock::new(),
+    guard_held: false,
+    guard_hits: 0,
+    guard_from_idle: false,
 });
+
+unsafe fn guard_open(actor: u32, state: u8, frame: f32) -> bool {
+    // FZ event 21 closes at 26/32, extended by two frames per Guard tier.
+    let end = match state {
+        14 => 26,
+        112 => 32,
+        _ => return false,
+    };
+    frame < f32::from(end + unsafe { mhfz_sdk::combat::guard_bonus_frames(actor) })
+}
+
+pub unsafe extern "C" fn guard_policy(
+    actor: u32,
+    result: *mut guard::GuardResult,
+) -> guard::Decision {
+    unsafe {
+        let (group, slot) = action::current(actor);
+        let Some(state) = action::custom_id(group, slot) else {
+            return guard::Decision::Reject;
+        };
+        if action::waiting_to_start(actor)
+            || !guard_open(actor, state, action::MotionFrame::sample(actor).frame)
+        {
+            return guard::Decision::Reject;
+        }
+        result.write(guard::GuardResult {
+            // FZ 81744DA0 applies four simulation ticks of protection.
+            invulnerability: 8.,
+            on_block: Some(record_guard),
+            ..guard::GuardResult::default()
+        });
+        guard::Decision::InPlace
+    }
+}
+
+unsafe extern "C" fn record_guard(actor: u32) {
+    let first = LOCAL.with(|battle| {
+        battle.guard_hits = battle.guard_hits.saturating_add(1).min(3);
+        battle.guard_hits == 1
+    });
+    let (group, slot) = unsafe { action::current(actor) };
+    if first && action::custom_id(group, slot) == Some(14) {
+        unsafe { sound::slash_counter(actor) };
+    }
+}
 
 pub unsafe extern "C" fn dispatch(actor: u32, input: *const Input) -> u32 {
     LOCAL.with(|battle| {

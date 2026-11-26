@@ -57,13 +57,16 @@ def verify_manual(g):
     g.stub(0x56E808, lambda _, group, part, body: guide.append(g.string(body)))
     g.put(pressed, 0x20)
     g.run(g.hooks[0x5CB780], panel)
-    assert len(guide) == 2 and "显示剩余磁力" in guide[1]
-    assert "会心和蓄力技能影响单次回充量" in guide[1]
-    assert "标记在磁力反弹的距离内" in guide[1] and "标记在磁力突进的距离内" in guide[1]
-    assert "首次接触硬部位时按当前形态弹刀" in guide[1]
+    assert len(guide) == 2 and "以打击形态拔刀并精准格挡" in guide[1]
+    assert "斩击格挡反击" in guide[1] and "接格挡突击" in guide[1]
     g.run(g.hooks[0x5CB780], panel)
-    assert len(guide) == 3 and "左侧是斩击磁气，右侧是打击磁气" in guide[2]
-    assert "当前形态动作值提高 10%" in guide[2]
+    assert len(guide) == 3 and "显示剩余磁力" in guide[2]
+    assert "会心和蓄力技能影响单次回充量" in guide[2]
+    assert "标记在磁力反弹的距离内" in guide[2] and "标记在磁力突进的距离内" in guide[2]
+    assert "首次接触硬部位时按当前形态弹刀" in guide[2]
+    g.run(g.hooks[0x5CB780], panel)
+    assert len(guide) == 4 and "左侧是斩击磁气，右侧是打击磁气" in guide[3]
+    assert "当前形态动作值提高 10%" in guide[3]
     g.stub(0x64C600, lambda *_: 0)
     g.put(pressed, 0x4000)
     g.run(g.hooks[0x5CB780], panel)

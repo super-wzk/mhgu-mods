@@ -29,7 +29,8 @@ def package(dat, romfs):
         ], cwd=CONVERTER, env=env, check=True)
         assets = ROOT / "target/assets"
         assets.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(Path(staging) / "magnet_spike.fmsa", assets)
+        for table in ("magnet_spike.fmsa", "frontier_ms_sound.flse"):
+            shutil.copy2(Path(staging) / table, assets)
         subprocess.run(["cargo", "forge", "build", "--release"], cwd=ROOT, env=env, check=True)
         for src, dest in (
             (arc, nx / "arc/frontier"),

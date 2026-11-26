@@ -41,7 +41,7 @@ def capture_position(g, actor):
 
 
 def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_action, tick, meter,
-                flight_packets, boost_packets):
+                flight_packets, boost_packets, guard_packets, shot_packet, sounds):
     manager, equipment = g.get(0x1885B58), g.get(local + 5060)
     g.put(0x18843F0, g.alloc(0x16280))
     actions = g.alloc(200)
@@ -261,6 +261,32 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
     frame(first, 60., ended=True)
     frame(first, 30.)
     assert g.half(first + 12320 + 56) == 44
+
+    for actor, packet, state, motion, contact, power in (
+        (first, guard_packets[0], 77, 1034, 32., 30),
+        (second, guard_packets[1], 115, 1410, 24., 73),
+    ):
+        first_sound = len(sounds)
+        receive(actor, packet)
+        assert g.half(actor + 9482) == 0x8000 + state
+        frame(actor, 0.)
+        assert g.half(actor + 1204) == motion
+        for hit in (actor + 12320, actor + 12504):
+            g.run(0x1687A8, hit)
+        frame(actor, contact)
+        assert g.half(actor + 12320 + 56) == power
+        if state == 77:
+            assert [cue for owner, name, cue, _ in sounds[first_sound:]
+                    if owner == actor and name == "blade"] == [13, 12]
+
+    # Remote playback uses the sender's shot action and its source event.
+    first_sound = len(sounds)
+    receive(second, shot_packet)
+    frame(second, 0.)
+    frame(second, 11.)
+    frame(second, 12.)
+    frame(second, 12.)
+    assert [cue for owner, _, cue, _ in sounds[first_sound:] if owner == second] == [8, 74, 9]
 
     receive(first, repeated_flight)
     frame(first, 8.)

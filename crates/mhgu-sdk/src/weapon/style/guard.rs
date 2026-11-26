@@ -3,13 +3,15 @@
 #[derive(Default)]
 #[repr(C)]
 pub struct GuardResult {
-    /// Invulnerability to grant as soon as GU enters recoil, in motion frames.
+    /// Invulnerability to grant when GU confirms the block, in motion frames.
     pub invulnerability: f32,
     /// Native recoil tier. Tier zero prevents chip damage.
     pub recoil: u32,
     /// Minimum effective power for sharpness loss on ordinary hits, or
     /// [`Self::NO_SHARPNESS_COST`] to waive the cost for every accepted hit.
     pub sharpness_power: u32,
+    /// Called once for each settled in-place block while its action is active.
+    pub on_block: Option<unsafe extern "C" fn(u32)>,
 }
 
 impl GuardResult {
@@ -22,9 +24,13 @@ pub enum Decision {
     Native,
     Reject,
     Precise,
+    /// Block in an extension weapon's private action without GU recoil or costs.
+    InPlace,
 }
 
-/// For a precise block, fill the result for the collision that invoked the policy.
+/// Fill the result for a precise or in-place block.
+/// For in-place blocks the policy can be queried during both collision and
+/// damage settlement. Use `GuardResult::on_block` to record a confirmed hit.
 pub type Policy = unsafe extern "C" fn(u32, *mut GuardResult) -> Decision;
 
 pub enum Contact {

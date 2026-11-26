@@ -7,7 +7,7 @@ use core::sync::atomic::{
 use mhgu_sdk::weapon::style::{
     action,
     guard::{self, Decision, GuardResult},
-    hunter,
+    hunter, movement,
 };
 
 const GROUP: u16 = 32;
@@ -119,8 +119,8 @@ unsafe fn block(actor: u32, angle: u32) -> u32 {
         let Some(policy) = entry.style.guard else {
             return accepted;
         };
+        let half_angle = entry.rules().map_or(0, |rules| rules.guard_half_angle);
         if accepted == 0 {
-            let half_angle = entry.rules().map_or(0, |rules| rules.guard_half_angle);
             if half_angle == 0
                 || (!custom && !guard_below_stamina_limit(actor))
                 || !guardable(actor, angle as u16, half_angle)
@@ -133,6 +133,12 @@ unsafe fn block(actor: u32, angle: u32) -> u32 {
         match policy(actor, &mut result) {
             Decision::Native => accepted,
             Decision::Reject => 0,
+            Decision::InPlace => u32::from(
+                custom
+                    && entry.kind.is_some()
+                    && half_angle != 0
+                    && (accepted == 0 || guardable(actor, angle as u16, half_angle)),
+            ),
             Decision::Precise => {
                 INVULNERABILITY.store(result.invulnerability.to_bits(), Relaxed);
                 RECOIL_TIER.store(result.recoil, Relaxed);
@@ -142,6 +148,38 @@ unsafe fn block(actor: u32, angle: u32) -> u32 {
             }
         }
     }
+}
+
+#[forge::hook(offset = 0x2f0670)]
+unsafe fn settle(actor: u32, kind: u32, damage: *mut i32, special: *mut u8) -> u32 {
+    unsafe {
+        let (group, slot) = action::current(actor);
+        if action::custom(group, slot)
+            && ((actor + 5068) as *const u32).read() & 1 != 0
+            && let Some(entry) = local_entry(actor).filter(|entry| entry.kind.is_some())
+            && let Some(policy) = entry.style.guard
+            && let Some(rules) = entry.rules().filter(|rules| rules.guard_half_angle != 0)
+            && guardable(
+                actor,
+                ((actor + 12824) as *const u16).read(),
+                rules.guard_half_angle,
+            )
+        {
+            let mut result = GuardResult::default();
+            if matches!(policy(actor, &mut result), Decision::InPlace) {
+                // GU has selected this hit for settlement. Returning the native
+                // guarded result keeps the current move and skips damage/recoil.
+                damage.write(0);
+                special.write(0);
+                movement::grant_evade_invulnerability(actor, result.invulnerability);
+                if let Some(on_block) = result.on_block {
+                    on_block(actor);
+                }
+                return 1;
+            }
+        }
+    }
+    original!(actor, kind, damage, special)
 }
 
 #[forge::hook(offset = 0x2f4b20)]
@@ -212,6 +250,7 @@ pub(super) fn install(base: u32) {
         forge::install_hook!(base, hunter_collision);
     }
     forge::install_hook!(base, block);
+    forge::install_hook!(base, settle);
     forge::install_hook!(base, reaction);
     forge::install_hook!(base, sharpness);
 }

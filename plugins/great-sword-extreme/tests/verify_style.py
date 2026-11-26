@@ -43,6 +43,7 @@ PROFILE_HOOKS |= {0x62E258, 0x57F468, 0x546F84, 0x303790, 0x589BC4, 0x589C74, 0x
                   0x162758, 0x5A7B00, 0x59EAA0, 0x59F560, 0x5A6CB4}
 HIT_ROW = 0x2A8A88
 DISPATCH, BLOCK = 0x282DA8, 0x2F2BA0
+SETTLE_GUARD = 0x2F0670
 INIT_HUNTER = 0x29B7D4
 WEAPON_DISPATCH = 0x2B8178
 GAME_STYLE = 0x268818
@@ -197,6 +198,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         HIT_EXPAND,
         HUNTER_COLLISION,
         BLOCK,
+        SETTLE_GUARD,
         0x1FED90, 0x1FF308,
         0x9FC3D8, 0x1FFFF4,
         MODEL_DEPTH,
@@ -274,6 +276,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             DB_DRAW_ROUTE,
             LS_DRAW_ROUTE, SA_DRAW_ROUTE, SNS_DRAW_ROUTE, COLLISION_PASS, QUEST_CAMERA,
             BLOCK,
+            SETTLE_GUARD,
             SHARPNESS,
             GUARD_REACTION,
             DRAW_MODEL,

@@ -72,6 +72,22 @@ def verify_payloads(release, *, include_magnet_spike=False):
         assert mesh[:5] == b"MOD\0\xd4" and all(struct.unpack_from("<3H", mesh, 6))
         refs = material_refs(resources[model, KINDS[".mrl"]])
         assert len(refs) == 2 and all((ref, KINDS[".tex"]) in resources for ref in refs)
+        ordered = list(resources)
+        for bank, required in (("blade", {8, 9, 12, 13, 15}), ("common", {74, 241})):
+            name = rf"sound\se\pl\frontier_ms\{bank}"
+            bank_key, request_key = (name, KINDS[".sbkr"]), (name, KINDS[".srqr"])
+            bank_index = ordered.index(bank_key)
+            assert bank_index < ordered.index(request_key)
+            voices = list(sound_refs(resources[bank_key]))
+            requests = resources[request_key]
+            assert requests[:5] == b"SRQR\x05" and struct.unpack_from("<I", requests, 8)[0] == len(voices)
+            cues = set()
+            for i, (wave, _) in enumerate(voices):
+                key = wave, KINDS[".adpcm"]
+                assert ordered.index(key) < bank_index
+                assert len(resources[key]) > 120 and any(resources[key][120:]), wave
+                cues.add(struct.unpack_from("<H", requests, 52 + 132 * i)[0] - 4096)
+            assert required <= cues
         motion_keys = [key for key in resources if key[1] == KINDS[".lmt"]]
         visual_keys = [key for key in resources if key[1] in
                        (KINDS[".mod"], KINDS[".mrl"], KINDS[".tex"])]

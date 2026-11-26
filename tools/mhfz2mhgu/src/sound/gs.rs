@@ -63,6 +63,9 @@ pub(super) fn timeline(dat: &Path, weapon: usize) -> Result<(Vec<u8>, [BTreeSet<
     } else if weapon == 6 {
         // w06 action event 16 plays this cue through 818DD2DC.
         cues[0].insert(1);
+    } else if weapon == 13 {
+        // Magnetic shot (811659F8) and slash block (8102D32E, 8122119A).
+        cues[0].extend([9, 12, 13]);
     }
     let mut compiled = BTreeMap::<(usize, u16, u8), Vec<(u8, u8)>>::new();
     let native = match weapon {
@@ -71,7 +74,7 @@ pub(super) fn timeline(dat: &Path, weapon: usize) -> Result<(Vec<u8>, [BTreeSet<
         7 => include_str!("ls_native.txt"),
         4 => include_str!("sns_native.txt"),
         9 => include_str!("gl_native.txt"),
-        12 => "",
+        12 | 13 => "",
         _ => anyhow::bail!("unsupported weapon sound timeline {weapon}"),
     };
     for l in native.lines().filter(|l| !l.starts_with('#')) {
@@ -142,12 +145,19 @@ pub(super) fn timeline(dat: &Path, weapon: usize) -> Result<(Vec<u8>, [BTreeSet<
             let r = word(&b, p + 4)? + 22 * j;
             let bank = match h(r + 2)? {
                 0 => 1,
+                // w13 uses its own we13 bank. The trial model has no
+                // wk451.snd in the model archive.
+                3 | 4 if weapon == 13 => continue,
                 3 | 4 => 2,
                 6 => 0,
                 _ => continue,
             }; // footsteps, armour: GU scene
             if weapon == 12 && h(r + 4)? == 4 {
                 // Conditional sheathing accent. The controller emits it in sword form.
+                continue;
+            }
+            if weapon == 13 && h(r + 4)? == 1 {
+                // 8174AF9E accepts condition 1 only for weapon 11.
                 continue;
             }
             ensure!(h(r + 4)? == 0, "unsupported w{weapon:02} cue condition");

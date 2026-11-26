@@ -1,13 +1,17 @@
 //! Trigger cues from the converted Frontier sound timeline.
 use mhgu_sdk::weapon::style::sound::{Bank, random_u32};
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct Clock {
     clip: u16,
     frame: f32,
 }
 
 impl Clock {
+    pub const fn new() -> Self {
+        Self { clip: 0, frame: 0. }
+    }
+
     /// Play authored cues crossed since the last sample. Each record contains
     /// a motion frame, bank number and up to four weighted cue alternatives.
     ///
@@ -74,5 +78,11 @@ impl Clock {
                 roll -= u32::from(c[1]);
             }
         }
+    }
+}
+
+impl Default for Clock {
+    fn default() -> Self {
+        Self::new()
     }
 }

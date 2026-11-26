@@ -98,3 +98,5 @@ JSON 版本 1 包含 `slot`、`generation` 和 `data`。`weapons` 按 GU 武器�
 内容插件可通过 [StyleRulesV1](../../crates/mhgu-sdk/src/weapon/style/rules.rs) 登记格挡半角、公共动作结束条件、弹刀与镜头回调。注册器在 GU 近战解算后按猎人、动作槽和刀身的打击序号匹配 `Attack::DEFLECTABLE` 或 `Strike::deflectable` 标记的命中，并用 GU 的斩味修正、心眼与相关豁免完成判定。动作控制器通过 `mhgu::BladeDeflectionV1` 取得结果。
 
 `melee::bind_strike_contact` 在 GU `17885C` 结算会心后通知本地独立武器，提供原始动作值、出招时的动作值加成和实际会心倍率。磁斩锤用这些值计算命中回充与磁气积累。[战斗回放](../magnet-spike/tests/verify_battle.py)
+
+扩展武器的原地格挡在 GU `2F2BA0` 查询窗口、朝向和可防性，在 GU `2F0670` 确认命中并回调一次。GU 继续走已防御分支，后续反击由武器控制器按其动作表派发。[格挡转接](src/weapon/style/guard.rs)

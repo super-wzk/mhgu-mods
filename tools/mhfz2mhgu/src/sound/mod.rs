@@ -165,6 +165,26 @@ pub fn long_sword(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
     hunter_banks(dat, 7, "frontier_ls", "we000snd.abn", b"we000.snd\0")
 }
 
+pub fn magnet_spike(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
+    let (timeline, [blade, common, _]) = gs::timeline(dat, 13)?;
+    let mut assets = Vec::new();
+    for (name, file, cues) in [
+        ("blade", "we13.snd", blade),
+        ("common", "common01.snd", common),
+    ] {
+        let bank = Bank::player(&dat.join("sound").join(file), cues)?;
+        let path = format!(r"sound\se\pl\frontier_ms\{name}");
+        assets.extend(bank_assets(
+            &bank,
+            bank.voices.keys().copied().collect(),
+            &path,
+            1,
+            |i| format!(r"{path}\w{i:02}"),
+        )?);
+    }
+    Ok((assets, timeline))
+}
+
 fn hunter_banks(
     dat: &Path,
     id: usize,

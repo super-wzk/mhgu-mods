@@ -11,7 +11,7 @@ from verify_magnet_spike import PLUGIN, REPO
 from verify_peer import capture_action, capture_position, verify_peer
 from damage_target import damage_target
 from verify_style import (
-    CHANGE_ACTION, DECODE, DISPATCH, ENCODE, INIT_HUNTER, MANAGER, SAVE,
+    BLOCK, CHANGE_ACTION, DECODE, DISPATCH, ENCODE, INIT_HUNTER, MANAGER, SAVE, SETTLE_GUARD,
     WEAPON_DISPATCH, boot, character_save, select_character, setup_controller,
 )
 
@@ -196,11 +196,22 @@ def replay():
     g.stub(release, lambda *_: 0)  # Fixture resources live through the replay.
     g.put(0x2126A64, res_manager)
     paths = []
+    audio_banks = {}
+    sounds = []
 
     def resource(_, kind, path, flags):
-        assert flags == 1
         name = g.string(path)
         paths.append(name)
+        if kind == 0x2125BEC:
+            assert flags == 2  # Hunt preload uses the asynchronous native request.
+            request = resources[name, 0x1BCC4966]
+            cues = {struct.unpack_from("<H", request, 52 + 132 * i)[0]
+                    for i in range(struct.unpack_from("<I", request, 8)[0])}
+            obj = g.alloc(176)
+            g.put(obj + 80, 1)
+            audio_banks[obj] = (name.rsplit("\\", 1)[-1], cues)
+            return obj
+        assert flags == 1
         if kind == 0x1857810:
             return shapes[name]
         obj = g.alloc(176)
@@ -224,12 +235,25 @@ def replay():
             g.put(obj + 100, header)
         return obj
 
+    def queue(_, kind, bank, cue):
+        assert kind == 7
+        name, allowed = audio_banks[bank]
+        assert cue in allowed
+        stack = g.cpu.reg_read(UC_ARM_REG_SP)
+        owner, point = g.get(stack), g.get(stack + 4)
+        sounds.append((owner, name, cue - 4096, struct.unpack("<3f", g.cpu.mem_read(point, 12))))
+        return 1
+
     g.stub(load, resource)
+    g.put(0x1896F5C, g.alloc(512))
+    g.stub(0xB68280, lambda bank, cue, *_: int(cue in audio_banks[bank][1]))
+    g.stub(0x4EEAA4, queue)
     g.stub(g.originals[INIT_HUNTER], lambda *_: 7)
     assert g.run(g.hooks[INIT_HUNTER], actor) == 7
     assert paths == ([r"arc\frontier\magnet_spike"]
                      + [rf"player\mot\frontier_ms\{g}" for g in (0, 2, 4)]
-                     + [rf"player\hit\frontier_ms\melee_{i}" for i in range(1, 9)])
+                     + [rf"player\hit\frontier_ms\melee_{i}" for i in range(1, 9)]
+                     + [rf"sound\se\pl\frontier_ms\{name}" for name in ("blade", "common")])
     packed = g.run(ENCODE, actor, PRIVATE | 1440)
     assert packed & 255 == 40 and g.run(DECODE, actor, packed) == PRIVATE | 1440
     for clip in (1014, 1015, 1016, 1017, 1022, 1407, 1408, 1429, 1444, 1451, 1452, 1460, 1461, 1471, 1472, 1473):
@@ -273,10 +297,10 @@ def replay():
     g.cpu.mem_write(actor + 1280, struct.pack("<f", 100.))
     g.run(update_part, part, actor, WEAPON)
     assert tracks[-1] == (0, 35, 2., 61.), tracks
-    verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter, motions)
+    verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter, motions, sounds)
 
 
-def verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter, motions):
+def verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter, motions, sounds):
     def byte(address):
         return g.cpu.mem_read(address, 1)[0]
 
@@ -369,15 +393,148 @@ def verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter, motion
     assert (byte(hit + 86), byte(second + 86)) == (50, 65)
     assert g.get(hit + 64) & 3 == g.get(second + 64) & 3 == 1
     assert g.half(hit + 52) != g.half(second + 52)
-    flight_packets = verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, set_action, tick, meter)
+    shot_packet, flight_packets = verify_shot(
+        g, actor, monster, status, monster_vt, hurt, collision, credit, set_action, tick, meter, sounds,
+    )
     verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick, meter)
     verify_deflection(g, actor, vtable, monster, hurt, set_action, tick, motions)
     boost_packets = verify_magnetic_boost(g, actor, monster, collision, set_action, tick, meter)
+    guard_packets = verify_guard(g, actor, set_action, tick, meter, motions, sounds)
     verify_peer(g, actor, vtable, part, monster, status, collision, credit, set_action, tick, meter,
-                flight_packets, boost_packets)
+                flight_packets, boost_packets, guard_packets, shot_packet, sounds)
 
 
-def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, set_action, tick, meter):
+def verify_guard(g, actor, set_action, tick, meter, motions, sounds):
+    shoulder = 1 << 27
+    skills = set()
+    g.cpu.hook_del(g.traps.pop(0x2864C4))
+    g.stub(0x2864C4, lambda _actor, skill, *_: int(skill in skills))
+    damage = g.alloc(8)
+
+    def state():
+        return g.half(actor + 9482)
+
+    def at(frame, buttons=0):
+        # Poison the stock weapon command bank each time through the dispatcher.
+        assert tick(buttons, frame=frame, native_pad=True, fallback=1 << 14)
+
+    def start(*, sheathed=False):
+        set_action(1, 0)
+        g.cpu.mem_write(actor + 10057, bytes([not sheathed]))
+        tick(native_pad=True)
+        assert tick(X if sheathed else 0, common=shoulder, held=0x400, native_pad=True,
+                    fallback=1 << 14)
+        g.cpu.mem_write(actor + 1280, struct.pack("<f", 0.))
+        g.put(actor + 11072, 0)
+
+    def probe(frame, *, angle=0, flags=0, kind=0, power=100, accepted=1, settle=True):
+        g.cpu.mem_write(actor + 1280, struct.pack("<f", frame))
+        g.put(actor + 5280, 0)
+        g.cpu.mem_write(actor + 12820, struct.pack("<HBxHHh", flags, kind, angle, 0xffff, power))
+        assert g.run(BLOCK, actor, angle) == accepted
+        g.put(damage, power & 0xffffffff)
+        g.put(damage + 4, 0xff)
+        if settle:
+            assert g.run(SETTLE_GUARD, actor, kind, damage, damage + 4) == accepted
+            assert g.get(damage + 4) == 0
+            assert g.get(damage) == (0 if accepted else power & 0xffffffff)
+
+    set_action(1, 0)
+    g.cpu.mem_write(actor + 10057, b"\0")
+    tick(native_pad=True)  # Reset to slash while sheathed.
+    g.put(actor + 5088, 0)  # No stamina is needed for either window.
+    g.put(actor + 10100, 100)
+    hp, gauge = g.half(actor + 5078), meter()
+    start()
+    assert state() == 0x8000 + 14 and motions[-1] == (1034, 0., 6.), (state(), motions[-1])
+    probe(4., angle=0x4000, settle=False)
+    assert g.get(actor + 11072) == 0
+    probe(4., angle=0x4001, accepted=0)
+    probe(4., flags=0x20, accepted=0)
+    probe(4., flags=0x100, accepted=0)
+    probe(4., kind=0x19, accepted=0)
+    probe(4., power=-1, accepted=0)
+    probe(26., accepted=0)
+    at(26.)
+    assert state() == 0x8000 + 14  # Collision probe alone cannot trigger a counter.
+    at(32.)
+    assert g.half(actor + 12320 + 56) == 30
+
+    for frames, follow_up in (((4.,), 57), ((4., 14.), 76), ((4., 14., 24.), 77)):
+        start()
+        first_sound = len(sounds)
+        for frame in frames:
+            # Multiple queries of the same hit precede one native settlement.
+            probe(frame, settle=False)
+            probe(frame)
+            assert struct.unpack("<f", g.cpu.mem_read(actor + 11072, 4)) == (8.,)
+        at(25.)
+        assert state() == 0x8000 + 14
+        at(26.)
+        assert state() == 0x8000 + follow_up and motions[-1] == (1034, 30., 0.)
+        assert struct.unpack("<f", g.cpu.mem_read(actor + 11072, 4)) == (28.,)
+        assert [cue for _, name, cue, _ in sounds[first_sound:]
+                if name == "blade" and cue in (12, 13)] == [13, 12]
+        at(32.)
+    slash_counter = capture_action(g, actor)
+
+    for skill, closes in ((169, 28.), (168, 30.)):
+        start()
+        skills.add(skill)
+        probe(closes - 1.)
+        probe(closes, accepted=0)
+        skills.clear()
+
+    start(sheathed=True)
+    assert state() == 0x8000 + 112 and motions[-1] == (1068, 0., 1.)
+    assert g.get(actor + 10057) & 1
+    probe(32., accepted=0)
+    skills.add(171)
+    probe(31., flags=0x20, settle=False)
+    skills.clear()
+    # Run GU's full received-hit handler, with a queued hit but no chip.
+    g.cpu.mem_write(actor + 12768, b"\x01")
+    g.cpu.mem_write(actor + 12820, struct.pack("<HBxHHh", 0, 0, 0, 0xffff, 100))
+    assert g.run(0x2EE508, actor) == 1 and state() == 0x8000 + 112
+    g.cpu.mem_write(actor + 12768, b"\0")
+    at(31.)
+    assert state() == 0x8000 + 113 and motions[-1] == (1490, 0., 0.)
+    at(25., X)
+    assert state() == 0x8000 + 113
+    at(26., X)
+    at(55.)
+    assert state() == 0x8000 + 113
+    at(56.)
+    assert state() == 0x8000 + 114 and motions[-1] == (1410, 0., 0.)
+
+    start()
+    assert state() == 0x8000 + 112  # Still in impact mode with the weapon drawn.
+    skills.add(168)
+    probe(36., accepted=0)
+    probe(35.)
+    skills.clear()
+    at(35.)
+    at(26., X | A)
+    at(56.)
+    assert state() == 0x8000 + 115 and motions[-1] == (1410, 0., 0.)
+    impact_assault = capture_action(g, actor)
+    assert g.half(actor + 5078) == hp
+    assert g.get(actor + 5088) == 0 and g.get(actor + 10100) == 100
+    assert meter() == gauge
+
+    start()
+    assert state() == 0x8000 + 112
+    tick(frame=170., ended=True, common=shoulder)
+    assert state() == 0
+    tick(common=shoulder)
+    assert state() == 0  # Holding R across recovery does not start another guard.
+    tick()
+    tick(common=shoulder)
+    assert state() == 0x8000 + 112
+    return slash_counter, impact_assault
+
+
+def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, set_action, tick, meter, sounds):
     def put_vec(address, *vec):
         g.cpu.mem_write(address, struct.pack(f"<{len(vec)}f", *vec))
 
@@ -445,15 +602,21 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     hp, credit_count = g.get(status + 880), len(credit)
     held = 0x800
     set_action(1, 0)
+    first_sound = len(sounds)
     tick(A, held=held, native_pad=True)
     assert g.half(actor + 9482) == 0x8000 + 84
+    shot_packet = capture_action(g, actor)
     tick(frame=6.)  # Snapshots the camera direction even if it moves before release.
     put_vec(camera + 96, 1000., 0., 0.)
     tick(frame=11.)
     update()
     assert not rays and not joints
     assert meter()[1] == 0
+    assert [cue for _, bank, cue, _ in sounds[first_sound:]] == [8, 74]
     tick(frame=12.)
+    tick(frame=12.)
+    assert [cue for _, bank, cue, _ in sounds[first_sound:]] == [8, 74, 9]
+    assert sounds[-1] == (actor, "blade", 9, (25., 100., 50.))
     update()
     assert rays == [((25., 100., 50.), (25., 100., 550.))], rays
     update()
@@ -787,7 +950,7 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     assert spent == [-150.] and landings == [(actor, 0)] * 4, (spent, landings)
     for contact in contacts:
         g.run(0x1687A8, contact)
-    return flight_packet, guided_position, coast_position
+    return shot_packet, (flight_packet, guided_position, coast_position)
 
 
 def apply_repel_root(g, actor, clip, start, end):
@@ -1122,9 +1285,13 @@ def verify_magnetic_boost(g, actor, monster, collision, set_action, tick, meter)
             g.run(0x16C0C0, collision, slot, monster)
         return slot
 
-    def boost(state, clip=None):
+    def boost(state, clip=None, *, staggered=False):
         set_action(1, 0)
-        assert tick(SPECIAL, common=1 << 27, native_pad=True)
+        if staggered:
+            assert tick(common=1 << 27, held=0x400, native_pad=True)
+            assert g.half(actor + 9482) == 0x8000 + 14
+        assert tick(SPECIAL, common=1 << 27, held=0x400, native_pad=True,
+                    frame=2. if staggered else 0.)
         assert g.half(actor + 9482) == state
         if clip:
             assert g.half(actor + 1204) == clip
@@ -1144,7 +1311,7 @@ def verify_magnetic_boost(g, actor, monster, collision, set_action, tick, meter)
     boost(0)
     hit(X, 43)
     assert tracks() == [(16., slash), (0., impact)]
-    boost(0x8000 + 163, 1451)
+    boost(0x8000 + 163, 1451, staggered=True)
     assert tracks() == [(16., active), (0., impact)]
     set_action(1, 0)
     tick(X, held=0x800, native_pad=True)
@@ -1183,4 +1350,4 @@ def verify_magnetic_boost(g, actor, monster, collision, set_action, tick, meter)
 
 if __name__ == "__main__":
     replay()
-    print("Magnet Spike: dispatch, HUD, melee, deflection, magnetic shot, charge, boost, flight and peer replay passed")
+    print("Magnet Spike: dispatch, HUD, melee, deflection, guard, magnetic shot, charge, boost, flight and peer replay passed")

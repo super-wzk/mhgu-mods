@@ -3,8 +3,9 @@ use crate::{
     combat, magnet,
     motion::{self, WeaponPose},
     program::{self, Mode},
+    sound,
 };
-use mhfz_sdk::action::Cursor;
+use mhfz_sdk::{action::Cursor, sound::Clock};
 use mhgu_sdk::weapon::style::{
     action, hunter,
     remote::{self, PeerStates, Roster},
@@ -109,6 +110,7 @@ struct Replay {
     packed: Option<u16>,
     airborne: bool,
     coast_played: bool,
+    audio: Clock,
 }
 
 impl Replay {
@@ -122,7 +124,7 @@ impl Replay {
             // The sender will supply the next accepted action.
             return;
         };
-        self.packed = unsafe { motion::play_step(actor, cursor, step) };
+        self.packed = unsafe { motion::play_step(actor, cursor, step, &mut self.audio) };
         if self.packed.is_some() {
             unsafe { combat::events(actor, cursor, power_bonus(actor), |_, _, _| {}) };
         }
@@ -151,10 +153,20 @@ impl Replay {
             self.cursor = Some(program::cursor(state));
             self.packed = None;
             self.coast_played = false;
+            if matches!(state, 57 | 76 | 77) {
+                // The action packet confirms the counter on this client.
+                unsafe { sound::slash_counter(actor) };
+            }
         }
         // Position updates keep moving the hunter through GU's interpolation.
         // A received coast pose replaces the launch clip within the same action.
         if self.coast_played {
+            if let Some(pose) = unsafe { pose(actor) } {
+                let frame = unsafe { action::MotionFrame::sample(actor) }.frame;
+                unsafe {
+                    sound::sample(&mut self.audio, actor, pose.mode.coast_clip(), frame, false)
+                };
+            }
             return;
         }
         if program::is_attraction(state)
@@ -166,6 +178,7 @@ impl Replay {
                 self.airborne = true;
             }
             self.coast_played = true;
+            unsafe { sound::sample(&mut self.audio, actor, pose.mode.coast_clip(), 0., true) };
             return;
         }
         let Some(packed) = self.packed else {
@@ -180,6 +193,7 @@ impl Replay {
             return;
         };
         let sample = unsafe { action::MotionFrame::sample(actor) };
+        unsafe { sound::sample(&mut self.audio, actor, step.clip, sample.frame, false) };
         let wrapped = cursor.time.observe(sample.frame, sample.blend);
         unsafe { combat::events(actor, cursor, power_bonus(actor), |_, _, _| {}) };
         if !self.airborne && matches!(step.clip, 1460 | 1472) && sample.frame >= 34. {

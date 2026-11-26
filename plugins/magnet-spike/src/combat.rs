@@ -1,4 +1,4 @@
-use crate::program;
+use crate::{program, sound};
 use mhfz_sdk::{
     action::Cursor,
     combat::{HitWindow, attacker_hitstop},
@@ -40,6 +40,10 @@ pub unsafe fn events(
             2 => unsafe { action::set_weapon_drawn(actor, value != 0) },
             // FZ 81225C60 spawns a single family-120 contact.
             3 => unsafe { strike(actor, value, cursor.time.frame, late, bonus) },
+            4 if value == 1 => {
+                unsafe { sound::shot(actor) };
+                on_event(event, value, late);
+            }
             _ => on_event(event, value, late),
         }
     }

@@ -8,6 +8,7 @@ mod magnet;
 mod motion;
 mod peer;
 mod program;
+mod sound;
 
 use mhgu_sdk::weapon::{
     Element, EquipmentId, EquipmentLevel, EquipmentModel, Weapon, WeaponEquipment, WeaponId,
@@ -45,11 +46,13 @@ static STYLE: Style = Style {
     controller: Some(battle::dispatch),
     request: None,
     actions: program::ACTIONS,
-    guard: None,
+    guard: Some(battle::guard_policy),
     commands: None,
 };
 
 static RULES: rules::Rules = rules::Rules {
+    // FZ 81813350 reads w13's 90-degree half-angle at mhfdat[0x65c].
+    guard_half_angle: 0x4000,
     deflection: Some(mhfz_sdk::combat::deflection),
     ..rules::Rules::EMPTY
 };

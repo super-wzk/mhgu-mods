@@ -1398,6 +1398,7 @@ pub unsafe extern "C" fn guard_policy(
             invulnerability: 14.,
             recoil: 0,
             sharpness_power: u32::MAX,
+            on_block: None,
         });
     }
     guard::Decision::Precise

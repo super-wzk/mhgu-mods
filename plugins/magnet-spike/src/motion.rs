@@ -1,7 +1,8 @@
-use crate::program::Mode;
+use crate::{program::Mode, sound};
 use mhfz_sdk::{
     action::{Cursor, Step},
     motion::MotionBanks,
+    sound::Clock,
 };
 use mhgu_sdk::{
     sync::Shared,
@@ -94,7 +95,10 @@ pub unsafe extern "C" fn preload(_actor: u32) {
     for clip in [1002, 1201, 1440] {
         unsafe { BANKS.preload(clip) };
     }
-    unsafe { crate::combat::preload() };
+    unsafe {
+        crate::combat::preload();
+        sound::preload();
+    }
 }
 
 pub unsafe extern "C" fn encode(actor: u32, request: u32) -> u32 {
@@ -120,10 +124,16 @@ pub unsafe fn play(actor: u32, clip: u16, start: u16, blend: u16) -> Option<u16>
     unsafe { action::play_motion(actor, request, f32::from(start), f32::from(blend / 2)) }
 }
 
-pub unsafe fn play_step(actor: u32, cursor: &mut Cursor, step: Step) -> Option<u16> {
+pub unsafe fn play_step(
+    actor: u32,
+    cursor: &mut Cursor,
+    step: Step,
+    audio: &mut Clock,
+) -> Option<u16> {
     let packed = unsafe { play(actor, step.clip, step.start, step.blend) }?;
     cursor.time.cycles = 0;
     cursor.time.frame = f32::from(step.start);
     cursor.time.blend = f32::from(step.blend / 2);
+    unsafe { sound::sample(audio, actor, step.clip, cursor.time.frame, true) };
     Some(packed)
 }

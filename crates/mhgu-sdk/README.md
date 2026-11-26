@@ -78,6 +78,8 @@ GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提�
 
 [rules](src/weapon/style/rules.rs) 为已注册的风格提供可选的格挡半角、公共动作结束条件、弹刀和镜头回调。[particle](src/weapon/style/particle.rs) 提供模型粒子绘制与释放回调的登记接口。
 
+扩展武器可以在私有动作中使用 [`guard::Decision::InPlace`](src/weapon/style/guard.rs)。风格提供格挡角度与窗口，GU 结算后通过 `GuardResult::on_block` 通知一次，当前动作继续播放，格挡免除伤害、耐力和斩味消耗。
+
 扩展武器通过 [`remote::bind_playback`](src/weapon/style/remote.rs) 登记队友动作回放。`ActionState` 可随动作包携带一个 0–7 的值，例如用于选择共有动作下的武器部件姿势。注册器根据收到的装备资料选择回放，内容插件按队友分别保存游标。[磁斩锤回放实现](../../plugins/magnet-spike/src/peer.rs)
 
 `remote::bind_position_state` 可在同一个私有动作内随 GU 周期位置包更新一个 0–7 的值。SDK 按队友、武器风格、动作 ID 与动作序号核对，位置与朝向由 GU 接收。磁斩锤用它同步突进转入滑落的时机。[位置包实现](../../plugins/mhgu-sdk-runtime/src/weapon/style/multiplayer/position.rs)
