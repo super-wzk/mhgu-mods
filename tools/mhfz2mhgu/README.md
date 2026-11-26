@@ -15,3 +15,5 @@ cargo test --workspace --manifest-path tools/mhfz2mhgu/Cargo.toml
 `weapon-model` 从 MHA 武器包按成员名取出 PAC，将 FMOD 网格、FSKL 骨骼和原贴图转换为 GU 的 MOD、MRL 和 TEX。磁斩锤打包脚本提供资源路径与材质模板。[磁斩锤构建](../../plugins/magnet-spike/README.md)
 
 `magnet-spike-icon "$MHFZ_DAT" -o OUTPUT.tex` 从本地 MHF-Z 的 `mhf.bin` 原版武器图集读取磁斩锤图标，保留 64×64 像素和透明度，编码为 GU TEX。
+
+`magnet-spike-battle "$MHFZ_DAT" -o OUTPUT_DIR` 从 `motion/w13.mot` 生成猎人动作归档 `motions.arc`，从 `mhfdat.bin` 和 `mhfsdt.bin` 提取 165 个状态及判定族 120、121 的记录到 `magnet_spike.fmsa`。这两个输出供战斗移植使用。

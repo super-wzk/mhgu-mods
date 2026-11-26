@@ -66,11 +66,7 @@ pub(super) unsafe fn resolve_stock_slot(
     slot: u16,
     flags: u16,
 ) -> Option<u16> {
-    // GU's shared weapon dispatcher (2B81A0) owns the kick and mounted
-    // knife attacks. Drawn special input still belongs to the style.
-    if matches!(slot, 803..=805 | 810)
-        || (slot == 800 && unsafe { *((actor + 10057) as *const u8) & 1 == 0 })
-    {
+    if unsafe { shared_weapon_slot(actor, slot) } {
         return Some(slot);
     }
     unsafe {
@@ -85,6 +81,13 @@ pub(super) unsafe fn resolve_stock_slot(
             },
         )
     }
+}
+
+pub(super) unsafe fn shared_weapon_slot(actor: u32, slot: u16) -> bool {
+    // GU's shared weapon dispatcher (2B81A0) owns the kick and mounted
+    // knife attacks. Drawn special input still belongs to the style.
+    matches!(slot, 803..=805 | 810)
+        || (slot == 800 && unsafe { *((actor + 10057) as *const u8) & 1 == 0 })
 }
 
 unsafe fn keeps_native_slot(actor: u32, style: &Style, slot: u16, flags: u16) -> bool {

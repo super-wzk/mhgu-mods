@@ -14,6 +14,7 @@
 | [极之型斩斧F](../plugins/switch-axe-extreme/README.md) | 12，`motion/w12.mot` | 8 | 13 |
 | [极之型单手剑](../plugins/sword-shield-extreme/README.md) | 4，`motion/w04.mot` | 1 | 14 |
 | [极之型铳枪](../plugins/gunlance-extreme/README.md) | 9，`motion/w09.mot` | 9 | 15 |
+| [试制磁斩锤](../plugins/magnet-spike/README.md) | 13，`motion/w13.mot` 和 `motion/w13w.mot` | SDK 类型 16 | 16 |
 
 每招先记录输入及优先级、前置状态、源状态、片段组和槽、起始帧、混合及循环、出判定与音效帧、派生窗口、结束动作。命中、格挡、落地或该层播放到末帧才允许的转移，应注明触发条件。由原生函数补充的分支也要登记，动作表的记录数只说明有多少状态槽。
 
@@ -37,6 +38,7 @@
 - 风格动作 ID 为 0–255，编码为 GU 武器组 `16` 的 `0x8000..0x80ff` 槽。与 GU 切招交接用 `action::enter`、`action::transition_to` 等现有接口。启动新招式时可用 `accept_custom_start` 接受 GU 已排定且尚未启动的目标动作。等 GU 接受目标后再更新朝向、建立游标、播放动作并安装命中和派生窗口。
 - 从 `Input::command`、`Input::weapon_command` 与原生 `ActionRequest` 取用 GU 已解析的输入。逐项核对按下、持续、松开和组合键优先级。附加肩键读取 `Input::auxiliary_pressed`，由 GU 原生键位查询处理默认 ZR 和交换布局。收刀冲刺的原生过滤可能只保留冲刺键，注册器从 GU 的过滤前按键中恢复附加肩键。`request` 返回已注册的动作 ID 可接手请求。普通武器切招中 `NATIVE_ACTION` 放行原生槽，`PASS` 拒绝本次请求。拔刀路由中的 `PASS` 保留 GU 选中的路由。见[请求解析](../plugins/mhgu-sdk-runtime/src/weapon/style/mod.rs)和[武器路由](../plugins/mhgu-sdk-runtime/src/weapon/style/routes.rs)。
 - 固定的输入窗口优先用 `Style::commands` 绑定到 GU 命令表，分别声明接收起点、可执行帧和停止接收帧。GU 正等待 `X+A` 时，`WeaponAfterCombo` 可暂缓单键，`AttackChord` 可接收 GU 的肩键加 `X+A` 组合。发现原版命令抢占时，查清表号及冲突的目标槽，只调整冲突行并保留需透传的地形或狩技行。动态派生由风格选定后交给 GU，一个输入由对应的命令表或风格分支消费一次。见[命令表接口](../crates/mhgu-sdk/src/weapon/style/action/command.rs)。
+- 扩展武器在本地角色装备记录上生效时，GU `282DA8` 派发其注册风格，`2E9B7C` 的绑定钩子过滤回退武器的专属行，`2AB670` 的切招钩子只放行已注册的私有动作及 GU 公共动作和狩技。用 [扩展武器控制回放](../plugins/great-sword-extreme/tests/verify_menu.py) 核对输入派发、命令表和斗技场固定配装。
 - 转向通过 GU 的方向判定和 `movement::set_facing`、`movement::turn` 更新当前与目标朝向。需要长按摇杆时按实时相机方向取角度，可以像斩斧一样使用 `live_relative_stick_yaw`，沿用 GU 的死区和按住锁，只修正相机方位。若派生有输入缓冲，按该招的源规则保存方向或到执行帧再取方向。见[移动接口](../crates/mhgu-sdk/src/weapon/style/movement.rs)。
 - 公共移动、收刀、落地、受击、骑乘和狩技继续走 GU。`art_slots` 配置装备页槽位数，允许出招的窗口提交 `Transition::HUNTER_ART`。武器专属狩技要从本武器原版派发表确认起手、后续动作、槽更新和收尾。通过 `guard::Policy` 交付防御结果，使用 `guard::take` 取得已发生的格挡。风格通过 `StyleRulesV1` 声明格挡半角及其他可选规则。注册器处理 GU 来袭角、防御强化与伤害结算，具体防御窗口、接招和资源收益由风格决定。见[防御接入](../plugins/mhgu-sdk-runtime/src/weapon/style/guard.rs)。
 

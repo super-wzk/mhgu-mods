@@ -7,6 +7,7 @@ import struct
 from unicorn.arm_const import UC_ARM_REG_SP, UC_ARM_REG_S0
 
 from verify_style import MANAGER, SAVE, api_for, character_save, save_character, select_character, MENU_OPEN, MENU_UPDATE, REPO, boot, hunters, load_registered_style, service, style_descriptor
+from verify_style import CHANGE_ACTION, COMMAND_BIND, DISPATCH
 
 MANUAL_HINT = "详见猎人笔记的武器操作指南。"
 GREAT_SWORD_DETAILS = (
@@ -18,7 +19,8 @@ GREAT_SWORD_DETAILS = (
 )
 
 
-def register_weapon(g, *, ident=16, ranged=False, limit=3, style=42, art_slots=0, weapon_name="Custom weapon", icon=13):
+def register_weapon(g, *, ident=16, ranged=False, limit=3, style=42, art_slots=0,
+                    weapon_name="Custom weapon", icon=13, controller=0, request=0, actions=0):
     api = api_for(g, b"mhgu::WeaponRegistryV7", b"WPN7")
     register = g.get(api)
     descriptor, name, type_name = g.alloc(8), g.alloc(16), g.alloc(48)
@@ -26,6 +28,9 @@ def register_weapon(g, *, ident=16, ranged=False, limit=3, style=42, art_slots=0
     g.cpu.mem_write(descriptor, struct.pack("<H?B", ident, ranged, icon))
     g.cpu.mem_write(name, b"Custom weapon\0")
     style = style_descriptor(g, style, 0x10000 | ident, art_slots=art_slots)
+    g.put(style + 20, controller)
+    g.put(style + 24, request)
+    g.put(style + 28, actions)
     assert g.run(register, descriptor, style, type_name, name, 0) == 0
     assert g.run(register, descriptor, style, type_name, name, 0) == 0
     assert g.run(register, descriptor, style_descriptor(g, 43, 0x10000 | ident), type_name, name, 0) == 2
@@ -36,6 +41,72 @@ def register_weapon(g, *, ident=16, ranged=False, limit=3, style=42, art_slots=0
     g.cpu.mem_write(model, struct.pack("<HH5BxH", ident, ident, 1, 0, 0, 0, 0, 0))
     assert g.run(g.get(api + 20), model, levels, limit + 1, name, name, 0, 0) == 0
     return tuple(g.get(api + i * 4) for i in range(1, 5))
+
+
+def verify_expansion_controls(g):
+    manager, actor, scratch = (g.alloc(size) for size in (40032, 14000, 1376))
+    equipment = manager + 124
+    g.put(0x1885B58, manager)
+    g.put(manager + 28, actor)
+    g.put(actor, 0x1749A88)
+    g.put(actor + 5060, equipment)
+    g.put(actor + 5068, 1)
+    g.stub(0x3F8398, lambda *_: 0)
+    g.stub(0x65FA04, lambda *_: 0x800)
+
+    received, controller, request = [], g.alloc(4), g.alloc(4)
+    g.stub(controller, lambda _actor, inp, *_:
+           received.append(g.get(inp + 16) if inp else None))
+    # Even an explicit native opt-in must not reach the fallback weapon.
+    g.stub(request, lambda *_: 0xfffffffe)
+    register_weapon(g, controller=controller, request=request, actions=1, art_slots=3)
+    saved = json.loads(character_save({}))
+    saved["data"]["inventory"] = {
+        "instances": {"1": {"equipment": 16, "upgrade": 0}}, "equipped": 1, "sets": {},
+    }
+    g.files[SAVE] = json.dumps(saved).encode()
+    select_character(g, 0)
+    g.put(actor + 5156, 4)
+    native_tick = []
+    g.stub(g.originals[DISPATCH], lambda _actor, *_: native_tick.append(True))
+    g.run(DISPATCH, actor)
+    assert received == [4] and not native_tick, (received, native_tick)
+
+    changed = []
+    g.stub(g.originals[CHANGE_ACTION], lambda _, group, slot, flags:
+           changed.append((group, slot, flags)))
+    g.run(CHANGE_ACTION, actor, 16, 3, 0x80)
+    assert not changed
+    g.run(CHANGE_ACTION, actor, 16, 0x8000, 0)
+    g.run(CHANGE_ACTION, actor, 16, 241, 0x40)
+    g.run(CHANGE_ACTION, actor, 1, 6, 0)
+    assert changed == [(16, 0x8000, 0), (16, 241, 0x40), (1, 6, 0)]
+
+    rows = [(16, 3, 8), (0x8010, 12, 8), (1, 6, 6), (16, 803, 6), (0x8010, 241, 0x13)]
+    table, pointers = g.alloc(24), g.alloc(4 * len(rows))
+    g.put(table + 8, len(rows))
+    g.put(table + 12, len(rows))
+    g.put(table + 20, pointers)
+    for i, (group, slot, condition) in enumerate(rows):
+        entry, resource = g.alloc(24), g.alloc(128)
+        g.put(entry + 8, resource)
+        g.put(pointers + 4 * i, entry)
+        g.cpu.mem_write(resource + 100, struct.pack("<4H", group, slot, 0, condition))
+    g.stub(g.originals[COMMAND_BIND], lambda *_: g.put(actor + 9384, table))
+    g.run(COMMAND_BIND, actor, 1000, 0)
+    filtered = g.get(actor + 9384)
+    entries = g.get(filtered + 20)
+    assert [g.get(entries + 4 * i) for i in range(g.get(filtered + 8))] == [
+        g.get(pointers + 4 * i) for i in range(2, 5)
+    ]
+
+    # A fixed-loadout scratch record uses GU's original controls.
+    g.put(actor + 5060, scratch)
+    g.run(DISPATCH, actor)
+    g.run(CHANGE_ACTION, actor, 16, 3, 0x80)
+    g.run(COMMAND_BIND, actor, 1000, 0)
+    assert received == [4, None] and native_tick == [True]
+    assert changed[-1] == (16, 3, 0x80) and g.get(actor + 9384) == table
 
 
 def verify_status(g):
@@ -620,6 +691,7 @@ def verify():
     assert restarted.run(service(restarted)[1], 0) == 10
     verify_status(restarted)
     verify_guild(boot(elf, character_save({0: 10})))
+    verify_expansion_controls(boot(elf, character_save({})))
     verify_set_styles(restarted)
     open_box()
     press(0x40)

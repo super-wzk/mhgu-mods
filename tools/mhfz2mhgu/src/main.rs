@@ -94,6 +94,12 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Convert the local Frontier Magnet Spike hunter motions and battle tables.
+    MagnetSpikeBattle {
+        dat: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Convert the original long sword effect banks and animation sounds.
     LongSwordEffects {
         dat: PathBuf,
@@ -298,6 +304,12 @@ fn main() -> Result<()> {
                 &output.join("sound.arc"),
                 mhgu_resource::arc::encode(&assets)?,
             )
+        }
+        Command::MagnetSpikeBattle { dat, output } => {
+            fs::create_dir_all(&output)?;
+            let weapon = hunter::Weapon::MagnetSpike;
+            save(&output.join("motions.arc"), hunter::motions(&dat, weapon)?)?;
+            save(&output.join("magnet_spike.fmsa"), hunter::actions(&dat, weapon)?)
         }
         Command::LongSwordSound { dat, output } => {
             let (assets, timeline) = sound::long_sword(&dat)?;

@@ -1,4 +1,5 @@
 //! Extend the local hunter's command table at GU's binding point.
+use super::{Entry as StyleEntry, local_entry, routes};
 use core::{cell::UnsafeCell, ptr};
 use mhgu_sdk::weapon::style::{
     action::{
@@ -39,19 +40,35 @@ static BINDING: LocalBinding = LocalBinding(UnsafeCell::new(Binding {
 }));
 
 impl Binding {
-    unsafe fn bind(&mut self, actor: u32, stock: Table, set: &CommandSet) {
+    unsafe fn bind(
+        &mut self,
+        actor: u32,
+        stock: Table,
+        style: &StyleEntry,
+        set: Option<&CommandSet>,
+    ) {
         let mut first = 0;
         for i in 0..stock.count as usize {
             let entry = unsafe { stock.entries.add(i).read() };
-            let destination = unsafe { entry.as_ref().and_then(|e| e.resource.as_ref()) }
-                .map(|r| (r.command.group, r.command.slot));
-            if !set.keeps_native(destination) {
+            let command =
+                unsafe { entry.as_ref().and_then(|e| e.resource.as_ref()) }.map(|r| &r.command);
+            if set.is_some_and(|set| !set.keeps_native(command.map(|c| (c.group, c.slot)))) {
+                continue;
+            }
+            // GU may consume a buffered row before the state-change hook can
+            // decline it. Remove fallback weapon branches at binding time.
+            if style.kind.is_some()
+                && let Some(command) = command
+                && command.group & 0x7fff == action::GROUP
+                && command.condition != action::Transition::HUNTER_ART.condition
+                && !unsafe { routes::shared_weapon_slot(actor, command.slot) }
+            {
                 continue;
             }
             self.entries[first] = entry;
             first += 1;
         }
-        let rows = set.rows();
+        let rows = set.map_or(&[][..], CommandSet::rows);
         let count = first + rows.len();
         if count > CAPACITY {
             return;
@@ -99,25 +116,24 @@ unsafe fn bind(actor: u32, id: u32, origin: u32) {
         return;
     }
     unsafe {
-        let Some(style) = crate::weapon::style::local_style(actor) else {
-            return;
-        };
-        let Some(bind) = style.commands else {
+        let Some(entry) = local_entry(actor) else {
             return;
         };
         // 2E9B7C only resets the native buffer for an enabled hunter.
         if ((actor + 5068) as *const u32).read() & 1 == 0 {
             return;
         }
-        let Some(set) = bind(actor, id).as_ref() else {
+        let style = entry.style;
+        let set = style.commands.and_then(|bind| bind(actor, id).as_ref());
+        if set.is_none() && entry.kind.is_none() {
             return;
-        };
+        }
         let stock = table(actor)
             .read()
             .as_ref()
             .copied()
             .unwrap_or(Table::EMPTY);
-        let rows = set.rows();
+        let rows = set.map_or(&[][..], CommandSet::rows);
         if rows.len() > CAPACITY
             || stock.count as usize > CAPACITY
             || rows.iter().any(|row| {
@@ -136,7 +152,7 @@ unsafe fn bind(actor: u32, id: u32, origin: u32) {
         {
             return;
         }
-        (*BINDING.0.get()).bind(actor, stock, set);
+        (*BINDING.0.get()).bind(actor, stock, entry, set);
     }
 }
 

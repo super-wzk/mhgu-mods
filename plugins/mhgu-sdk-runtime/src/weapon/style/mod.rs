@@ -180,13 +180,19 @@ extern "C" fn selected(weapon: u32) -> u32 {
 }
 
 unsafe fn actor_entry(actor: u32) -> Option<&'static Entry> {
-    if actor == 0 {
-        return None;
+    let equipment = unsafe { inventory::actor_equipment(actor) };
+    // When GU spawns the local hunter from its own equip record (2758A4),
+    // that record holds the retail fallback. Arena and other scratch records
+    // must still use the weapon that GU assigned to them.
+    if unsafe { inventory::is_native_local(equipment) }
+        && let Some((_, entry)) = inventory::selected()
+    {
+        return Some(entry);
     }
-    unsafe { active_equipment(inventory::actor_equipment(actor)) }
+    unsafe { active_equipment(equipment) }
 }
 
-unsafe fn local_entry(actor: u32) -> Option<&'static Entry> {
+pub(super) unsafe fn local_entry(actor: u32) -> Option<&'static Entry> {
     if actor == 0 || unsafe { local_hunter() } != actor || !unsafe { hunter::is_quest(actor) } {
         return None;
     }
@@ -463,26 +469,30 @@ unsafe fn change_action(actor: u32, group: u32, slot: u32, flags: u32) -> u32 {
 }
 
 unsafe fn resolve_weapon_slot(actor: u32, slot: u16, flags: u16) -> Option<u16> {
-    let style = unsafe { local_style(actor) };
+    let entry = unsafe { local_entry(actor) };
     if let Some(id) = action::custom_id(action::GROUP, slot) {
-        return style
-            .or_else(|| unsafe { multiplayer::peer_entry(actor) }.map(|e| e.style))?
+        return entry
+            .or_else(|| unsafe { multiplayer::peer_entry(actor) })?
+            .style
             .actions
             .contains(id)
             .then_some(slot);
     }
-    let Some(style) = style.filter(|style| style.controller.is_some()) else {
+    let Some(entry) = entry.filter(|e| e.kind.is_some() || e.style.controller.is_some()) else {
         return Some(slot);
     };
-    if unsafe { routes::allows_native_art(actor, style, slot, flags) } {
+    if unsafe { routes::allows_native_art(actor, entry.style, slot, flags) } {
         return Some(slot);
     }
-    unsafe { routes::resolve_stock_slot(actor, style, slot, flags) }
+    unsafe { routes::resolve_stock_slot(actor, entry.style, slot, flags) }
 }
 
 unsafe fn resolve_request(actor: u32, style: &Style, req: ActionRequest) -> Option<u16> {
     let id = unsafe { (style.request?)(actor, &req) };
-    if id == mhgu_sdk::weapon::style::NATIVE_ACTION && !req.draw_route {
+    if id == mhgu_sdk::weapon::style::NATIVE_ACTION
+        && !req.draw_route
+        && style.weapon < mhgu_sdk::weapon::WeaponKind::COUNT as u32
+    {
         return Some(req.slot);
     }
     let id = u8::try_from(id).ok()?;

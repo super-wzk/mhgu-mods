@@ -91,6 +91,7 @@ pub enum Weapon {
     LongSword = 7,
     Gunlance = 9,
     SwitchAxe = 12,
+    MagnetSpike = 13,
 }
 
 fn hunter_rig(dat: &Path, sex: &str) -> Result<Rig> {
@@ -127,6 +128,7 @@ pub fn motions(dat: &Path, weapon: Weapon) -> Result<Vec<u8>> {
         Weapon::LongSword => ("w07", "frontier_ls", [100, 15, 60]),
         Weapon::Gunlance => ("w09", "frontier_gl", [100, 15, 85]),
         Weapon::SwitchAxe => ("w12", "frontier_sa", [70, 25, 100]),
+        Weapon::MagnetSpike => ("w13", "frontier_ms", [85, 25, 100]),
     };
     let rigs = [hunter_rig(dat, "m")?, hunter_rig(dat, "f")?];
     let b = pac::decode(read(&dat.join(format!("motion/{source}.mot")))?)?;
@@ -272,6 +274,8 @@ pub fn motions(dat: &Path, weapon: Weapon) -> Result<Vec<u8>> {
                         Weapon::GreatSword => equipment(&mut w, gu_slot, motion)?,
                         Weapon::SwitchAxe => switch_axe_equipment(&mut w, gu_slot, motion)?,
                         Weapon::LongSword => long_sword_equipment(&mut w, gu_slot, motion)?,
+                        // w13w.mot drives the weapon's own rig separately.
+                        Weapon::MagnetSpike => {}
                     }
                 }
             }
@@ -469,6 +473,7 @@ pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
         Weapon::LongSword => (85, b"FLSA"),
         Weapon::Gunlance => (82, b"FGLA"),
         Weapon::SwitchAxe => (178, b"FSAA"),
+        Weapon::MagnetSpike => (165, b"FMSA"),
     };
     let n = word(data, weapon)?;
     ensure!(n == states, "unrecognized Frontier state table: {n} states");
@@ -478,26 +483,26 @@ pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
     out.extend((n as u16).to_le_bytes());
     // The first SDT bank is the hunter melee bank (selector 0). FZ copies one
     // 40-byte row when spawning a contact; callbacks can compute the ID at run time.
-    // Switch Axe event 4 constructs family 106 (81163D4C).
-    let (bank, family) = if kind == Weapon::SwitchAxe {
-        (6 * 28, 106)
-    } else {
-        (0, 0)
+    let (bank, family) = match kind {
+        Weapon::SwitchAxe => (6, 106),
+        // w13 event 3 (81225C60) creates a family 120 contact in 81164B64.
+        Weapon::MagnetSpike => (9, 120),
+        _ => (0, 0),
     };
-    ensure!(word(&sdt, bank)? == family << 16, "unexpected SDT family");
-    let attacks = u16::from_le_bytes(
-        sdt.get(bank + 4..bank + 6)
-            .context("short SDT bank")?
-            .try_into()?,
-    );
-    let start = word(&sdt, bank + 8)?;
-    ensure!(attacks > 0 && start >= 28, "empty SDT hunter table");
-    let rows = sdt
-        .get(start..)
-        .and_then(|t| t.get(..usize::from(attacks) * 40))
-        .context("truncated SDT hunter contacts")?;
+    let contact_rows = |bank: usize, family: usize| -> Result<_> {
+        let bank = bank * 28;
+        ensure!(word(&sdt, bank)? == family << 16, "unexpected SDT family");
+        let attacks = word(&sdt, bank + 4)? & 0xffff;
+        let start = word(&sdt, bank + 8)?;
+        ensure!(attacks > 0 && start >= 28, "empty SDT hunter table");
+        let rows = sdt
+            .get(start..start + attacks * 40)
+            .context("truncated SDT hunter contacts")?;
+        Ok((attacks as u32, rows))
+    };
+    let (attacks, rows) = contact_rows(bank, family)?;
     let attack_offset = 16 + 24 * n;
-    out.extend(u32::from(attacks).to_le_bytes());
+    out.extend(attacks.to_le_bytes());
     out.extend((attack_offset as u32).to_le_bytes());
     out.resize(attack_offset, 0);
     out.extend(rows);
@@ -533,6 +538,14 @@ pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
                 }
             }
         }
+    }
+    if kind == Weapon::MagnetSpike {
+        // w13 event 4 (81225C8A) and the finisher (81226438) use family 121.
+        let (count, rows) = contact_rows(10, 121)?;
+        out.extend(b"MSFX");
+        out.extend(count.to_le_bytes());
+        out.extend(rows);
+        return Ok(out);
     }
     if kind == Weapon::SwitchAxe {
         // PC DAT 0xa88 corresponds to the Vita parameter directory at +2692.

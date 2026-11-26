@@ -13,6 +13,8 @@ MHF-Z 的 `mhfdat.bin` 近战装备记录 16881 指向模型 6451，类别为 13
 
 打包时从本地 MHF-Z 的 `dat/mhf.bin` 读取第 54 号 PNG 条目（从零计数），原样取出左上角坐标为 `(192, 896)` 的 64×64 磁斩锤图标。生成的 `GUI/frontier_magnet_spike/icon.tex` 和 NRO、模型 ARC 一起安装。
 
+磁斩锤的 FZ 武器编号为 13。转换器的 [`magnet-spike-battle`](../../tools/mhfz2mhgu/README.md) 子命令为接入战斗准备猎人动作和源动作表。武器部件使用独立的 `motion/w13w.mot`，部件播放和极之型控制器待接入。
+
 ## 构建与验证
 
 从仓库根目录运行以下命令。
