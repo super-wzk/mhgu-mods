@@ -19,3 +19,7 @@ cargo test --workspace --manifest-path tools/mhfz2mhgu/Cargo.toml
 `magnet-spike-battle "$MHFZ_DAT" -o OUTPUT_DIR` 将 `motion/w13.mot` 的猎人动作、`motion/w13w.mot` 的武器部件动作与近战 HTS 写入 `motions.arc`。部件按 `wk451.bin` 中的 11 骨骼模型转换，保留源槽位、空槽和循环起点。近战 HTS 对应判定族 120 的选择器 1 至 8，保留胶囊的半径、端点和挂点。传入 `--material-template` 时，输出同时包含模型、材质和贴图，文件名为 `magnet_spike.arc`。`magnet_spike.fmsa` 包含 `mhfdat.bin` 中的 165 个动作状态及 `mhfsdt.bin` 中判定族 120、121 的记录与形状。第 4 版中，`MSHT` 段按选择器保留原始形状列表，`MSCT` 段保存各状态的磁力消耗格数，`MSPR` 段保存武器参数和状态形态分类。
 
 磁斩锤的 `we13.snd` 与 `common01.snd` 按用到的请求生成 ADPCM、SBKR 和 SRQR，依次装入同一 ARC。输出的 `frontier_ms_sound.flse` 保存动作帧、音效库与加权请求选项，和动作表一起编入 NRO。
+
+给 `magnet-spike-battle` 传入 `--gu-weapon "$MHGU_ROMFS/nativeNX/arc/player/quest/w00.arc"` 时，从 `effect.bin` 的 4037 号特效组转换第 11、14 项，分别供磁力弹和部位标记使用。原始网格和贴图以及 GU 的 EFL、PEL 随动作 ARC 打包，`effects/routes.bin` 随动作表编入 NRO。旋转曲线保持原版每 540 帧一圈，供长期显示的部位标记使用。
+
+同一转换还输出 4037 组第 21、22、70、71 项及 4035／4036 组第 2 项。两种格挡的火花使用第 21 项，按 FZ `8102CDDC` 中的局部坐标及原生出生延迟写入 GU 粒子定义。

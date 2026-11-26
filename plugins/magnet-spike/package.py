@@ -21,6 +21,7 @@ def package(dat, romfs):
         subprocess.run([
             "cargo", "run", "--locked", "--release", "--", "magnet-spike-battle", dat,
             "--material-template", romfs / "nativeNX/arc/enemy/em030_00.arc",
+            "--gu-weapon", romfs / "nativeNX/arc/player/quest/w00.arc",
             "-o", staging,
         ], cwd=CONVERTER, env=env, check=True)
         subprocess.run([
@@ -31,6 +32,7 @@ def package(dat, romfs):
         assets.mkdir(parents=True, exist_ok=True)
         for table in ("magnet_spike.fmsa", "frontier_ms_sound.flse"):
             shutil.copy2(Path(staging) / table, assets)
+        shutil.copy2(Path(staging) / "effects/routes.bin", assets / "frontier_ms_routes.bin")
         subprocess.run(["cargo", "forge", "build", "--release"], cwd=ROOT, env=env, check=True)
         for src, dest in (
             (arc, nx / "arc/frontier"),

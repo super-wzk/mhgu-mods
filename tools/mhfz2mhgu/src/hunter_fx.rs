@@ -30,6 +30,7 @@ enum WeaponEffect {
     GreatSword,
     DualBlades,
     LongSword,
+    MagnetSpike,
 }
 
 fn half(data: &[u8], at: usize) -> Result<u16> {
@@ -118,6 +119,20 @@ pub fn dual_blades(dat: &Path, out: &Path, gu_weapon: &Path) -> Result<()> {
 const SWITCH_AXE_PHIAL: &[u16] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31];
 
 fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect) -> Result<()> {
+    let assets = convert_assets(dat, out, gu_weapon, weapon_effect)?;
+    save(&out.join("geometry.arc"), arc::encode(&assets)?)
+}
+
+pub fn magnet_spike(dat: &Path, out: &Path, gu_weapon: &Path) -> Result<Vec<Asset>> {
+    convert_assets(dat, out, gu_weapon, WeaponEffect::MagnetSpike)
+}
+
+fn convert_assets(
+    dat: &Path,
+    out: &Path,
+    gu_weapon: &Path,
+    weapon_effect: WeaponEffect,
+) -> Result<Vec<Asset>> {
     let (namespace, effects): (_, &[(u16, &[u16])]) = match weapon_effect {
         WeaponEffect::SwordShield => ("frontier_sns", &[
             (3013, &[10]), (4020, &[0, 4, 5, 9, 11, 12, 13, 17, 18]),
@@ -158,6 +173,10 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
             ],
         ),
         WeaponEffect::DualBlades => ("frontier_db", &[(4021, &[1])]),
+        WeaponEffect::MagnetSpike => (
+            "frontier_ms",
+            &[(4037, &[11, 14, 70, 71, 22]), (4035, &[2]), (4036, &[2])],
+        ),
     };
     let bundle = pac::decode(read(&dat.join("effect.bin"))?)?;
     let banks = pac::member(&bundle, 18)?;
@@ -205,13 +224,13 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
         save(&out.join(format!("{id}.bank")), data)?;
     }
     let dual_blades = matches!(weapon_effect, WeaponEffect::DualBlades);
-    let weapon_id = match weapon_effect {
+    let motion_weapon = match weapon_effect {
         WeaponEffect::Gunlance => {
             playback.footfalls(0.03)?;
             playback.sword_flash(0)?;
             playback.gunlance_blade()?;
             playback.gunlance_shell_feedback()?;
-            9
+            Some(9)
         }
         WeaponEffect::SwordShield => {
             playback.footfalls(0.)?;
@@ -219,7 +238,7 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
                 playback.blade_strip(id)?;
             }
             playback.round_force_ring()?;
-            4
+            Some(4)
         }
         WeaponEffect::SwitchAxe => {
             let mut keys = Vec::new();
@@ -232,7 +251,7 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
             save(&out.join("selectors.bin"), keys)?;
             playback.footfalls(0.)?;
             playback.switch_axe_cartridge()?;
-            12
+            Some(12)
         }
         WeaponEffect::GreatSword => {
             let weapon = load_bank(4022)?;
@@ -245,7 +264,7 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
             playback.bank(&weapon, 4022, &[15, 17])?;
             playback.bank(&dry, 4035, &[15])?;
             playback.bank(&wet, 4036, &[15])?;
-            0
+            Some(0)
         }
         WeaponEffect::DualBlades => {
             let params = crate::hunter::dual_blades_parameters(&mhfdat)?;
@@ -261,7 +280,7 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
                 playback.bank(&load_bank(bank)?, bank, &[4])?;
             }
             playback.dual_blade_glows(params, true)?;
-            6
+            Some(6)
         }
         WeaponEffect::LongSword => {
             for mesh in 504..=512 {
@@ -271,10 +290,23 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
             playback.footfalls(0.)?;
             playback.spirit_full()?;
             playback.bank(&load_bank(4036)?, 4036, &[11, 13, 14])?;
-            7
+            Some(7)
+        }
+        WeaponEffect::MagnetSpike => {
+            let bank = load_bank(4037)?;
+            // FZ 8102CDDC, effects A and 6. One FZ update is two GU frames.
+            playback.staggered_bank(&bank, 4037, 21, &[
+                (8, [30., 0., -100.]), (12, [60., 0., 10.]), (16, [30., 0., 100.]),
+            ])?;
+            playback.staggered_bank(&bank, 4037, 21, &[
+                (0, [0., 0., 40.]), (12, [0., 0., 100.]), (24, [0., 0., 170.]),
+            ])?;
+            None
         }
     };
-    save(&out.join("motion_fx.bin"), motion_fx(&mhfdat, weapon_id)?)?;
+    if let Some(weapon_id) = motion_weapon {
+        save(&out.join("motion_fx.bin"), motion_fx(&mhfdat, weapon_id)?)?;
+    }
     let pair = pac::member(&bundle, 0)?;
     let bytes = pac::member(&pair, 0)?;
     let model = Fmod::parse(&bytes)?;
@@ -414,7 +446,7 @@ fn convert(dat: &Path, out: &Path, gu_weapon: &Path, weapon_effect: WeaponEffect
     assets.extend(effects);
     save(&out.join("routes.bin"), routes)?;
     fs::write(out.join("bindings.tsv"), bindings)?;
-    save(&out.join("geometry.arc"), arc::encode(&assets)?)
+    Ok(assets)
 }
 
 // 817BE150 resolves the weapon's clip directory from mhfdat + 0x618.

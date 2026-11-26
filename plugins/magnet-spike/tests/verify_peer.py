@@ -41,7 +41,7 @@ def capture_position(g, actor):
 
 
 def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_action, tick, meter,
-                flight_packets, boost_packets, guard_packets, shot_packet, sounds):
+                flight_packets, boost_packets, guard_packets, shot_packet, sounds, effects):
     manager, equipment = g.get(0x1885B58), g.get(local + 5060)
     g.put(0x18843F0, g.alloc(0x16280))
     actions = g.alloc(200)
@@ -122,6 +122,8 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
         g.put(manager + 28 + 4 * index, actor)
         g.put(actor, vtable)
         g.put(actor + 240, g.alloc(128))
+        g.put(actor + 1172, g.get(local + 1172))
+        g.put(actor + 1176, g.get(local + 1176))
         g.put(actor + 5060, manager + 7004 + 1376 * index)
         g.cpu.mem_write(actor + 4177, bytes([index]))
         g.cpu.mem_write(actor + 5078, struct.pack("<h", 100))
@@ -267,6 +269,7 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
         (second, guard_packets[1], 115, 1410, 24., 73),
     ):
         first_sound = len(sounds)
+        first_effect = len(effects)
         receive(actor, packet)
         assert g.half(actor + 9482) == 0x8000 + state
         frame(actor, 0.)
@@ -278,6 +281,21 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
         if state == 77:
             assert [cue for owner, name, cue, _ in sounds[first_sound:]
                     if owner == actor and name == "blade"] == [13, 12]
+            assert [(selector, parent) for selector, parent, _ in effects[first_effect:]] == [
+                (i, actor + 600) for i in list(range(13, 37)) + list(range(93, 99))
+            ]
+        else:
+            assert len(effects) == first_effect
+
+    # A peer confirms the impact guard with state 113, before either assault.
+    first_effect = len(effects)
+    receive(second, guard_packets[2])
+    frame(second, 0.)
+    frame(second, 1.)
+    assert [selector for selector, _, _ in effects[first_effect:]] == (
+        list(range(37, 70)) + list(range(99, 105))
+    )
+    assert all(parent == second + 600 for _, parent, _ in effects[-6:])
 
     # Remote playback uses the sender's shot action and its source event.
     first_sound = len(sounds)

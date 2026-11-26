@@ -198,10 +198,17 @@ def replay():
     paths = []
     audio_banks = {}
     sounds = []
+    pel_name = r"effect\frontier_ms\particles"
+    pel = g.alloc(176)
+    g.put(pel + 80, 1)
 
     def resource(_, kind, path, flags):
         name = g.string(path)
         paths.append(name)
+        if kind == 0x1889FDC:
+            assert flags == 2 and name == pel_name
+            assert resources[name, 0x5A525C16].startswith(b"PEL\0")
+            return pel
         if kind == 0x2125BEC:
             assert flags == 2  # Hunt preload uses the asynchronous native request.
             request = resources[name, 0x1BCC4966]
@@ -253,6 +260,7 @@ def replay():
     assert paths == ([r"arc\frontier\magnet_spike"]
                      + [rf"player\mot\frontier_ms\{g}" for g in (0, 2, 4)]
                      + [rf"player\hit\frontier_ms\melee_{i}" for i in range(1, 9)]
+                     + [pel_name]
                      + [rf"sound\se\pl\frontier_ms\{name}" for name in ("blade", "common")])
     packed = g.run(ENCODE, actor, PRIVATE | 1440)
     assert packed & 255 == 40 and g.run(DECODE, actor, packed) == PRIVATE | 1440
@@ -399,9 +407,9 @@ def verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter, motion
     verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick, meter)
     verify_deflection(g, actor, vtable, monster, hurt, set_action, tick, motions)
     boost_packets = verify_magnetic_boost(g, actor, monster, collision, set_action, tick, meter)
-    guard_packets = verify_guard(g, actor, set_action, tick, meter, motions, sounds)
+    guard_packets, effects = verify_guard(g, actor, set_action, tick, meter, motions, sounds)
     verify_peer(g, actor, vtable, part, monster, status, collision, credit, set_action, tick, meter,
-                flight_packets, boost_packets, guard_packets, shot_packet, sounds)
+                flight_packets, boost_packets, guard_packets, shot_packet, sounds, effects)
 
 
 def verify_guard(g, actor, set_action, tick, meter, motions, sounds):
@@ -410,6 +418,33 @@ def verify_guard(g, actor, set_action, tick, meter, motions, sounds):
     g.cpu.hook_del(g.traps.pop(0x2864C4))
     g.stub(0x2864C4, lambda _actor, skill, *_: int(skill in skills))
     damage = g.alloc(8)
+    effects = []
+    wet = False
+
+    def submit(_, unit, handle, group):
+        assert handle == group == 1
+        selector = g.get(g.cpu.reg_read(UC_ARM_REG_SP))
+        parent = g.get(unit + 320)
+        if parent:
+            assert g.half(unit + 194) == 8 and g.get(unit + 132) & 0x80
+        offset = unit + (144 if parent else 304)
+        point = struct.unpack("<3f", g.cpu.mem_read(offset, 12))
+        effects.append((selector, parent, point))
+        return 1
+
+    def ground(_, owner, point, previous):
+        assert point != 0 and owner != 0
+        sp = g.cpu.reg_read(UC_ARM_REG_SP)
+        g.cpu.mem_write(g.get(sp + 4), struct.pack("<f", -100.))
+        g.cpu.mem_write(g.get(sp + 8) + 20, struct.pack("<f", 0. if wet else -100001.))
+        return 1
+
+    get_parent = g.alloc(4)
+    g.put(g.get(actor) + 304, get_parent)
+    g.stub(get_parent, lambda owner, *_: owner + 600)
+    for address, callback in ((0x3267D0, submit), (0x18192C, ground)):
+        g.cpu.hook_del(g.traps.pop(address))
+        g.stub(address, callback)
 
     def state():
         return g.half(actor + 9482)
@@ -457,12 +492,14 @@ def verify_guard(g, actor, set_action, tick, meter, motions, sounds):
     probe(26., accepted=0)
     at(26.)
     assert state() == 0x8000 + 14  # Collision probe alone cannot trigger a counter.
+    assert not effects
     at(32.)
     assert g.half(actor + 12320 + 56) == 30
 
     for frames, follow_up in (((4.,), 57), ((4., 14.), 76), ((4., 14., 24.), 77)):
         start()
         first_sound = len(sounds)
+        first_effect = len(effects)
         for frame in frames:
             # Multiple queries of the same hit precede one native settlement.
             probe(frame, settle=False)
@@ -475,6 +512,12 @@ def verify_guard(g, actor, set_action, tick, meter, motions, sounds):
         assert struct.unpack("<f", g.cpu.mem_read(actor + 11072, 4)) == (28.,)
         assert [cue for _, name, cue, _ in sounds[first_sound:]
                 if name == "blade" and cue in (12, 13)] == [13, 12]
+        parent = actor + 600
+        assert effects[first_effect:] == (
+            [(i, parent, (30., 0., -70.)) for i in range(13, 26)]
+            + [(i, parent, (40., 0., 100.)) for i in range(26, 37)]
+            + [(i, parent, (0., 0., 0.)) for i in range(93, 99)]
+        )
         at(32.)
     slash_counter = capture_action(g, actor)
 
@@ -495,10 +538,19 @@ def verify_guard(g, actor, set_action, tick, meter, motions, sounds):
     # Run GU's full received-hit handler, with a queued hit but no chip.
     g.cpu.mem_write(actor + 12768, b"\x01")
     g.cpu.mem_write(actor + 12820, struct.pack("<HBxHHh", 0, 0, 0, 0xffff, 100))
+    g.cpu.mem_write(actor + 64, struct.pack("<3f", 400., 10., 500.))
+    g.cpu.mem_write(actor + 4076, struct.pack("<H", 0x4000))
+    first_effect = len(effects)
     assert g.run(0x2EE508, actor) == 1 and state() == 0x8000 + 112
+    assert effects[first_effect:] == (
+        [(i, 0, (500., 130., 500.)) for i in range(37, 56)]
+        + [(i, 0, (500., 10., 500.)) for i in range(56, 70)]
+        + [(i, actor + 600, (0., 0., 0.)) for i in range(99, 105)]
+    )
     g.cpu.mem_write(actor + 12768, b"\0")
     at(31.)
     assert state() == 0x8000 + 113 and motions[-1] == (1490, 0., 0.)
+    impact_guard = capture_action(g, actor)
     at(25., X)
     assert state() == 0x8000 + 113
     at(26., X)
@@ -511,7 +563,13 @@ def verify_guard(g, actor, set_action, tick, meter, motions, sounds):
     assert state() == 0x8000 + 112  # Still in impact mode with the weapon drawn.
     skills.add(168)
     probe(36., accepted=0)
+    wet = True
+    first_effect = len(effects)
     probe(35.)
+    assert [selector for selector, _, _ in effects[first_effect:]] == (
+        list(range(37, 56)) + list(range(70, 93)) + list(range(99, 105))
+    )
+    wet = False
     skills.clear()
     at(35.)
     at(26., X | A)
@@ -531,7 +589,7 @@ def verify_guard(g, actor, set_action, tick, meter, motions, sounds):
     tick()
     tick(common=shoulder)
     assert state() == 0x8000 + 112
-    return slash_counter, impact_assault
+    return (slash_counter, impact_assault, impact_guard), effects
 
 
 def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, set_action, tick, meter, sounds):
@@ -543,6 +601,35 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
 
     def matrix(address, x, y, z):
         put_vec(address, 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., x, y, z, 1.)
+
+    handle = g.alloc(16)
+    g.put(handle + 4, 1)
+    g.put(0x188A0D4, g.alloc(4))
+    g.put(0x2126F48, g.alloc(4))
+    g.stub(0x3268D8, lambda *_: handle)
+    g.stub(0x326C78, lambda *_: 0)
+    g.stub(0x3288C4, lambda size, *_: g.alloc(size))
+    g.stub(0x328900, lambda *_: 0)
+    layers = {}
+
+    def spawn(_, unit, handle_id, group):
+        assert handle_id == group == 1
+        selector = g.get(g.cpu.reg_read(UC_ARM_REG_SP))
+        child = g.alloc(80)
+        g.put(unit + 336, child)
+        put_vec(child + 64, *position(unit + 304))
+        layers[unit] = (selector, child + 64)
+        return 1
+
+    def stop(unit, immediate, *_):
+        assert immediate == 1
+        del layers[unit]
+
+    def visuals():
+        return [(selector, position(child)) for selector, child in layers.values()]
+
+    g.stub(0x3267D0, spawn)
+    g.stub(0x32A400, stop)
 
     mapping, matrices = g.alloc(256), g.alloc(160)
     g.put(actor + 1172, matrices)
@@ -611,24 +698,37 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     tick(frame=11.)
     update()
     assert not rays and not joints
+    assert not visuals()
     assert meter()[1] == 0
     assert [cue for _, bank, cue, _ in sounds[first_sound:]] == [8, 74]
     tick(frame=12.)
     tick(frame=12.)
     assert [cue for _, bank, cue, _ in sounds[first_sound:]] == [8, 74, 9]
     assert sounds[-1] == (actor, "blade", 9, (25., 100., 50.))
+    assert visuals() == [(i, (25., 100., 50.)) for i in range(8)]
     update()
     assert rays == [((25., 100., 50.), (25., 100., 550.))], rays
+    assert visuals() == [(i, (25., 100., 550.)) for i in range(8)]
     update()
     assert rays[-1] == ((25., 100., 550.), (25., 100., 1050.)), rays
     assert joints.count((monster, 5)) == 4, joints  # Sweep, attach and sample the mark.
     assert meter()[1] == 1
+    hit_point = visuals()[0][1]
+    assert hit_point[:2] == (25., 100.) and 1000. <= hit_point[2] <= 1100.
+    assert visuals() == [(i, hit_point) for i in range(8, 13)]
     rays.clear()
     joints.clear()
     matrix(pose, 100., 95., 2150.)
     update()
     assert not rays and joints == [(monster, 5)]
     assert meter()[1] == 2
+    follow = (100., 95., hit_point[2] + 1050.)
+    assert visuals() == [(i, follow) for i in range(8, 13)]
+    # A release from the engine may precede the end of the mark.
+    unit = next(iter(layers))
+    del layers[unit]
+    g.stub(g.originals[0x32A104], lambda *_: 0)
+    g.run(g.hooks[0x32A104], unit)
     matrix(pose, 100., 95., 4150.)
     update()
     assert meter()[1] == 0
@@ -638,6 +738,7 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     g.put(status + 880, hp)
     update()
     assert not joints
+    assert not visuals()
 
     set_action(1, 0)
     tick(SPECIAL, native_pad=True)
@@ -651,6 +752,7 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     wall = True
     update()
     assert rays == [((25., 100., 50.), (525., 100., 50.))], rays
+    assert not visuals()
     update()
     assert len(rays) == 1 and not joints
     assert g.get(status + 880) == hp and len(credit) == credit_count
@@ -667,6 +769,7 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     put_vec(clock, 0.)
     update()
     assert not rays and not joints
+    assert visuals() == [(i, (25., 100., 50.)) for i in range(8)]
     put_vec(clock, 2.)
     update()
     assert len(rays) == 1 and joints == [(monster, 5)] * 3
@@ -681,6 +784,7 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     update()
     assert not rays and not joints
     assert meter()[1] == 0
+    assert not visuals()
 
     water = 110.
     tick(frame=60., ended=True)
@@ -688,6 +792,7 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     tick(frame=14.)
     update()
     assert len(rays) == 1 and not joints
+    assert not visuals()
     update()
     assert len(rays) == 1 and not joints
 

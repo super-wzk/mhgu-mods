@@ -1,5 +1,6 @@
 //! Magnetic shot and attached mark, updated on the GU scene clock.
 use crate::{
+    fx::{Effect, Route},
     motion,
     program::{self, Mode},
 };
@@ -15,18 +16,18 @@ use mhgu_sdk::{
     },
 };
 
-extern crate alloc;
-
 struct Projectile {
     area: u8,
     position: [f32; 3],
     velocity: [f32; 3],
     remaining: f32,
+    effect: Effect,
 }
 
 struct Mark {
     target: Target,
     remaining: f32,
+    effect: Effect,
 }
 
 struct Gauge {
@@ -313,11 +314,14 @@ pub unsafe fn launch(actor: u32, direction: [f32; 3]) {
     let speed = f32::from(program::parameter(16)) / 2.;
     LOCAL.with(|state| {
         state.select_owner(actor);
+        let mut effect = Effect::new(Route::Shot);
+        effect.move_to(position);
         state.shots.push(Projectile {
             area,
             position,
             velocity: direction.map(|component| component * speed),
             remaining: duration,
+            effect,
         });
     });
 }
@@ -367,18 +371,25 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
                 *mark = Some(Mark {
                     target,
                     remaining: 2. * f32::from(program::parameter(14)),
+                    effect: Effect::new(Route::Mark),
                 });
                 return false;
             }
             shot.remaining -= step;
             shot.position = end;
-            shot.remaining > 0.
+            if shot.remaining <= 0. {
+                return false;
+            }
+            shot.effect.move_to(end);
+            true
         });
         // Publish only the range category for the HUD. The scene callback
         // owns the live monster and bone handles used to compute it.
-        let point = mark
-            .as_ref()
-            .and_then(|current| scene.position(&current.target));
+        let point = mark.as_mut().and_then(|current| {
+            let point = scene.position(&current.target)?;
+            current.effect.move_to(point);
+            Some(point)
+        });
         state.range = if let Some(point) = point {
             MarkRange::between(unsafe { movement::position(scene.owner()) }, point)
         } else {

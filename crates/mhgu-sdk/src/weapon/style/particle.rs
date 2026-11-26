@@ -83,6 +83,24 @@ pub unsafe fn stop_unit(unit: u32) {
     unsafe { stop(unit, 1) };
 }
 
+/// Translate a world-anchored unit. Its live generators keep their current age.
+///
+/// # Safety
+/// Call on the game thread for a live unit emitted with a world anchor by
+/// `Bank`. The caller must drop the handle before the native unit is freed.
+pub unsafe fn move_world_unit(unit: u32, position: [f32; 3]) {
+    unsafe {
+        let Some(unit) = Object::at(unit) else { return };
+        // The deferred emitter reads this override before creating its children.
+        unit.embedded(128).set(Field::at(176), position);
+        // GU uses this setter for moving effects, including 3FCFE4 and 400F44.
+        // Each private bank row spawns one generator list.
+        let translate: unsafe extern "C" fn(u32, *const f32, u32) =
+            core::mem::transmute(entry(0x32a45c));
+        translate(unit.addr(), position.as_ptr(), 0);
+    }
+}
+
 /// Tracks particle units owned by one action, including units waiting to emit.
 pub struct TrackedUnits<const N: usize> {
     units: [AtomicU32; N],

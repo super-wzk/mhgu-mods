@@ -49,6 +49,31 @@ def sound_refs(data):
     assert at == len(data)
 
 
+def verify_magnet_effects(resources, ordered):
+    key = (r"effect\frontier_ms\particles", KINDS[".pel"])
+    pel = resources[key]
+    assert pel[:8] == b"PEL\0\x0f\0\0\0"
+    assert struct.unpack_from("<2I", pel, 8) == (0, 105)
+    at = 16
+    for i in range(105):
+        name = pel[at + 1:at + 1 + pel[at]].decode()
+        assert name == rf"effect\frontier_ms\e{i}"
+        at += 1 + pel[at]
+        assert pel[at] == 0
+        at += 1 + 160
+        effect_key = name, KINDS[".efl"]
+        assert ordered.index(effect_key) < ordered.index(key)
+        efl = resources[effect_key]
+        assert efl.startswith(b"EFL\0") and struct.unpack_from("<HH", efl, 16) == (1, 1)
+        model_offset = 48 + (struct.unpack_from("<I", efl, 52)[0] >> 8)
+        mesh = efl[model_offset + 80:efl.index(0, model_offset + 80)].decode()
+        material_key = mesh, KINDS[".mrl"]
+        assert ordered.index(material_key) < ordered.index((mesh, KINDS[".mod"])) < ordered.index(effect_key)
+        assert all(ordered.index((ref, KINDS[".tex"])) < ordered.index(material_key)
+                   for ref in material_refs(resources[material_key]))
+    assert pel[at:] == bytes(4)
+
+
 def verify_payloads(release, *, include_magnet_spike=False):
     path = "romfs/nativeNX/arc/frontier"
     sdk = release / "mhgu-sdk"
@@ -89,9 +114,8 @@ def verify_payloads(release, *, include_magnet_spike=False):
                 cues.add(struct.unpack_from("<H", requests, 52 + 132 * i)[0] - 4096)
             assert required <= cues
         motion_keys = [key for key in resources if key[1] == KINDS[".lmt"]]
-        visual_keys = [key for key in resources if key[1] in
-                       (KINDS[".mod"], KINDS[".mrl"], KINDS[".tex"])]
-        assert visual_keys[-2:] == [(model, KINDS[".mrl"]), (model, KINDS[".mod"])]
+        assert ordered.index((model, KINDS[".mrl"])) < ordered.index((model, KINDS[".mod"]))
+        verify_magnet_effects(resources, ordered)
         anchors = [(0x4005, 0x4007), (0x4004,), (0x4005, 0x4007), (0x4004,)] + [(255,)] * 4
         for selector, joints in enumerate(anchors, 1):
             hts = resources[rf"player\hit\frontier_ms\melee_{selector}", KINDS[".hts"]]

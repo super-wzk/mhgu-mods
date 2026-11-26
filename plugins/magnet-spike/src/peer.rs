@@ -1,6 +1,6 @@
 //! Replay the sender's accepted actions on GU's remote hunters.
 use crate::{
-    combat, magnet,
+    combat, fx, magnet,
     motion::{self, WeaponPose},
     program::{self, Mode},
     sound,
@@ -153,9 +153,14 @@ impl Replay {
             self.cursor = Some(program::cursor(state));
             self.packed = None;
             self.coast_played = false;
-            if matches!(state, 57 | 76 | 77) {
-                // The action packet confirms the counter on this client.
-                unsafe { sound::slash_counter(actor) };
+            // Only the confirmed counter and perfect guard actions carry peer feedback.
+            match state {
+                57 | 76 | 77 => unsafe {
+                    sound::slash_counter(actor);
+                    fx::guard(actor, Mode::Slash);
+                },
+                113 => unsafe { fx::guard(actor, Mode::Impact) },
+                _ => {}
             }
         }
         // Position updates keep moving the hunter through GU's interpolation.

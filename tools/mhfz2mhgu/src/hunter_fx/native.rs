@@ -450,8 +450,11 @@ impl Compiler {
                 }
             }
         }
+        // Magnetic guard sparks must wait to emit. GU can retire an all-zero
+        // model before a scale/alpha envelope would make it visible.
+        let native_delay = self.namespace == "frontier_ms";
         // Signed ranges become native [minimum, width] random curves.
-        let delay = u32::from(layer.delay);
+        let delay = if native_delay { 0 } else { u32::from(layer.delay) };
         for (frame, _) in &mut layer.rotation {
             *frame += delay;
         }
@@ -556,6 +559,10 @@ impl Compiler {
         // The PEL supplies the event's world transform. AEB390 reads this
         // local translation, so the five uppercut emitters turn with the swing.
         let mut joint = self.joint.clone();
+        if native_delay {
+            // AEB390 loads the initial wait and A5ABC4 counts it before birth.
+            put(&mut joint, 100, u32::from(layer.delay));
+        }
         if matches!(layer.facing, Facing::Camera | Facing::CameraYaw) {
             // GU joint mode 2 transforms the origin by the parent but keeps
             // the local basis. Inheriting yaw here would turn billboards edge-on.
@@ -649,6 +656,28 @@ impl Compiler {
     }
 
     pub fn moving_bank(&mut self, data: &[u8], bank: u16, selectors: &[u16], forward_per_tick: f32) -> Result<()> {
+        self.bank_layers(data, bank, selectors, forward_per_tick, &[])
+    }
+
+    // Combine repeated emissions on the same joint into one native route.
+    pub fn staggered_bank(
+        &mut self,
+        data: &[u8],
+        bank: u16,
+        selector: u16,
+        emissions: &[(u16, V3)],
+    ) -> Result<()> {
+        self.bank_layers(data, bank, &[selector], 0., emissions)
+    }
+
+    fn bank_layers(
+        &mut self,
+        data: &[u8],
+        bank: u16,
+        selectors: &[u16],
+        forward_per_tick: f32,
+        emissions: &[(u16, V3)],
+    ) -> Result<()> {
         ensure!(half(data, 0)? >= 4, "unsupported Frontier effect bank");
         let mut tail = data.get(28..).context("short effect bank")?;
         let mut tables = [&[][..]; 6];
@@ -715,6 +744,25 @@ impl Compiler {
                     } else {
                         vector_curve(rotation_id, [0.; 3], time_scale)
                     };
+                    if bank == 4037 && local_rotation_id != 0
+                        && vectors.chunks_exact(24)
+                            .find(|key| u16::from(key[18]) == local_rotation_id)
+                            .is_some_and(|key| key[16] & 1 != 0)
+                    {
+                        // AFB2BC interpolates a repeating curve's final segment back to
+                        // its first value. Keep the authored full turns as an unwrapped ramp.
+                        let [(0, start), (period, end)] = rotation.as_mut_slice() else {
+                            anyhow::bail!("expected a two-key magnetic effect rotation");
+                        };
+                        ensure!(*period != 0, "zero magnetic rotation period");
+                        let cycles = f32::from(life) / *period as f32;
+                        for (&from, to) in start.iter().zip(end) {
+                            let turn = *to - from;
+                            ensure!(turn % 360. == 0., "magnetic rotation must loop by a whole turn");
+                            *to = from + turn * cycles;
+                        }
+                        *period = u32::from(life);
+                    }
                     for (_, angles) in &mut rotation {
                         if local_rotation_id != 0 {
                             *angles = angles.map(f32::to_radians);
@@ -948,7 +996,17 @@ impl Compiler {
                             keys.push((frame, id));
                         }
                     }
-                    if keys.len() > 1 {
+                    if !emissions.is_empty() {
+                        ensure!(sheet.is_none() && keys.len() == 1, "staggered layers need a fixed mesh");
+                        for &(delay, offset) in emissions {
+                            let mut layer = layer.clone();
+                            layer.delay = layer.delay.checked_add(delay).context("effect delay overflow")?;
+                            for (position, offset) in layer.position.iter_mut().zip(offset) {
+                                *position += offset;
+                            }
+                            self.layer(layer, None)?;
+                        }
+                    } else if keys.len() > 1 {
                         ensure!(sheet.is_none(), "animated mesh with an atlas");
                         self.mesh_track(layer, &keys, (u32::from(bank) << 16) | emitter as u32)?;
                     } else {

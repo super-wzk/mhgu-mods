@@ -1,6 +1,7 @@
 use crate::{
     combat,
     flight::Flight,
+    fx,
     magnet::{self, AimedMark, MarkRange},
     motion, program, sound,
 };
@@ -482,8 +483,13 @@ unsafe extern "C" fn record_guard(actor: u32) {
         battle.guard_hits == 1
     });
     let (group, slot) = unsafe { action::current(actor) };
-    if first && action::custom_id(group, slot) == Some(14) {
-        unsafe { sound::slash_counter(actor) };
+    match action::custom_id(group, slot) {
+        Some(14) if first => unsafe {
+            sound::slash_counter(actor);
+            fx::guard(actor, program::Mode::Slash);
+        },
+        Some(112) => unsafe { fx::guard(actor, program::Mode::Impact) },
+        _ => {}
     }
 }
 

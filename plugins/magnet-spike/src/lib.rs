@@ -1,9 +1,12 @@
 //! Frontier Magnet Spike for GU 1.4.
 #![no_std]
 
+extern crate alloc;
+
 mod battle;
 mod combat;
 mod flight;
+mod fx;
 mod magnet;
 mod motion;
 mod peer;
@@ -111,6 +114,7 @@ fn register_weapon() -> Result<(), RegisterError> {
         || !rules::bind(STYLE.id, &RULES)
         || !unsafe { remote::bind_playback(STYLE.id, &peer::PLAYBACK) }
         || !remote::bind_position_state(STYLE.id, &peer::POSITION)
+        || !fx::bind(STYLE.id)
         || !hud::bind_meter(STYLE.id, magnet::meter)
         || !world_contact::bind_hurt(STYLE.id, magnet::update)
         || !mhgu_sdk::weapon::style::action::melee::bind_strike_contact(
@@ -121,6 +125,7 @@ fn register_weapon() -> Result<(), RegisterError> {
     {
         return Err(RegisterError::Invalid);
     }
+    mhfz_sdk::effects::model::install();
     trade::register_purchase(TRIAL_SPIKE.id, 100)?;
     trade::register_recipe(
         TRIAL_SPIKE.id,
