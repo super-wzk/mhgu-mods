@@ -56,6 +56,7 @@ extern "C" fn part_clip(pose: Pose) -> Clip {
 }
 
 pub unsafe extern "C" fn preload(_actor: u32) {
+    crate::magnet::reset();
     for clip in [1002, 1201, 1440] {
         unsafe { BANKS.preload(clip) };
     }

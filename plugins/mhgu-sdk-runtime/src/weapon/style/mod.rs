@@ -48,6 +48,7 @@ pub(super) struct Entry {
     particle_release: AtomicPtr<()>,
     prepare: AtomicPtr<()>,
     pub(super) part_motion: AtomicPtr<part_motion::Motions>,
+    pub(super) meter: AtomicPtr<()>,
     rules: AtomicPtr<rules::Rules>,
 }
 
@@ -120,6 +121,7 @@ pub(super) unsafe fn register_entry(
             particle_release: AtomicPtr::new(ptr::null_mut()),
             prepare: AtomicPtr::new(ptr::null_mut()),
             part_motion: AtomicPtr::new(ptr::null_mut()),
+            meter: AtomicPtr::new(ptr::null_mut()),
             rules: AtomicPtr::new(ptr::null_mut()),
         }));
         match HEAD.compare_exchange(head, node, Ordering::AcqRel, Ordering::Acquire) {
@@ -571,9 +573,8 @@ unsafe fn art_compatible(manager: u32, weapon: u32, art: u32) -> u32 {
     original!(manager, weapon, art)
 }
 
-// The Valor HUD factory (633D1C) uses game_style, but a widget which already
-// exists reads only the local gauge. Mask its render bit, leaving the layout's
-// requested visibility intact so normal HUD hiding still wins on restoration.
+// The Valor widget shares HUD0 with other status widgets. Mask its render bit
+// while retaining the layout's requested visibility for later restoration.
 static HIDDEN_VALOR_NODE: AtomicU32 = AtomicU32::new(0);
 #[forge::hook(offset = 0x639bd0)]
 unsafe fn valor_hud(widget: u32) -> u32 {

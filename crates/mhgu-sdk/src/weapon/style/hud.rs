@@ -1,10 +1,55 @@
-//! Native GU weapon-gauge backing sprites.
+//! Native GU weapon-gauge backing sprites and segmented meters.
 use super::resource::CachedResource;
+use crate::service;
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::memory::entry;
 use core::ffi::CStr;
+
+const METER_SERVICE: &CStr = c"mhgu::WeaponMeterV1";
+const METER_MAGIC: u32 = u32::from_le_bytes(*b"WMH1");
+
+#[repr(u8)]
+#[derive(Clone, Copy)]
+pub enum Signal {
+    None,
+    Near,
+    Far,
+}
+
+/// Snapshot of the active hunter's weapon meter. The HUD clamps charge to
+/// the capacity implied by the number and size of the segments.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Meter {
+    pub charge: u16,
+    pub units_per_segment: u16,
+    pub segments: u8,
+    pub signal: Signal,
+}
+
+pub type SampleMeter = extern "C" fn(actor: u32) -> Meter;
+
+#[doc(hidden)]
+#[repr(C)]
+pub struct MeterService(pub extern "C" fn(u32, SampleMeter) -> bool);
+
+/// # Safety
+/// Publish once from the registry during Forge initialization.
+#[doc(hidden)]
+pub unsafe fn publish_meter(api: &'static MeterService) -> bool {
+    unsafe { service::publish(METER_SERVICE, METER_MAGIC, api) }
+}
+
+/// Display one to eight segments beside the native sharpness indicator.
+/// Register during initialization of an extended weapon's style. GU's task
+/// HUD samples the callback with the ID of the live local hunter.
+pub fn bind_meter(style: u32, sample: SampleMeter) -> bool {
+    service::on_game_thread()
+        && unsafe { service::find::<MeterService>(METER_SERVICE, METER_MAGIC) }
+            .is_some_and(|api| (api.0)(style, sample))
+}
 
 unsafe fn read<T: Copy>(p: u32, off: u32) -> T {
     unsafe { ((p + off) as *const T).read_unaligned() }

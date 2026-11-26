@@ -49,6 +49,7 @@ GAME_STYLE = 0x268818
 ART_READY = 0x2A26C8
 ART_CAPACITY = 0x2778AC
 VALOR_HUD = 0x639BD0
+WEAPON_HUD_HOOKS = {0x544CC8, 0x544DB8}
 FX_RELEASE = 0x32A104
 DRAW_ROUTE = 0x115FCF4
 DB_DRAW_ROUTE = 0x11BA2A0
@@ -207,7 +208,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         HIT_ROW,
         0x53AAD8,
         0x169548,
-    } | PROFILE_HOOKS | SET_STYLE_HOOKS
+    } | PROFILE_HOOKS | SET_STYLE_HOOKS | WEAPON_HUD_HOOKS
     g.originals = {}
     install = g.hook
 
@@ -246,6 +247,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             ART_READY,
             ART_CAPACITY,
             VALOR_HUD,
+            *WEAPON_HUD_HOOKS,
             DISPATCH,
             INIT_HUNTER,
             0x3078B8,  # Registered weapon part tracks after native attachment.

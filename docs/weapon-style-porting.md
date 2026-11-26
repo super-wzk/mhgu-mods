@@ -53,7 +53,7 @@
 | 独立弹波或光波 | 按原版生成帧对齐特效和独立判定。两者采用同一位置及朝向，分清扫过挂点的判定、取样后固定在世界坐标的判定，以及每波的命中编号和斩味处理。 |
 | 粒子 | 转换到 GU 原生 EFL/PEL 及配套 MOD/MRL/TEX。统一使用 `effect/frontier_<tag>/` 下的模型路径，`tag` 使用小写字母和数字，共用渲染器自动匹配该目录。FZ 粒子模型的局部旋转按 X、Y、Z 依次应用。以世界坐标发射时，使用 `world_pose_angles` 将取样姿势分解为 GU 发射器的旋转角。随刀移动和旋转的挂点效果在 PEL 中启用关节旋转，左右手使用各自的关节和局部角。风格在动作退出、收刀、换区或远端槽回收时停止仍由该动作负责的持续效果。注册器统一转接 GU 绘制及释放回调。 |
 | 音效 | 挥刀随当前动作时间线触发，蓄力、格挡等事件按动作程序触发。命中和弹刀用 GU 的碰撞结果播公共音效。逐个核对发射方向、阶段及同时和逐发模式的请求次数。沿成品 SRQR、SBKR 解码 ADPCM 验证有效信号，并检查循环重复触发和动作打断后的清理。 |
-| HUD | 原版狩技继续使用 GU 的槽位和结算。新资源放在独立路径，从当前猎人的风格状态取得进度并更新显示。可参考[双剑 HUD](../plugins/dual-blades-extreme/src/hud.rs)的火焰槽与刃打层数。 |
+| HUD | 原版狩技继续使用 GU 的槽位和结算。扩展武器可用 [`hud::bind_meter`](../crates/mhgu-sdk/src/weapon/style/hud.rs) 为 GU 任务 HUD 提供分段槽和距离提示。复用武器专用 HUD 时，新资源放在独立路径，从当前猎人的风格状态取得进度。可参考[双剑 HUD](../plugins/dual-blades-extreme/src/hud.rs)的火焰槽与刃打层数。 |
 
 在注册后通过 `style::preload::bind` 登记预加载回调。GU `29B7D4` 完成任务猎人初始化后，注册器为本地当前风格调用回调。各极型武器可用 `MotionBanks::preload_for_hunt` 预加载男女模型共用的移动、地形和攻击动作库，首次播放时再绑定 GU 的运行时槽。各插件按需在同一回调准备音库、粒子、私有 HTS 和 HUD。私有 HTS 可使用 `CachedHitShape` 持有缓存引用，攻击时取得独立引用，未预加载时仍可按路径加载。见[预加载接口](../crates/mhgu-sdk/src/weapon/style/preload.rs)和[形状缓存](../crates/mhgu-sdk/src/combat/collision/shapes.rs)。
 

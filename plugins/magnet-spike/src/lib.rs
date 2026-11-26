@@ -11,7 +11,7 @@ mod program;
 use mhgu_sdk::weapon::{
     Element, EquipmentId, EquipmentLevel, EquipmentModel, Weapon, WeaponEquipment, WeaponId,
     registry::{self, WeaponRegistry},
-    style::{RegisterError, Style, manual, part_motion, world_contact},
+    style::{RegisterError, Style, hud, manual, part_motion, world_contact},
     trade::{self, Material, Recipe},
 };
 
@@ -99,6 +99,7 @@ fn register_weapon() -> Result<(), RegisterError> {
         return Err(RegisterError::Invalid);
     }
     if !part_motion::bind(STYLE.id, &motion::PARTS)
+        || !hud::bind_meter(STYLE.id, magnet::meter)
         || !world_contact::bind_hurt(STYLE.id, magnet::update)
         || !mhgu_sdk::weapon::style::action::melee::bind_strike_contact(
             STYLE.id,

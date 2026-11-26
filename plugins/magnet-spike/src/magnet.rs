@@ -5,7 +5,11 @@ use mhgu_sdk::{
     combat::collision::hurt::{HurtScene, Target},
     geometry::{Angle, Bearing},
     sync::Shared,
-    weapon::style::{action, hunter, movement, particle},
+    weapon::style::{
+        action,
+        hud::{Meter, Signal},
+        hunter, movement, particle,
+    },
 };
 
 extern crate alloc;
@@ -63,6 +67,7 @@ struct Magnet {
     shots: Vec<Projectile>,
     mark: Option<Mark>,
     gauge: Gauge,
+    range: Option<MarkRange>,
 }
 
 impl Magnet {
@@ -72,6 +77,7 @@ impl Magnet {
             shots: Vec::new(),
             mark: None,
             gauge: Gauge::new(),
+            range: None,
         }
     }
 
@@ -80,6 +86,7 @@ impl Magnet {
             self.shots.clear();
             self.mark = None;
             self.gauge = Gauge::new();
+            self.range = None;
             self.owner = owner;
         }
     }
@@ -91,10 +98,30 @@ pub fn reset() {
     LOCAL.with(|state| state.select_owner(0));
 }
 
+pub extern "C" fn meter(actor: u32) -> Meter {
+    LOCAL.with(|state| {
+        let current = state.owner == actor;
+        Meter {
+            charge: if current {
+                state.gauge.units
+            } else {
+                program::parameter(18)
+            },
+            units_per_segment: program::parameter(19),
+            segments: (program::parameter(17) / program::parameter(19)) as u8,
+            signal: match state.range.filter(|_| current) {
+                Some(MarkRange::Repel) => Signal::Near,
+                Some(MarkRange::Attract) => Signal::Far,
+                None => Signal::None,
+            },
+        }
+    })
+}
+
 const REPEL_LIMIT: f32 = 1400.;
 pub(super) const ATTRACT_LIMIT: f32 = 4000.;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum MarkRange {
     Repel,
     Attract,
@@ -113,17 +140,7 @@ impl MarkRange {
         })?;
         let origin = unsafe { movement::position(actor) };
         let point = unsafe { target.position_for(actor) }?;
-        let squared = origin
-            .into_iter()
-            .zip(point)
-            .map(|(a, b)| (a - b) * (a - b))
-            .sum::<f32>();
-        // FZ 8122052C and 81220584 test the 3D range from the hunter to the mark.
-        let (min, max) = match self {
-            Self::Repel => (0., REPEL_LIMIT),
-            Self::Attract => (REPEL_LIMIT, ATTRACT_LIMIT),
-        };
-        if !(min * min < squared && squared < max * max) {
+        if Self::between(origin, point) != Some(self) {
             return None;
         }
         let yaw = Bearing::between_xz((origin[0], origin[2]), (point[0], point[2])).yaw;
@@ -131,6 +148,22 @@ impl MarkRange {
             target,
             yaw: yaw.units(),
         })
+    }
+
+    fn between(origin: [f32; 3], point: [f32; 3]) -> Option<Self> {
+        let squared = origin
+            .into_iter()
+            .zip(point)
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f32>();
+        // FZ 8122052C and 81220584 test the 3D range from the hunter to the mark.
+        match squared {
+            d if 0. < d && d < REPEL_LIMIT * REPEL_LIMIT => Some(Self::Repel),
+            d if REPEL_LIMIT * REPEL_LIMIT < d && d < ATTRACT_LIMIT * ATTRACT_LIMIT => {
+                Some(Self::Attract)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -210,7 +243,7 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
             if !using_mark {
                 current.remaining -= frames;
             }
-            if current.remaining <= 0. || scene.position(&current.target).is_none() {
+            if current.remaining <= 0. {
                 *mark = None;
             }
         }
@@ -242,5 +275,16 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
             shot.position = end;
             shot.remaining > 0.
         });
+        // Publish only the range category for the HUD. The scene callback
+        // owns the live monster and bone handles used to compute it.
+        let point = mark
+            .as_ref()
+            .and_then(|current| scene.position(&current.target));
+        state.range = if let Some(point) = point {
+            MarkRange::between(unsafe { movement::position(scene.owner()) }, point)
+        } else {
+            *mark = None;
+            None
+        };
     });
 }

@@ -51,6 +51,13 @@ def replay():
     g.stub(0x3F8398, lambda *_: 0)
     g.stub(0x65FA04, lambda *_: 0x800)
     set_action = setup_controller(g, actor)
+    verify_weapon_hud(g, actor, equipment, scratch)
+    meter = setup_magnet_hud(g)
+    assert meter() == ([16.] * 5, 0)
+    g.put(actor + 5060, scratch)
+    assert meter() == ([], 0)
+    g.put(actor + 5060, equipment)
+    assert meter() == ([16.] * 5, 0)
     g.cpu.hook_del(g.traps.pop(0x2A2560))
     g.cpu.hook_del(g.traps.pop(0x2E9D54))
     g.stub(0x2A8B34, lambda *_: 0)  # No Hunter Art queued in this replay.
@@ -265,10 +272,10 @@ def replay():
     g.cpu.mem_write(actor + 1280, struct.pack("<f", 100.))
     g.run(update_part, part, actor, WEAPON)
     assert tracks[-1] == (0, 35, 2., 61.), tracks
-    verify_melee(g, actor, vtable, part, shapes, set_action, tick)
+    verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter)
 
 
-def verify_melee(g, actor, vtable, part, shapes, set_action, tick):
+def verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter):
     def byte(address):
         return g.cpu.mem_read(address, 1)[0]
 
@@ -361,11 +368,11 @@ def verify_melee(g, actor, vtable, part, shapes, set_action, tick):
     assert (byte(hit + 86), byte(second + 86)) == (50, 65)
     assert g.get(hit + 64) & 3 == g.get(second + 64) & 3 == 1
     assert g.half(hit + 52) != g.half(second + 52)
-    verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, set_action, tick)
-    verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick)
+    verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, set_action, tick, meter)
+    verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick, meter)
 
 
-def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, set_action, tick):
+def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, set_action, tick, meter):
     def put_vec(address, *vec):
         g.cpu.mem_write(address, struct.pack(f"<{len(vec)}f", *vec))
 
@@ -440,17 +447,23 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     tick(frame=11.)
     update()
     assert not rays and not joints
+    assert meter()[1] == 0
     tick(frame=12.)
     update()
     assert rays == [((25., 100., 50.), (25., 100., 550.))], rays
     update()
     assert rays[-1] == ((25., 100., 550.), (25., 100., 1050.)), rays
-    assert joints.count((monster, 5)) == 3, joints  # Test per sweep, then attach.
+    assert joints.count((monster, 5)) == 4, joints  # Sweep, attach and sample the mark.
+    assert meter()[1] == 1
     rays.clear()
     joints.clear()
-    matrix(pose, 100., 95., 1150.)
+    matrix(pose, 100., 95., 2150.)
     update()
     assert not rays and joints == [(monster, 5)]
+    assert meter()[1] == 2
+    matrix(pose, 100., 95., 4150.)
+    update()
+    assert meter()[1] == 0
     g.put(status + 880, 0)
     joints.clear()
     update()
@@ -488,7 +501,8 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     assert not rays and not joints
     put_vec(clock, 2.)
     update()
-    assert len(rays) == 1 and joints == [(monster, 5), (monster, 5)]
+    assert len(rays) == 1 and joints == [(monster, 5)] * 3
+    assert meter()[1] == 1
     rays.clear()
     joints.clear()
     put_vec(clock, 17998.)
@@ -498,6 +512,7 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     put_vec(clock, 2.)
     update()
     assert not rays and not joints
+    assert meter()[1] == 0
 
     water = 110.
     tick(frame=60., ended=True)
@@ -802,7 +817,114 @@ def apply_repel_root(g, actor, clip, start, end):
         g.cpu.hook_del(g.traps.pop(0x956FC8))
 
 
-def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick):
+def verify_weapon_hud(g, actor, equipment, scratch):
+    update, draw = 0x544CC8, 0x544DB8
+    vtable = 0x176C620  # GU uGUIResourceOwner in the main ELF.
+    assert g.get(vtable + 40) == update and g.get(vtable + 48) == draw
+    g.stub(g.originals[update], lambda *_: 17)
+    g.stub(g.originals[draw], lambda *_: 23)
+    layout, widgets, gauge, vital = (g.alloc(n) for n in (688, 8, 76, 76))
+    g.put(layout + 608, 1)
+    g.put(layout + 620, widgets)
+    g.put(widgets, gauge)
+    g.put(widgets + 4, vital)
+    g.put(vital, 0x1777D58)  # cUIOVitalGauge in HUD0.
+
+    for vtable in (0x1777DD4, 0x1777E5C, 0x1778A68, 0x1778AF0, 0x1778B78,
+                   0x1778C20, 0x1778CBC, 0x1778D44, 0x1778DCC):
+        assert g.get(vtable + 64) == 0x56E2D8
+        g.put(gauge, vtable)
+        assert g.run(update, layout) == 17
+        assert g.run(draw, layout, 0) == 0
+
+    # A layout shared with a standard status widget keeps drawing.
+    g.put(layout + 608, 2)
+    assert g.run(update, layout) == 17
+    assert g.run(draw, layout, 0) == 23
+    g.put(layout + 608, 1)
+    g.put(widgets, vital)
+    assert g.run(draw, layout, 0) == 23
+    g.put(widgets, gauge)
+
+    # The SDK selection is still present, but the hunt equipped a scratch
+    # record. It must see the native HUD right away, with no visibility fixes.
+    g.put(actor + 5060, scratch)
+    assert g.run(update, layout) == 17
+    assert g.run(draw, layout, 0) == 23
+    g.put(actor + 5060, equipment)
+    assert g.run(update, layout) == 17
+    assert g.run(draw, layout, 0) == 0
+
+
+def setup_magnet_hud(g):
+    layout, widget_list, vital = (g.alloc(n) for n in (688, 4, 76))
+    stock, dynamic, sharpness, root = (g.alloc(n) for n in (80, 36, 228, 228))
+    g.put(vital, 0x1777D58)
+    g.put(widget_list, vital)
+    g.put(layout + 608, 1)
+    g.put(layout + 620, widget_list)
+    g.put(layout + 248, stock)
+    g.put(layout + 660, dynamic)
+    g.put(layout + 664, 20)
+    g.put(stock + 4 * 5, sharpness)
+    g.put(stock + 4 * 10, root)
+    g.put(root + 84, 3)
+    g.cpu.mem_write(sharpness + 144, struct.pack("<2f", 80., 46.))
+    groups = []
+
+    def clone(owner, resource, template, parent):
+        assert (owner, resource, template, parent) == (layout, 0xffffffff, 5, 10)
+        assert g.get(g.cpu.reg_read(UC_ARM_REG_SP)) == 0x2123290
+        node, members, animation = (g.alloc(n) for n in (228, 12, 176))
+        bars = [g.alloc(256), g.alloc(256)]
+        g.put(node + 212, template)
+        g.put(node + 216, members)
+        g.put(node + 220, animation)
+        g.put(animation + 104, bars[0])
+        g.put(bars[0] + 108, bars[1])
+        for i, bar in enumerate(bars):
+            g.put(bar, 0x178FC48)
+            g.put(bar + 160, 2)
+            g.put(members + 4 * (i + 1), bar)
+        index = len(groups)
+        assert index < 6, "meter creates five bars and at most one indicator group"
+        groups.append((node, bars))
+        g.put(dynamic + 4 * index, node)
+        g.put(layout + 648, len(groups))
+        return 20 + index
+
+    g.stub(0x54501C, clone)
+    g.stub(0xA344F4, lambda *_: 0)
+    # Run GU's position, visibility, size and color setters. The replay has
+    # no renderer, so stop at the native geometry invalidation callback.
+    g.stub(g.get(0x178FC48 + 80), lambda *_: 0)
+    g.stub(0xA4DF54, lambda *_: 0)
+
+    def sample():
+        assert g.run(0x544CC8, layout) == 17
+        assert g.get(root + 84) == 3
+        fills = []
+        signal = 0
+        for i, (node, bars) in enumerate(groups):
+            if g.get(node + 84) & 3 != 3:
+                continue
+            assert struct.unpack("<2f", g.cpu.mem_read(node + 144, 8)) == (136. + 19 * i, 49.)
+            assert all(g.get(bar + 160) & 15 == 0 for bar in bars)
+            sizes = [struct.unpack("<2f", g.cpu.mem_read(bar + 180, 8)) for bar in bars]
+            if i == 5:
+                assert sizes == [(4., 4.), (4., 4.)]
+                signal = sum(g.get(bar + 164) != 0 for bar in bars)
+            else:
+                assert math.isclose(sizes[0][0] + sizes[1][0], 16., abs_tol=.0001)
+                assert sizes[0][1] == sizes[1][1] == 8.
+                assert struct.unpack("<2f", g.cpu.mem_read(bars[1] + 128, 8)) == (sizes[0][0], 0.)
+                fills.append(sizes[0][0])
+        return fills, signal
+
+    return sample
+
+
+def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick, meter):
     def charge_attack():
         set_action(1, 0)
         tick(X, held=0x800, native_pad=True)
@@ -818,6 +940,7 @@ def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick)
     number(actor + 5088, 1000.)
     # Four accepted attraction states consumed one segment each.
     assert charge_attack() == 0x8000 + 12
+    assert meter()[0][0] < 16. and meter()[0][1:] == [0.] * 4
     tick(frame=20., ended=True)
     assert charge_attack() == 0
 
@@ -827,6 +950,7 @@ def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick)
     g.run(g.hooks[0x16_ABAC], collision)
     number(clock, 2.)
     assert charge_attack() == 0
+    assert 14.4 - 0.001 <= meter()[0][0] < 16.
 
     # Swinging does not give charge. Only the monster-damage hook for the
     # native serial submitted by the source event can credit these 43 x 6 units.
@@ -857,4 +981,4 @@ def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick)
 
 if __name__ == "__main__":
     replay()
-    print("Magnet Spike: dispatch, native melee, magnetic shot, charge, attraction and repulsion passed")
+    print("Magnet Spike: dispatch, magnet HUD, melee, magnetic shot, charge, attraction and repulsion passed")

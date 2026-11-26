@@ -54,6 +54,11 @@ def verify_manual(g):
     assert "沿镜头方向发射磁力弹" in guide[0]
     assert "突进追向距离合适的标记" in guide[0] and "派生空中攻击或回避" in guide[0]
     assert "面向近距离标记反弹后撤" in guide[0]
+    g.stub(0x56E808, lambda _, group, part, body: guide.append(g.string(body)))
+    g.put(pressed, 0x20)
+    g.run(g.hooks[0x5CB780], panel)
+    assert len(guide) == 2 and "显示剩余磁力" in guide[1]
+    assert "标记在磁力反弹的距离内" in guide[1] and "标记在磁力突进的距离内" in guide[1]
     g.stub(0x64C600, lambda *_: 0)
     g.put(pressed, 0x4000)
     g.run(g.hooks[0x5CB780], panel)

@@ -1,5 +1,6 @@
 //! Equipment selection, extended weapons, and registered hunting styles.
 mod guild;
+mod hud;
 mod icon;
 mod inventory;
 mod menu;
@@ -37,6 +38,7 @@ pub(super) fn install(base: u32) {
     if style::install(base) {
         inventory::install(base);
         guild::install(base);
+        hud::install(base);
         icon::install(base);
         menu::install(base);
         model::install(base);
