@@ -10,6 +10,8 @@ pub mod input;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub mod movement;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub mod part_motion;
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub mod particle;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub mod physical;

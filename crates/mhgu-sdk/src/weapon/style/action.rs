@@ -133,6 +133,55 @@ pub unsafe fn previous(actor: u32) -> (u16, u16) {
     }
 }
 
+/// Whether the live quest hunter has their weapon drawn.
+///
+/// # Safety
+/// Call with a live quest hunter on the game thread.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn weapon_drawn(actor: u32) -> bool {
+    unsafe { ((actor + 10057) as *const u8).read() & 1 != 0 }
+}
+
+/// Update the drawn flag at a weapon motion's authored equipment event.
+///
+/// # Safety
+/// Call with a live quest hunter on the game thread.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn set_weapon_drawn(actor: u32, drawn: bool) {
+    unsafe {
+        let set: unsafe extern "C" fn(u32, u32) =
+            core::mem::transmute(crate::memory::entry(0x2a2560));
+        set(actor, u32::from(drawn));
+    }
+}
+
+/// Mark an accepted private weapon state started and enable native motion movement.
+///
+/// # Safety
+/// The live quest hunter must be in an accepted private weapon state.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn start_weapon_state(actor: u32) {
+    unsafe {
+        let configure: unsafe extern "C" fn(u32, u32, u32, u32) =
+            core::mem::transmute(crate::memory::entry(0x282fd8));
+        configure(actor, 0, 1, 0);
+        ((actor + 5) as *mut u8).write(1);
+    }
+}
+
+/// Return from a finished private weapon action via GU's ground exit.
+///
+/// # Safety
+/// The live quest hunter must be ending a private ground weapon action.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn finish_weapon_state(actor: u32) {
+    unsafe {
+        let finish: unsafe extern "C" fn(u32) =
+            core::mem::transmute(crate::memory::entry(0x2b6e5c));
+        finish(actor);
+    }
+}
+
 // Forge uses the soft-float ABI. GU's layer setter reads s0..s2 and uses the
 // actor's motion encoder, so plugged-in motions enter through the same path.
 #[cfg(all(target_arch = "arm", target_endian = "little"))]

@@ -121,6 +121,10 @@ fn same_tracks(a: &[Track], b: &[Track]) -> bool {
 const FEMALE_SLOT: usize = 128;
 
 pub fn motions(dat: &Path, weapon: Weapon) -> Result<Vec<u8>> {
+    arc::encode(&motion_assets(dat, weapon)?)
+}
+
+pub(crate) fn motion_assets(dat: &Path, weapon: Weapon) -> Result<Vec<arc::Asset>> {
     let (source, stem, slots) = match weapon {
         Weapon::GreatSword => ("w00", "frontier_gs", [100, 15, 80]),
         Weapon::SwordShield => ("w04", "frontier_sns", [100, 15, 65]),
@@ -274,7 +278,7 @@ pub fn motions(dat: &Path, weapon: Weapon) -> Result<Vec<u8>> {
                         Weapon::GreatSword => equipment(&mut w, gu_slot, motion)?,
                         Weapon::SwitchAxe => switch_axe_equipment(&mut w, gu_slot, motion)?,
                         Weapon::LongSword => long_sword_equipment(&mut w, gu_slot, motion)?,
-                        // w13w.mot drives the weapon's own rig separately.
+                        // Weapon-part motions use their own skeleton and bank.
                         Weapon::MagnetSpike => {}
                     }
                 }
@@ -286,7 +290,59 @@ pub fn motions(dat: &Path, weapon: Weapon) -> Result<Vec<u8>> {
             data: w.finish(),
         });
     }
-    arc::encode(&assets)
+    if weapon == Weapon::MagnetSpike {
+        assets.extend(magnet_spike_weapon_tracks(dat)?);
+    }
+    Ok(assets)
+}
+
+fn magnet_spike_weapon_tracks(dat: &Path) -> Result<Vec<arc::Asset>> {
+    let weapons = read(&dat.join("extend/wk000.abn"))?;
+    let model = pac::decode(pac::mha_member(&weapons, "wk451.bin")?.to_vec())?;
+    let rig = Rig::parse(&pac::member(&model, 1)?)?;
+    let bytes = pac::decode(read(&dat.join("motion/w13w.mot"))?)?;
+    let archive = MotionArchive::from_directory(&bytes)?;
+    ensure!(
+        archive
+            .groups
+            .iter()
+            .map(|group| group.motion_offsets.len())
+            .eq([85, 70, 25, 25, 100, 100, 0]),
+        "unrecognized Frontier w13w motion directory"
+    );
+    let mut assets = Vec::new();
+    for (group, slots) in archive.groups.iter().enumerate() {
+        if slots.motion_offsets.iter().all(Option::is_none) {
+            continue;
+        }
+        let mut writer = Writer::new(slots.motion_offsets.len())?;
+        for slot in 0..slots.motion_offsets.len() {
+            let Some(motion) = archive.motion(group, slot)? else {
+                continue;
+            };
+            let (frames, tracks) = bake(&motion, &rig, Some(0), Some(0))
+                .with_context(|| format!("w13w {group}:{slot}"))?;
+            let loop_frame = match motion.metadata_present {
+                0 => None,
+                1 => {
+                    let frame = f32::from_bits(motion.metadata);
+                    ensure!(
+                        frame.fract() == 0. && (0.0..frames as f32).contains(&frame),
+                        "invalid w13w loop point {group}:{slot}"
+                    );
+                    Some(frame as u32)
+                }
+                _ => anyhow::bail!("unknown w13w metadata at {group}:{slot}"),
+            };
+            writer.clip_with_loop(slot, frames, &tracks, loop_frame)?;
+        }
+        assets.push(arc::Asset {
+            name: format!("weapon\\frontier\\magnet_spike\\mot\\{group}"),
+            kind: arc::MOTION,
+            data: writer.finish(),
+        });
+    }
+    Ok(assets)
 }
 
 // FZ 8120F906, sampled with the drawn flag set. Runs use durations, not end frames.
@@ -453,16 +509,15 @@ pub fn blade_shapes(dat: &Path, output: &Path, selectors: &[usize], count: usize
     Ok(())
 }
 
+fn word(bytes: &[u8], at: usize) -> Result<usize> {
+    let field = bytes.get(at..at + 4).context("truncated FZ battle table")?;
+    Ok(u32::from_le_bytes(field.try_into()?) as usize)
+}
+
 pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
     let motion_data = pac::decode(read(&dat.join("mhfdat.bin"))?)?;
     let data = &motion_data[..];
     let sdt = pac::decode(read(&dat.join("mhfsdt.bin"))?)?;
-    fn word(b: &[u8], at: usize) -> Result<usize> {
-        let bytes = b
-            .get(at..at + 4)
-            .context("truncated mhfdat action directory")?;
-        Ok(u32::from_le_bytes(bytes.try_into()?) as usize)
-    }
     ensure!(data.starts_with(b"mhf\x1a"), "expected decoded mhfdat.bin");
     // First entry: 大剣. Entry 3 is ランス, not the great sword.
     let weapon = word(data, 0x614)? + kind as usize * 8;
@@ -479,7 +534,12 @@ pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
     ensure!(n == states, "unrecognized Frontier state table: {n} states");
     let records = word(data, weapon + 4)?;
     let mut out = magic.to_vec();
-    out.extend((if kind == Weapon::SwitchAxe { 4u16 } else { 2u16 }).to_le_bytes());
+    let version = match kind {
+        Weapon::SwitchAxe => 4u16,
+        Weapon::MagnetSpike => 3,
+        _ => 2,
+    };
+    out.extend(version.to_le_bytes());
     out.extend((n as u16).to_le_bytes());
     // The first SDT bank is the hunter melee bank (selector 0). FZ copies one
     // 40-byte row when spawning a contact; callbacks can compute the ID at run time.
@@ -545,6 +605,8 @@ pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
         out.extend(b"MSFX");
         out.extend(count.to_le_bytes());
         out.extend(rows);
+        append_magnet_spike_shapes(&sdt, &mut out)?;
+        append_magnet_spike_modes(data, n, &mut out)?;
         return Ok(out);
     }
     if kind == Weapon::SwitchAxe {
@@ -720,6 +782,67 @@ pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
     out.extend(record);
     out.extend(capsule);
     Ok(out)
+}
+
+fn append_magnet_spike_modes(data: &[u8], states: usize, out: &mut Vec<u8>) -> Result<()> {
+    // PC DAT 0xb90 is the Vita MAGNET directory at +0xb8c. 8121DA12
+    // initializes the state-to-mode map from the three type lists.
+    let directory = word(data, 0xb90)?;
+    let parameters = word(data, directory + 20)?;
+    ensure!(word(data, directory)? & 0xffff == 83, "unexpected w13 parameter count");
+    let parameters = data
+        .get(parameters..parameters + 83 * 2)
+        .context("truncated w13 parameters")?;
+    let mut modes = vec![2; states];
+    for mode in 0..3 {
+        let count = word(data, directory + 2 + mode * 2)? & 0xffff;
+        let start = word(data, directory + 24 + mode * 4)?;
+        let list = data.get(start..start + 2 * count).context("short w13 mode list")?;
+        for record in list.chunks_exact(2) {
+            let state = usize::from(u16::from_le_bytes(record.try_into()?));
+            if let Some(slot) = modes.get_mut(state) {
+                *slot = mode as u8;
+            }
+        }
+    }
+    out.extend(b"MSPR");
+    out.extend(parameters);
+    out.extend(modes);
+    Ok(())
+}
+
+fn append_magnet_spike_shapes(sdt: &[u8], out: &mut Vec<u8>) -> Result<()> {
+    out.extend(b"MSHT");
+    for (bank, family, selectors) in [(9, 120, 9), (10, 121, 14)] {
+        let bank = bank * 28;
+        ensure!(
+            word(sdt, bank)? == family << 16 && word(sdt, bank + 4)? >> 16 == selectors,
+            "unexpected w13 shape bank {family}"
+        );
+        out.extend((family as u16).to_le_bytes());
+        out.extend((selectors as u16).to_le_bytes());
+        let directory = word(sdt, bank + 16)?;
+        for selector in 0..selectors {
+            let entry = directory + selector * 32;
+            let start = word(sdt, entry)?;
+            for variant in 1..8 {
+                ensure!(
+                    word(sdt, entry + variant * 4)? == start,
+                    "w13 shape {family}:{selector} has variant-dependent geometry"
+                );
+            }
+            // A selector may contain multiple shapes attached to different
+            // weapon bones. Keep the original part/bone and coordinates.
+            let records = sdt.get(start..).context("missing w13 shape list")?;
+            let count = records
+                .chunks_exact(40)
+                .position(|row| row[..2] == [0xff, 0xff])
+                .context("unterminated w13 shape list")?;
+            out.extend(u16::try_from(count)?.to_le_bytes());
+            out.extend(&records[..count * 40]);
+        }
+    }
+    Ok(())
 }
 
 pub fn switch_axe_shapes(dat: &Path, output: &Path) -> Result<()> {

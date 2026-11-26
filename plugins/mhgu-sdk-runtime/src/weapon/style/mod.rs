@@ -23,7 +23,7 @@ mod physical;
 mod routes;
 mod world_contact;
 use mhgu_sdk::weapon::style::{
-    ActionRequest, Input, PASS, Style, action, hunter, input, movement, preload,
+    ActionRequest, Input, PASS, Style, action, hunter, input, movement, part_motion, preload,
     registry::{self, ServiceV3},
     remote::Sheathe,
     rules,
@@ -45,6 +45,7 @@ pub(super) struct Entry {
     blade_contact: AtomicPtr<()>,
     particle_release: AtomicPtr<()>,
     prepare: AtomicPtr<()>,
+    pub(super) part_motion: AtomicPtr<part_motion::Motions>,
     rules: AtomicPtr<rules::Rules>,
 }
 
@@ -114,6 +115,7 @@ pub(super) unsafe fn register_entry(
             blade_contact: AtomicPtr::new(ptr::null_mut()),
             particle_release: AtomicPtr::new(ptr::null_mut()),
             prepare: AtomicPtr::new(ptr::null_mut()),
+            part_motion: AtomicPtr::new(ptr::null_mut()),
             rules: AtomicPtr::new(ptr::null_mut()),
         }));
         match HEAD.compare_exchange(head, node, Ordering::AcqRel, Ordering::Acquire) {
@@ -243,6 +245,15 @@ unsafe fn init_hunter(actor: u32) -> u32 {
     if let Some(entry) = unsafe { local_entry(actor) } {
         let callback = entry.prepare.load(Ordering::Acquire);
         if !callback.is_null() {
+            if entry.kind.is_some()
+                && let Some((item, _)) = inventory::selected()
+                && let Some((_, equipment)) = inventory::definition(item.equipment.get())
+                && let Some(model) = equipment.model
+            {
+                // Expanded equipment can carry its private motions alongside
+                // the mesh. Make them visible before dispatching preload.
+                crate::weapon::resource::load(0x2124df0, model.archive);
+            }
             let prepare: preload::Prepare = unsafe { core::mem::transmute(callback) };
             unsafe { prepare(actor) };
         }

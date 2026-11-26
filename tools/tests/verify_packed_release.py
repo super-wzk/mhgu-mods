@@ -72,7 +72,27 @@ def verify_payloads(release, *, include_magnet_spike=False):
         assert mesh[:5] == b"MOD\0\xd4" and all(struct.unpack_from("<3H", mesh, 6))
         refs = material_refs(resources[model, KINDS[".mrl"]])
         assert len(refs) == 2 and all((ref, KINDS[".tex"]) in resources for ref in refs)
-        assert list(resources)[-2:] == [(model, KINDS[".mrl"]), (model, KINDS[".mod"])]
+        motion_keys = [key for key in resources if key[1] == KINDS[".lmt"]]
+        visual_keys = [key for key in resources if key[1] != KINDS[".lmt"]]
+        assert visual_keys[-2:] == [(model, KINDS[".mrl"]), (model, KINDS[".mod"])]
+        expected = {rf"player\mot\frontier_ms\{g}": (128 + n, None)
+                    for g, n in ((0, 85), (2, 25), (4, 100))}
+        expected.update({rf"weapon\frontier\magnet_spike\mot\{g}": (n, live)
+                         for g, n, live in ((0, 85, 81), (1, 70, 3), (2, 25, 4), (4, 100, 75))})
+        assert {name for name, _ in motion_keys} == expected.keys()
+        for name, kind in motion_keys:
+            lmt = resources[name, kind]
+            slot_count, live = expected[name]
+            assert lmt[:6] == b"LMT\0C\0" and struct.unpack_from("<H", lmt, 6)[0] == slot_count
+            offsets = struct.unpack_from(f"<{slot_count}I", lmt, 8)
+            assert all(8 + 4 * slot_count <= at < len(lmt) - 56 for at in offsets if at)
+            if live is not None:
+                assert sum(bool(at) for at in offsets) == live, name
+        for name, frames in ((r"player\mot\frontier_ms\4", 89),
+                             (r"weapon\frontier\magnet_spike\mot\4", 91)):
+            lmt = resources[name, KINDS[".lmt"]]
+            clip = struct.unpack_from("<I", lmt, 8 + 4 * 35)[0]
+            assert clip and struct.unpack_from("<II", lmt, clip + 8) == (frames, 52)
     for name, tag in WEAPONS.items():
         package = f"{name}-extreme"
         nx = PLUGINS / package / "dist" / package / "romfs/nativeNX"

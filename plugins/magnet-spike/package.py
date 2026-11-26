@@ -1,4 +1,4 @@
-"""Build the Magnet Spike model, private GUI icon, and plugin."""
+"""Build the Magnet Spike weapon archive, private GUI icon, and plugin."""
 
 import argparse
 import os
@@ -19,15 +19,17 @@ def package(dat, romfs):
         arc = Path(staging) / "magnet_spike.arc"
         icon = Path(staging) / "icon.tex"
         subprocess.run([
-            "cargo", "run", "--locked", "--release", "--", "weapon-model",
-            dat / "extend/wk000.abn", "--member", "wk451.bin",
+            "cargo", "run", "--locked", "--release", "--", "magnet-spike-battle", dat,
             "--material-template", romfs / "nativeNX/arc/enemy/em030_00.arc",
-            "--name", r"weapon\frontier\magnet_spike\wk451", "-o", arc,
+            "-o", staging,
         ], cwd=CONVERTER, env=env, check=True)
         subprocess.run([
             "cargo", "run", "--locked", "--release", "--", "magnet-spike-icon",
             dat, "-o", icon,
         ], cwd=CONVERTER, env=env, check=True)
+        assets = ROOT / "target/assets"
+        assets.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(Path(staging) / "magnet_spike.fmsa", assets)
         subprocess.run(["cargo", "forge", "build", "--release"], cwd=ROOT, env=env, check=True)
         for src, dest in (
             (arc, nx / "arc/frontier"),

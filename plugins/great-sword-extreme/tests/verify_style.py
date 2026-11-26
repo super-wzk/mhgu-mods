@@ -247,6 +247,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             VALOR_HUD,
             DISPATCH,
             INIT_HUNTER,
+            0x3078B8,  # Registered weapon part tracks after native attachment.
             0xBCAD18, 0xB39F58,  # Private release ARC lookup and dependency order.
             WEAPON_DISPATCH,
             HIT_ROW,

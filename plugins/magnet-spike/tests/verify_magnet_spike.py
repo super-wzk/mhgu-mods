@@ -277,6 +277,7 @@ def verify_equipment(g, api):
     assert requests == [(0x2124DF0, r"arc\frontier\magnet_spike"),
                         (0x21251C8, r"weapon\frontier\magnet_spike\wk451")]
     assert binds == [(part, resources[requests[1]])] * 2 and g.get(args+16) == stock
+    assert g.half(part + 5080) == 0
     equip(0x1002)
     g.run(g.hooks[0x307F18], part, args)
     assert binds[-1] == (part, stock)

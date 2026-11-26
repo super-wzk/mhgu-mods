@@ -40,6 +40,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 name = "magnet-spike"
 version = "0.1.0"
 dependencies = [
+ "mhfz-sdk",
  "mhgu-forge",
  "mhgu-sdk",
 ]
@@ -49,6 +50,15 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "mhfz-sdk"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "mhgu-forge-sys",
+ "mhgu-sdk",
+]
 
 [[package]]
 name = "mhgu-forge"

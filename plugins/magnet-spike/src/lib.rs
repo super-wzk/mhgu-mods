@@ -1,10 +1,14 @@
-//! Magnet Spike transaction test weapon for GU 1.4.
+//! Frontier Magnet Spike for GU 1.4.
 #![no_std]
+
+mod battle;
+mod motion;
+mod program;
 
 use mhgu_sdk::weapon::{
     Element, EquipmentId, EquipmentLevel, EquipmentModel, Weapon, WeaponEquipment, WeaponId,
     registry::{self, WeaponRegistry},
-    style::{RegisterError, Style, action::Actions},
+    style::{RegisterError, Style, part_motion},
     trade::{self, Material, Recipe},
 };
 
@@ -30,13 +34,13 @@ static TRIAL_SPIKE: WeaponEquipment = WeaponEquipment {
 static STYLE: Style = Style {
     id: 16,
     weapon: MAGNET_SPIKE.style_key(),
-    encode: None,
-    decode: None,
+    encode: Some(motion::encode),
+    decode: Some(motion::decode),
     independent: true,
     art_slots: 3,
-    controller: None,
+    controller: Some(battle::dispatch),
     request: None,
-    actions: Actions::new(0),
+    actions: program::ACTIONS,
     guard: None,
     commands: None,
 };
@@ -88,6 +92,12 @@ fn register_weapon() -> Result<(), RegisterError> {
             model: c"weapon\\frontier\\magnet_spike\\wk451",
         }),
     )?;
+    if !unsafe { mhgu_sdk::weapon::style::preload::bind(STYLE.id, motion::preload) } {
+        return Err(RegisterError::Invalid);
+    }
+    if !part_motion::bind(STYLE.id, &motion::PARTS) {
+        return Err(RegisterError::Invalid);
+    }
     trade::register_purchase(TRIAL_SPIKE.id, 100)?;
     trade::register_recipe(
         TRIAL_SPIKE.id,

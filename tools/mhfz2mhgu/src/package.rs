@@ -142,15 +142,18 @@ fn appearance(
 }
 
 pub fn weapon(path: &Path, member: &str, material: &Path, name: &str) -> Result<Vec<u8>> {
+    arc::encode(&weapon_assets(path, member, material, name)?)
+}
+
+pub(crate) fn weapon_assets(
+    path: &Path,
+    member: &str,
+    material: &Path,
+    name: &str,
+) -> Result<Vec<Asset>> {
     let source = read(path)?;
     let pac = pac::decode(pac::mha_member(&source, member)?.to_vec())?;
     let model = pac::member(&pac, 0)?;
     let rig = mhf_resource::rig::Rig::parse(&pac::member(&pac, 1)?)?;
-    arc::encode(&appearance(
-        &model,
-        &pac::member(&pac, 2)?,
-        &rig,
-        name,
-        material,
-    )?)
+    appearance(&model, &pac::member(&pac, 2)?, &rig, name, material)
 }
