@@ -3,9 +3,9 @@ use crate::program;
 use alloc::vec::Vec;
 use mhgu_sdk::{
     combat::collision::hurt::{HurtScene, Target},
-    geometry::Angle,
+    geometry::{Angle, Bearing},
     sync::Shared,
-    weapon::style::{hunter, movement, particle},
+    weapon::style::{action, hunter, movement, particle},
 };
 
 extern crate alloc;
@@ -91,6 +91,49 @@ pub fn reset() {
     LOCAL.with(|state| state.select_owner(0));
 }
 
+const REPEL_LIMIT: f32 = 1400.;
+pub(super) const ATTRACT_LIMIT: f32 = 4000.;
+
+#[derive(Clone, Copy)]
+pub(super) enum MarkRange {
+    Repel,
+    Attract,
+}
+
+pub(super) struct AimedMark {
+    pub target: Target,
+    pub yaw: u16,
+}
+
+impl MarkRange {
+    pub unsafe fn aim(self, actor: u32) -> Option<AimedMark> {
+        let target = LOCAL.with(|state| {
+            state.select_owner(actor);
+            state.mark.as_ref().map(|mark| mark.target)
+        })?;
+        let origin = unsafe { movement::position(actor) };
+        let point = unsafe { target.position_for(actor) }?;
+        let squared = origin
+            .into_iter()
+            .zip(point)
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f32>();
+        // FZ 8122052C and 81220584 test the 3D range from the hunter to the mark.
+        let (min, max) = match self {
+            Self::Repel => (0., REPEL_LIMIT),
+            Self::Attract => (REPEL_LIMIT, ATTRACT_LIMIT),
+        };
+        if !(min * min < squared && squared < max * max) {
+            return None;
+        }
+        let yaw = Bearing::between_xz((origin[0], origin[2]), (point[0], point[2])).yaw;
+        Some(AimedMark {
+            target,
+            yaw: yaw.units(),
+        })
+    }
+}
+
 fn cost(segments: u8) -> u16 {
     u16::from(segments).saturating_mul(program::parameter(19))
 }
@@ -160,7 +203,13 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
         state.gauge.refill(frames);
         let mark = &mut state.mark;
         if let Some(current) = mark {
-            current.remaining -= frames;
+            let (group, slot) = unsafe { action::current(scene.owner()) };
+            let using_mark = action::custom_id(group, slot)
+                .is_some_and(|id| program::is_attraction(id) || matches!(id, 63 | 69 | 73));
+            // FZ 8122880E / 8121FA3E pause the countdown during these actions.
+            if !using_mark {
+                current.remaining -= frames;
+            }
             if current.remaining <= 0. || scene.position(&current.target).is_none() {
                 *mark = None;
             }

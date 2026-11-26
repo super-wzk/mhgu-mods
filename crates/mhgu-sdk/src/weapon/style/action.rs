@@ -161,10 +161,27 @@ pub unsafe fn set_weapon_drawn(actor: u32, drawn: bool) {
 /// The live quest hunter must be in an accepted private weapon state.
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub unsafe fn start_weapon_state(actor: u32) {
+    unsafe { start_custom_movement(actor, 0) };
+}
+
+/// Prepare a private weapon state for GU's airborne movement.
+/// # Safety
+/// The live quest hunter must be in a private weapon state on the game thread.
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub unsafe fn start_airborne_weapon_state(actor: u32) {
+    unsafe {
+        start_custom_movement(actor, 2);
+        let flags = (actor + 10057) as *mut u8;
+        flags.write(flags.read() | 0x40);
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+unsafe fn start_custom_movement(actor: u32, mode: u32) {
     unsafe {
         let configure: unsafe extern "C" fn(u32, u32, u32, u32) =
             core::mem::transmute(crate::memory::entry(0x282fd8));
-        configure(actor, 0, 1, 0);
+        configure(actor, mode, 1, 0);
         ((actor + 5) as *mut u8).write(1);
     }
 }

@@ -20,6 +20,7 @@ from verify_packed_release import assets
 PRIVATE = 0x10000
 WEAPON = 16
 X, A = 0x20, 0x100
+SPECIAL = 0x1000
 
 
 def replay():
@@ -97,7 +98,9 @@ def replay():
             g.cpu.mem_write(actor + 5108, struct.pack("<3H", held | buttons, 0, buttons))
             g.put(actor + 5188, 0)
             g.run(0x27CA28, actor)
+        before = len(retail)
         g.run(DISPATCH, actor)
+        return len(retail) == before
 
     set_action(1, 0)
     g.run(CHANGE_ACTION, actor, WEAPON, 3, 0x80)
@@ -123,13 +126,13 @@ def replay():
     tick(frame=110., ended=True)
     assert finishes == [0x8000 + 3] and g.half(actor + 9478) == 1
 
-    tick(0x1000, native_pad=True)  # GU special attack maps to the FZ mode command.
+    tick(SPECIAL, native_pad=True)  # GU special attack maps to the FZ mode command.
     assert motions[-1] == (1456, 0., 0.)
     tick(frame=99., ended=True)
     tick(A)
     assert g.half(actor + 9482) == 0x8000 + 32 and motions[-1][0] == 1072
     tick(frame=100., ended=True)
-    tick(common=1 << 8)
+    tick(SPECIAL, native_pad=True)
     assert motions[-1] == (1457, 0., 0.)
     tick(frame=99., ended=True)
     tick(A)
@@ -221,6 +224,9 @@ def replay():
                      + [rf"player\hit\frontier_ms\melee_{i}" for i in range(1, 9)])
     packed = g.run(ENCODE, actor, PRIVATE | 1440)
     assert packed & 255 == 40 and g.run(DECODE, actor, packed) == PRIVATE | 1440
+    for clip in (1014, 1015, 1016, 1017, 1022, 1407, 1408, 1429, 1444, 1460, 1461, 1471, 1472, 1473):
+        encoded = g.run(ENCODE, actor, PRIVATE | clip)
+        assert g.run(DECODE, actor, encoded) == PRIVATE | clip, clip
 
     part = g.alloc(5152)
     g.put(part + 48, actor)
@@ -344,7 +350,7 @@ def verify_melee(g, actor, vtable, part, shapes, set_action, tick):
     g.run(0x16919C, hit)
     assert byte(hit + 5) == 0
     set_action(1, 0)
-    tick(0x1000, native_pad=True)
+    tick(SPECIAL, native_pad=True)
     tick(frame=99., ended=True)
     tick(X | A, native_pad=True)
     assert g.half(actor + 9482) == 0x8000 + 26
@@ -453,7 +459,7 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     assert not joints
 
     set_action(1, 0)
-    tick(common=1 << 8)
+    tick(SPECIAL, native_pad=True)
     tick(frame=99., ended=True)
     tick(A, held=held, native_pad=True)
     assert g.half(actor + 9482) == 0x8000 + 82
@@ -502,6 +508,299 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     update()
     assert len(rays) == 1 and not joints
 
+    # Keep GU 539F4C and 2A84D8. Supply a flat floor and control the
+    # native virtual movement multiplier without using the game renderer.
+    water = None
+    vtable = g.get(actor)
+    rate_entry, land_entry = (g.alloc(4) for _ in range(2))
+    g.put(vtable + 144, rate_entry)
+    g.put(vtable + 768, land_entry)
+    rate = 1.
+    landings = []
+
+    def movement_rate(owner, *_):
+        assert owner == actor
+        g.cpu.reg_write(UC_ARM_REG_S0, struct.unpack("<I", struct.pack("<f", rate))[0])
+
+    def floor(owner, height, *_):
+        assert owner == actor
+        put_vec(height, 0.)
+        return 1
+
+    g.stub(rate_entry, movement_rate)
+    g.stub(land_entry, lambda owner, mode, *_: landings.append((owner, mode)))
+    g.stub(0x181EF0, lambda *_: 0)
+    g.stub(0x2E7AA0, lambda *_: 0)  # Collision cache refresh on large steps.
+    g.stub(0x2E8B04, floor)
+    configure = []
+    g.cpu.hook_del(g.traps.pop(0x282FD8))
+    g.stub(0x282FD8, lambda owner, mode, *_: configure.append(mode))
+    put_vec(actor + 28, 2.)
+    put_vec(actor + 64, 0., 0., 0.)
+    put_vec(actor + 5088, 1000.)
+    put_vec(camera + 96, 0., 0., 1000.)
+    contacts = (actor + 12320, actor + 12504)
+    for contact in contacts:
+        g.run(0x1687A8, contact)
+
+    def state():
+        return g.half(actor + 9482)
+
+    def attract():
+        set_action(1, 0)
+        assert tick(held=held, common=1 << 3, native_pad=True, fallback=1 << 14)
+        return state()
+
+    def mark_at(distance, shot_frame, *, side=False):
+        point = (distance, 100., 50.) if side else (25., 100., distance)
+        matrix(pose, *point)
+        put_vec(camera + 96, *(1000., 0., 0.) if side else (0., 0., 1000.))
+        set_action(1, 0)
+        tick(A, held=held, native_pad=True)
+        tick(frame=shot_frame)
+        for _ in range(math.ceil(distance / 500.)):
+            update()
+
+    def repel():
+        set_action(1, 0)
+        assert tick(SPECIAL, held=held, native_pad=True, fallback=1 << 14)
+        return state()
+
+    put_vec(actor + 11072, 0.)
+    assert repel() == 0
+    mark_at(2250., 14.)
+    assert repel() == 0
+    put_vec(actor + 64, 0., 0., 50.)
+    mark_at(500., 14., side=True)
+    put_vec(actor + 5088, 0.)
+    assert repel() == 0 and g.get(actor + 11072) == 0
+    put_vec(actor + 5088, 1000.)
+    g.put(status + 880, 0)
+    assert repel() == 0  # Recheck the native monster even between collision ticks.
+    g.put(status + 880, hp)
+    assert repel() == 0x8000 + 66 and g.half(actor + 1204) == 1429
+    facing = g.half(actor + 4076)
+    # The selected point is on the hurt sphere, so it can be off the centerline.
+    assert facing == g.half(actor + 5280) and abs(facing - 0x4000) < 0x800, facing
+    assert configure[-1] == 0
+    assert g.get(actor + 11072) == struct.unpack("<I", struct.pack("<f", 28.))[0]
+
+    # Native root displacement is what moves the mark from near to far. A
+    # follow-up queued after frame 10 executes at the source's frame 60.
+    apply_repel_root(g, actor, 1429, 0, 45)
+    tick(held=held, common=1 << 3, frame=45., native_pad=True)
+    assert state() == 0x8000 + 66
+    tick(frame=59., native_pad=True)
+    assert state() == 0x8000 + 66
+    apply_repel_root(g, actor, 1429, 45, 60)
+    x, y, z = position(actor + 64)
+    yaw = facing * 0.000095874
+    distance = math.hypot(x, z - 50.)
+    assert distance > 1900. and y == 0., (x, y, z)
+    assert abs(x + math.sin(yaw) * distance) < 1., (x, y, z)
+    assert abs(z - 50. + math.cos(yaw) * distance) < 1., (x, y, z)
+    tick(frame=60.)
+    assert state() == 0x8000 + 58
+
+    put_vec(actor + 64, 0., 0., 0.)
+    set_action(1, 0)
+    tick(SPECIAL, native_pad=True)
+    tick(frame=99., ended=True)
+    mark_at(500., 12.)
+    g.cpu.hook_del(g.traps.pop(0x2864C4))
+    g.stub(0x2864C4, lambda _, skill, *__: int(skill == 163))
+    g.cpu.hook_del(g.traps.pop(0x65FA04))
+    g.stub(0x65FA04, lambda *_: 0x400)  # GU's exchanged shoulder layout.
+    put_vec(actor + 11072, 0.)
+    tick(SPECIAL, held=0x400, frame=61., native_pad=True)
+    assert state() == 0x8000 + 84
+    tick(SPECIAL, held=0x400, frame=62., native_pad=True)
+    assert state() == 0x8000 + 67 and g.half(actor + 1204) == 1444
+    g.cpu.hook_del(g.traps.pop(0x65FA04))
+    g.stub(0x65FA04, lambda *_: held)
+    assert g.get(actor + 11072) == struct.unpack("<I", struct.pack("<f", 48.))[0]
+    apply_repel_root(g, actor, 1444, 0, 40)
+    assert position(actor + 64)[2] < -1500.
+    put_vec(actor + 11072, 23.)
+    tick(frame=40., native_pad=True)
+    assert g.get(actor + 11072) == struct.unpack("<I", struct.pack("<f", 23.))[0]
+    tick(frame=139., ended=True)
+    assert state() == 0
+
+    # Three accepts spent one segment apiece. Replenish before the existing
+    # attraction and charge cases so they can check their own consumption.
+    put_vec(actor + 64, 0., 0., 0.)
+    for _ in range(2):
+        tick(X, held=held, native_pad=True)
+        assert state() == 0x8000 + 38
+        tick(frame=200., ended=True)
+        set_action(1, 0)
+    assert repel() == 0
+    put_vec(clock, 18000.)
+    update()
+    put_vec(clock, 2.)
+    tick(SPECIAL, native_pad=True)
+    tick(frame=99., ended=True)
+
+    assert attract() == 0  # Expired or missed marks leave the ordinary pose.
+    for distance in (250., 4400.):
+        mark_at(distance, 14.)
+        assert attract() == 0, distance
+    mark_at(2250., 14.)
+    put_vec(actor + 5088, 0.)
+    assert attract() == 0
+
+    put_vec(actor + 5088, 1000.)
+    assert attract() == 0x8000 + 58 and g.half(actor + 1204) == 1472
+    tick(frame=33., native_pad=True)
+    assert position(actor + 64) == (0., 0., 0.) and configure[-1] == 0
+    tick(frame=34.)
+    assert position(actor + 64) == (0., 0., 0.) and configure[-1] == 2
+    tick(frame=36.)
+    assert position(actor + 64) == (0., 0., 0.)
+    tick(frame=38.)
+    first = position(actor + 64)
+    assert first[1] > 0. and first[2] > 0. and configure[-1] == 2, first
+    matrix(pose, 425., 100., 2250.)
+    tick(frame=40.)
+    steered = position(actor + 64)
+    assert steered[0] - first[0] > 1. and steered[2] > first[2], steered
+    rate = 0.
+    tick(frame=40.)
+    assert position(actor + 64) == steered
+    rate = 1.
+
+    tick(X, frame=49., native_pad=True)
+    assert state() == 0x8000 + 58
+    tick(X, frame=50., native_pad=True)  # The FZ aerial slash window opens at 50.
+    assert (state(), g.half(actor + 1204)) == (0x8000 + 59, 1016), (state(), g.half(actor + 1204))
+    put_vec(actor + 64, steered[0], 1000., steered[2])
+    tick(frame=54.)
+    power = [g.half(contact + 56) for contact in contacts]
+    assert 200 in power, power  # FZ melee record 16.
+    put_vec(actor + 64, steered[0], 0.25, steered[2])
+    for frame in range(56, 130, 2):
+        tick(frame=frame, ended=True)
+        if state() == 0x8000 + 60:
+            break
+    assert state() == 0x8000 + 60 and g.half(actor + 1204) == 1015
+    assert position(actor + 64)[1] == 0. and configure[-1] == 0
+
+    put_vec(actor + 64, 0., 0., 0.)
+    set_action(1, 0)
+    tick(SPECIAL, native_pad=True)
+    tick(frame=99., ended=True)
+    mark_at(2250., 12.)
+    assert attract() == 0x8000 + 68 and g.half(actor + 1204) == 1460
+    tick(frame=34., native_pad=True)
+    tick(frame=36.)
+    tick(frame=38.)
+    assert position(actor + 64)[2] > 0.
+    last = position(actor + 64)
+    wall = True
+    tick(frame=40.)
+    assert position(actor + 64)[2] == last[2] and g.half(actor + 1204) == 1461
+    for frame in range(2, 46, 2):
+        tick(frame=frame, ended=True)
+        if state() == 0x8000 + 75:
+            break
+    assert state() == 0x8000 + 75 and g.half(actor + 1204) == 1022
+    assert position(actor + 64)[1] == 0. and position(actor + 4112) == (0., 0., 0.)
+
+    # Branch directly from impact shot recovery through the source's target
+    # condition, then verify both flight attacks and the landing hit.
+    wall = False
+    for contact in contacts:
+        g.run(0x1687A8, contact)
+    mark_at(2250., 12.)
+    tick(held=held, common=1 << 3, frame=26., native_pad=True)
+    assert state() == 0x8000 + 84
+    tick(frame=62., native_pad=True)
+    assert state() == 0x8000 + 68
+    tick(frame=34., native_pad=True)
+    tick(frame=36.)
+    tick(frame=38.)
+    tick(X, frame=50., native_pad=True)
+    assert state() == 0x8000 + 73 and g.half(actor + 1204) == 1017
+    assert g.half(contacts[0] + 56) == 25
+    x, _, z = position(actor + 64)
+    put_vec(actor + 64, x, 2., z)
+    tick(frame=40.)
+    assert g.half(contacts[1] + 56) == 80
+    for frame in range(42, 104, 2):
+        tick(frame=frame)
+        if state() == 0x8000 + 74:
+            break
+    assert state() == 0x8000 + 74 and g.half(actor + 1204) == 1014
+    g.run(0x1687A8, contacts[0])
+    tick(frame=8.)
+    assert g.half(contacts[0] + 56) == 120
+
+    # Plain B can branch during attraction without entering GU's ground roll.
+    # Event 11 runs the native discrete stamina request once.
+    spent = []
+
+    def stamina(owner, *_):
+        assert owner == actor
+        spent.append(struct.unpack("<f", struct.pack("<I", g.cpu.reg_read(UC_ARM_REG_S0)))[0])
+
+    g.stub(0x2A5EBC, stamina)
+    put_vec(actor + 64, 0., 0., 0.)
+    set_action(1, 0)
+    tick(SPECIAL, native_pad=True)
+    tick(frame=99., ended=True)
+    mark_at(2250., 14.)
+    assert attract() == 0x8000 + 58
+    tick(frame=34., native_pad=True)
+    tick(frame=36.)
+    tick(frame=38.)
+    tick(common=1 << 3, frame=50., native_pad=True)
+    assert state() == 0x8000 + 63 and g.half(actor + 1204) == 1407
+    for frame in range(2, 70, 2):
+        tick(frame=frame)
+        if state() == 0x8000 + 64:
+            break
+    assert state() == 0x8000 + 64 and g.half(actor + 1204) == 1408
+    assert spent == [-150.] and landings == [(actor, 0)] * 4, (spent, landings)
+    for contact in contacts:
+        g.run(0x1687A8, contact)
+
+
+def apply_repel_root(g, actor, clip, start, end):
+    """Run GU's root-motion transform using samples from the packaged LMT."""
+    assert g.half(actor + 1204) == clip
+    bank = assets(PLUGIN.parents[1] / "arc/frontier/magnet_spike.arc")
+    lmt = bank[r"player\mot\frontier_ms\4", 0x76820D81]
+    record, = struct.unpack_from("<I", lmt, 8 + 4 * (clip % 100))
+    table, count = struct.unpack_from("<2I", lmt, record)
+    track = next(i for i in range(table, table + 36 * count, 36) if lmt[i + 1] == 4)
+    size, samples = struct.unpack_from("<2I", lmt, track + 8)
+    bounds, = struct.unpack_from("<I", lmt, track + 32)
+    scale = struct.unpack_from("<3f", lmt, bounds)
+    bias = struct.unpack_from("<3f", lmt, bounds + 16)
+    assert lmt[track] == 4 and size >= (end + 1) * 8
+
+    def sample(owner, output, *_):
+        assert owner == actor
+        frame, = struct.unpack("<f", struct.pack("<I", g.cpu.reg_read(UC_ARM_REG_S0)))
+        point = struct.unpack_from("<3H", lmt, samples + int(frame) * 8)
+        world = [unit * width / 65535. + offset for unit, width, offset in zip(point, scale, bias)]
+        g.cpu.mem_write(output, struct.pack("<3f", *world))
+
+    g.stub(0x956FC8, sample)
+    delta = bytes(g.cpu.mem_read(actor + 28, 4))
+    g.cpu.mem_write(actor + 28, struct.pack("<f", end - start))
+    g.cpu.mem_write(actor + 96, struct.pack("<3f", 1., 1., 1.))
+    g.cpu.mem_write(actor + 1280, struct.pack("<f", end))
+    g.cpu.mem_write(actor + 1292, struct.pack("<f", 1.))
+    for register in (UC_ARM_REG_S0, UC_ARM_REG_S1):
+        g.cpu.reg_write(register, 0x3F800000)
+    try:
+        g.run(0x53A5BC, actor)
+    finally:
+        g.cpu.mem_write(actor + 28, delta)
+        g.cpu.hook_del(g.traps.pop(0x956FC8))
+
 
 def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick):
     def charge_attack():
@@ -517,9 +816,9 @@ def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick)
     number(actor + 5088, 0.)
     assert charge_attack() == 0
     number(actor + 5088, 1000.)
-    for _ in range(5):
-        assert charge_attack() == 0x8000 + 12
-        tick(frame=20., ended=True)
+    # Four accepted attraction states consumed one segment each.
+    assert charge_attack() == 0x8000 + 12
+    tick(frame=20., ended=True)
     assert charge_attack() == 0
 
     # Nine FZ recharge intervals recover 1800 units, just below one segment.
@@ -551,11 +850,11 @@ def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick)
     number(clock, 600.)
     g.run(g.hooks[0x16_ABAC], collision)
     number(clock, 2.)
-    tick(common=1 << 8)
+    tick(SPECIAL, native_pad=True)
     tick(frame=99., ended=True)
     assert charge_attack() == 0x8000 + 38
 
 
 if __name__ == "__main__":
     replay()
-    print("Magnet Spike: dispatch, native melee, magnetic shot and charge passed")
+    print("Magnet Spike: dispatch, native melee, magnetic shot, charge, attraction and repulsion passed")

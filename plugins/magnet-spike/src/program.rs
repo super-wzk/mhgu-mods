@@ -71,6 +71,20 @@ pub fn cost(state: u8) -> u8 {
     DATA[COSTS + 4 + usize::from(state)]
 }
 
+pub fn is_attraction(state: u8) -> bool {
+    matches!(state, 58 | 61 | 62 | 68 | 71 | 72)
+}
+
+pub fn flight_landing(state: u8) -> Option<u8> {
+    // Landing table from FZ 8121FA84.
+    match state {
+        58 | 61 | 62 => Some(65),
+        68 | 71 | 72 => Some(75),
+        59 | 63 | 69 | 73 => Some(state + 1),
+        _ => None,
+    }
+}
+
 /// Family 121, row/shape selector 1 is the magnetic shot.
 pub const SHOT: (f32, f32) = {
     assert!(word(EFFECTS) == u32::from_le_bytes(*b"MSFX") as usize);
@@ -128,6 +142,13 @@ pub enum Mode {
 }
 
 impl Mode {
+    pub fn coast_clip(self) -> u16 {
+        match self {
+            Self::Slash => 1471,
+            Self::Impact => 1461,
+        }
+    }
+
     pub fn for_state(self, state: u8) -> Self {
         match DATA[MODES + usize::from(state)] {
             0 => Self::Slash,
@@ -147,12 +168,16 @@ impl Mode {
             (Self::Slash, 5, true) => Some(90),
             (Self::Slash, 9, true) => Some(12),
             (Self::Slash, 19, true) => Some(82),
+            (Self::Slash, 23, true) => Some(66),
+            (Self::Slash, 24, true) => Some(58),
             (Self::Impact, 2, true) => Some(18),
             (Self::Impact, 3, true) => Some(32),
             (Self::Impact, 4, true) => Some(26),
             (Self::Impact, 5, true) => Some(91),
             (Self::Impact, 9, true) => Some(38),
             (Self::Impact, 19, true) => Some(84),
+            (Self::Impact, 23, true) => Some(67),
+            (Self::Impact, 24, true) => Some(68),
             _ => None,
         }
     }

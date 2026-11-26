@@ -52,6 +52,8 @@ def verify_manual(g):
     g.run(g.hooks[0x5CB780], panel)
     assert len(guide) == 1 and guide[0].startswith("极之型磁斩锤")
     assert "沿镜头方向发射磁力弹" in guide[0]
+    assert "突进追向距离合适的标记" in guide[0] and "派生空中攻击或回避" in guide[0]
+    assert "面向近距离标记反弹后撤" in guide[0]
     g.stub(0x64C600, lambda *_: 0)
     g.put(pressed, 0x4000)
     g.run(g.hooks[0x5CB780], panel)

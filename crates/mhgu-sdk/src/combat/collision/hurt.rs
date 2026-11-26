@@ -22,6 +22,16 @@ pub struct Target {
     offset: [f32; 3],
 }
 
+impl Target {
+    /// Resolve this contact while the owner's action is being updated.
+    ///
+    /// # Safety
+    /// The owner must be a live local quest hunter on the game thread.
+    pub unsafe fn position_for(&self, owner: u32) -> Option<[f32; 3]> {
+        HurtScene(unsafe { Object::at(owner) }?).position(self)
+    }
+}
+
 /// Borrowed during a registered style's local-hunter collision pass.
 #[repr(transparent)]
 pub struct HurtScene<'a>(Object<'a>);
@@ -91,33 +101,7 @@ impl<'a> HurtScene<'a> {
     /// Test the moving point against the same background geometry query GU
     /// uses for stage collision. Returns the first obstruction, if any.
     pub fn terrain(&self, start: [f32; 3], end: [f32; 3]) -> Option<[f32; 3]> {
-        unsafe { singleton(BACKGROUND) }?;
-        let start = vector(start);
-        let end = vector(end);
-        let mut point = [0.; 4];
-        let query: unsafe extern "C" fn(
-            u32,
-            *const f32,
-            *const f32,
-            u32,
-            *mut f32,
-            u32,
-            u32,
-            u32,
-        ) -> u32 = unsafe { core::mem::transmute(entry(0x49c0c)) };
-        let hit = unsafe {
-            query(
-                self.owner(),
-                start.as_ptr(),
-                end.as_ptr(),
-                u32::from(self.area()),
-                point.as_mut_ptr(),
-                0,
-                0,
-                0,
-            )
-        };
-        (hit == 1).then(|| xyz(point))
+        terrain_between(self.0, start, end)
     }
 
     /// Highest floor or special surface at this point in the owner's area.
@@ -236,6 +220,40 @@ impl<'a> HurtScene<'a> {
         }
         nearest
     }
+}
+
+pub(crate) fn terrain_between(
+    owner: Object<'_>,
+    start: [f32; 3],
+    end: [f32; 3],
+) -> Option<[f32; 3]> {
+    unsafe { singleton(BACKGROUND) }?;
+    let start = vector(start);
+    let end = vector(end);
+    let mut point = [0.; 4];
+    let query: unsafe extern "C" fn(
+        u32,
+        *const f32,
+        *const f32,
+        u32,
+        *mut f32,
+        u32,
+        u32,
+        u32,
+    ) -> u32 = unsafe { core::mem::transmute(entry(0x49c0c)) };
+    let hit = unsafe {
+        query(
+            owner.addr(),
+            start.as_ptr(),
+            end.as_ptr(),
+            u32::from(owner.get(AREA)),
+            point.as_mut_ptr(),
+            0,
+            0,
+            0,
+        )
+    };
+    (hit == 1).then(|| xyz(point))
 }
 
 fn part_disabled(monster: Object<'_>, part: u16) -> bool {

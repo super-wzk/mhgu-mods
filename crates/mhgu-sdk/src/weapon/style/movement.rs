@@ -1,5 +1,9 @@
 //! GU hunter locomotion, terrain transitions and stamina.
-use crate::{memory::entry, weapon::style::action};
+use crate::{
+    combat::collision::hurt::terrain_between,
+    memory::{Field, Object, entry},
+    weapon::style::action,
+};
 
 core::arch::global_asm!(
     ".syntax unified",
@@ -14,9 +18,87 @@ core::arch::global_asm!(
     "vmov s0,r1",
     "mov r1,#0",
     "bx r2",
+    ".global mhgu_style_movement_rate",
+    ".hidden mhgu_style_movement_rate",
+    ".type mhgu_style_movement_rate,%function",
+    "mhgu_style_movement_rate:",
+    "ldr ip,[r0]",
+    "ldr ip,[ip,#144]",
+    "push {{r4,lr}}",
+    "blx ip",
+    "vmov r0,s0",
+    "pop {{r4,pc}}",
 );
 unsafe extern "C" {
     fn mhgu_style_stamina(actor: u32, amount: u32, entry: u32);
+    fn mhgu_style_movement_rate(actor: u32) -> u32;
+}
+
+/// The hunter root in world coordinates.
+/// # Safety
+/// The actor must be a live hunter on the game thread.
+pub unsafe fn position(actor: u32) -> [f32; 3] {
+    unsafe { ((actor + 64) as *const [f32; 3]).read() }
+}
+
+/// Effective delta used by GU 539F4C, including the hunter's movement rate.
+/// # Safety
+/// The actor must be a live hunter on the game thread.
+pub unsafe fn motion_frames(actor: u32) -> f32 {
+    unsafe {
+        let frames = ((actor + 28) as *const f32).read();
+        frames * f32::from_bits(mhgu_style_movement_rate(actor))
+    }
+}
+
+pub struct AirborneStep {
+    pub velocity: [f32; 3],
+    pub blocked: bool,
+    pub landed: bool,
+}
+
+/// Advance GU's velocity integrator, probe for a wall and use GU's floor landing.
+/// Velocity and acceleration are in world units per 60 Hz frame and frame squared.
+/// # Safety
+/// The actor must be a live airborne quest hunter on the game thread.
+pub unsafe fn advance_airborne(
+    actor: u32,
+    velocity: [f32; 3],
+    acceleration: [f32; 3],
+) -> AirborneStep {
+    const POSITION: Field<[f32; 3]> = Field::at(64);
+    const VELOCITY: Field<[f32; 3]> = Field::at(4112);
+    let hunter = unsafe { Object::at(actor) }.unwrap();
+    let start = hunter.get(POSITION);
+    hunter.set(VELOCITY, velocity);
+    hunter.set(Field::at(4128), acceleration);
+    let integrate: unsafe extern "C" fn(u32) = unsafe { core::mem::transmute(entry(0x539f4c)) };
+    unsafe { integrate(actor) };
+    let end = hunter.get(POSITION);
+    let [mut vx, vy, mut vz] = hunter.get(VELOCITY);
+    let blocked = (start[0] != end[0] || start[2] != end[2])
+        && terrain_between(
+            hunter,
+            [start[0], start[1] + 90., start[2]],
+            [end[0], end[1] + 90., end[2]],
+        )
+        .is_some();
+    if blocked {
+        hunter.set(POSITION, [start[0], end[1], start[2]]);
+        vx = 0.;
+        vz = 0.;
+        hunter.set(VELOCITY, [vx, vy, vz]);
+    }
+    let landed = vy < 0. && unsafe { action::land(actor) };
+    if landed {
+        hunter.set(VELOCITY, [0.; 3]);
+        hunter.set(Field::at(4128), [0f32; 3]);
+    }
+    AirborneStep {
+        velocity: if landed { [0.; 3] } else { [vx, vy, vz] },
+        blocked,
+        landed,
+    }
 }
 
 /// Adjust stamina through GU's continuous drain or discrete evade cost.
@@ -67,6 +149,14 @@ pub unsafe fn has_evade_stamina(actor: u32, cost: f32) -> bool {
 /// The actor must be a live local quest hunter on the game thread.
 pub unsafe fn has_stamina(actor: u32) -> bool {
     unsafe { ((actor + 5088) as *const f32).read() > 0. }
+}
+
+/// Extend the invulnerability clock used by GU's evade action and damage checks.
+/// # Safety
+/// The actor must be a live local quest hunter on the game thread.
+pub unsafe fn grant_evade_invulnerability(actor: u32, frames: f32) {
+    let timer = (actor + 11072) as *mut f32;
+    unsafe { timer.write(timer.read().max(frames)) };
 }
 
 /// Defer natural stamina recovery through GU's countdown at 29DBDC.

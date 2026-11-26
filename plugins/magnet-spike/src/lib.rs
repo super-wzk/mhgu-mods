@@ -3,6 +3,7 @@
 
 mod battle;
 mod combat;
+mod flight;
 mod magnet;
 mod motion;
 mod program;

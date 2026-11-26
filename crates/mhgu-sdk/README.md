@@ -54,6 +54,10 @@ GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提�
 
 [input](src/weapon/style/input.rs) 读取 GU 的组合键状态、过滤后的 X／A 按下沿和当前附加肩键。通过 [movement](src/weapon/style/movement.rs) 查询摇杆方向、应用朝向和使用原生耐力入口。回避准入复用 `has_evade_stamina` 检查体术、料理和免耗效果。读取任务专用字段前，用 [hunter::is_quest](src/weapon/style/hunter.rs) 核对角色类型。
 
+风格招式可通过 `movement::grant_evade_invulnerability` 延长 GU 受击检查使用的回避计时。时长以 GU 帧为单位，由招式根据当前技能和动作事件计算。
+
+私有空中招式通过 [action::start_airborne_weapon_state](src/weapon/style/action.rs) 进入 GU 空中移动。用 [movement::motion_frames](src/weapon/style/movement.rs) 读取包含移动倍率的时间增量，再将每 60 Hz 帧的速度和加速度交给 `advance_airborne`。该入口调用 GU 的位移积分、地形探测和落地检查，返回更新后的速度、阻挡和着地结果，供风格选择后续动作。
+
 [preload](src/weapon/style/preload.rs) 登记本地风格在 GU 完成任务猎人初始化后执行的资源准备回调。[MotionBanks](src/weapon/style/action/motion_bank.rs) 缓存男女模型共用的 LMT。首次播放时才绑定运行时 bank，按装备模型选择基础片段或槽号加 128 的专用片段。私有 HTS 可通过 [CachedHitShape](src/combat/collision/shapes.rs) 复用已加载资源。
 
 [remote](src/weapon/style/remote.rs) 提供 GU 名册查询和远端状态存储。风格注册成功后，用 `bind_playback` 一次提交常驻的 `Playback` 描述符，包含动作回放 `tick`、可选的逐帧观察 `observe` 和动作包状态 `action_state`。注册器校验当前武器的动作包是否有可用位，校验通过后才登记整份描述符。插件定义状态值及回放逻辑。读取远端装备前按当前名册核对猎人，角色离场、换武器或槽位更换时释放旧状态。
@@ -64,7 +68,7 @@ GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提�
 
 扩展武器可用 [melee::Strike](src/weapon/style/action/melee.rs) 提交斩击或打击，提供动作值、命中窗口、眩晕积蓄、命中停顿和一组已加载的 HTS。SDK 通过 GU 构造命中，在可用的两槽中保留重叠窗口。同一 HTS 组的多个形状共用一个命中编号。HTS 可以使用 `0x4000 + 关节编号` 锚定猎人的主武器部件，GU 在每次展开时读取对应骨骼矩阵。
 
-[world_contact::bind_hurt](src/weapon/style/world_contact.rs) 可为当前本地任务猎人的风格登记受击检测回调。回调通过 [HurtScene](src/combat/collision/hurt.rs) 使用 GU 的地形、受击形状展开和相交函数，适合磁力标记一类只需要接触位置的效果。命中返回可跨帧保存的部位标记，位置在每次查询时从当前怪物骨骼解析。
+[world_contact::bind_hurt](src/weapon/style/world_contact.rs) 可为当前本地任务猎人的风格登记受击检测回调。回调通过 [HurtScene](src/combat/collision/hurt.rs) 使用 GU 的地形、受击形状展开和相交函数，适合磁力标记一类只需要接触位置的效果。命中返回可跨帧保存的部位标记。在猎人动作回调中可用 `Target::position_for` 查询，SDK 会重新检查怪物身份、区域和部位，再解析当前骨骼位置。
 
 独立武器可用 [melee::bind_strike_contact](src/weapon/style/action/melee.rs) 监听已提交的近战判定进入原版怪物伤害计算。回调来源按猎人、碰撞槽和原生命中编号匹配，提供该判定提交时的动作值。
 
