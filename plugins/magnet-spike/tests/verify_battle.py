@@ -55,6 +55,7 @@ def replay():
     verify_weapon_hud(g, actor, equipment, scratch)
     meter = setup_magnet_hud(g)
     assert meter() == ([16.] * 5, 0)
+    assert meter(flashes=True) == []
     g.put(actor + 5060, scratch)
     assert meter() == ([], 0)
     g.put(actor + 5060, equipment)
@@ -199,6 +200,7 @@ def replay():
     audio_banks = {}
     sounds = []
     pel_name = r"effect\frontier_ms\particles"
+    flash_name = r"GUI\frontier_magnet_spike\flash"
     pel = g.alloc(176)
     g.put(pel + 80, 1)
 
@@ -209,6 +211,16 @@ def replay():
             assert flags == 2 and name == pel_name
             assert resources[name, 0x5A525C16].startswith(b"PEL\0")
             return pel
+        if kind == 0x21255D0:
+            assert flags == 2 and name == flash_name
+            data = resources[name, 0x241F5DEB]
+            assert data[:4] == b"TEX\0"
+            dimensions, = struct.unpack_from("<I", data, 8)
+            obj = g.alloc(228)
+            g.put(obj + 80, 1)
+            g.put(obj + 220, dimensions >> 6 & 0x1fff)
+            g.put(obj + 224, dimensions >> 19)
+            return obj
         if kind == 0x2125BEC:
             assert flags == 2  # Hunt preload uses the asynchronous native request.
             request = resources[name, 0x1BCC4966]
@@ -260,7 +272,7 @@ def replay():
     assert paths == ([r"arc\frontier\magnet_spike"]
                      + [rf"player\mot\frontier_ms\{g}" for g in (0, 2, 4)]
                      + [rf"player\hit\frontier_ms\melee_{i}" for i in range(1, 9)]
-                     + [pel_name]
+                     + [pel_name, flash_name]
                      + [rf"sound\se\pl\frontier_ms\{name}" for name in ("blade", "common")])
     packed = g.run(ENCODE, actor, PRIVATE | 1440)
     assert packed & 255 == 40 and g.run(DECODE, actor, packed) == PRIVATE | 1440
@@ -401,7 +413,7 @@ def verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter, motion
     assert (byte(hit + 86), byte(second + 86)) == (50, 65)
     assert g.get(hit + 64) & 3 == g.get(second + 64) & 3 == 1
     assert g.half(hit + 52) != g.half(second + 52)
-    shot_packet, flight_packets = verify_shot(
+    shot_data, flight_packets = verify_shot(
         g, actor, monster, status, monster_vt, hurt, collision, credit, set_action, tick, meter, sounds,
     )
     verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick, meter)
@@ -409,7 +421,7 @@ def verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter, motion
     boost_packets = verify_magnetic_boost(g, actor, monster, collision, set_action, tick, meter)
     guard_packets, effects = verify_guard(g, actor, set_action, tick, meter, motions, sounds)
     verify_peer(g, actor, vtable, part, monster, status, collision, credit, set_action, tick, meter,
-                flight_packets, boost_packets, guard_packets, shot_packet, sounds, effects)
+                flight_packets, boost_packets, guard_packets, shot_data, sounds, effects)
 
 
 def verify_guard(g, actor, set_action, tick, meter, motions, sounds):
@@ -686,6 +698,26 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     def update():
         assert g.run(g.hooks[0x16ABAC], collision) == 3
 
+    # Use the native process lookup, position sender and SDK packet hook.
+    previous_network = g.get(0x18843F0)
+    network, room, process = (g.alloc(n) for n in (1604, 240, 48))
+    g.put(0x18843F0, network)
+    g.put(network + 520, room)
+    g.put(room + 232, 2)
+    g.put(network + 992 + 4 * 6, process)
+    g.put(process + 16, 1)
+    g.put(process + 36, 1)
+    events = []
+    transport = g.originals[0x9FC3D8]
+
+    def send(sender, target, packet, priority):
+        assert (sender, target, priority, g.get(packet)) == (process, 1, 4, 0x17423E4)
+        assert g.get(g.cpu.reg_read(UC_ARM_REG_SP)) == 4160
+        assert g.get(packet + 44) >> 31 == 1
+        assert g.cpu.mem_read(packet + 16, 12) == g.cpu.mem_read(actor + 64, 12)
+        events.append(bytes(g.cpu.mem_read(packet, 48)))
+
+    g.stub(transport, send)
     hp, credit_count = g.get(status + 880), len(credit)
     held = 0x800
     set_action(1, 0)
@@ -699,10 +731,12 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     update()
     assert not rays and not joints
     assert not visuals()
+    assert not events
     assert meter()[1] == 0
     assert [cue for _, bank, cue, _ in sounds[first_sound:]] == [8, 74]
     tick(frame=12.)
     tick(frame=12.)
+    assert len(events) == 1
     assert [cue for _, bank, cue, _ in sounds[first_sound:]] == [8, 74, 9]
     assert sounds[-1] == (actor, "blade", 9, (25., 100., 50.))
     assert visuals() == [(i, (25., 100., 50.)) for i in range(8)]
@@ -711,6 +745,7 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     assert visuals() == [(i, (25., 100., 550.)) for i in range(8)]
     update()
     assert rays[-1] == ((25., 100., 550.), (25., 100., 1050.)), rays
+    assert len(events) == 2
     assert joints.count((monster, 5)) == 4, joints  # Sweep, attach and sample the mark.
     assert meter()[1] == 1
     hit_point = visuals()[0][1]
@@ -756,6 +791,7 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     update()
     assert len(rays) == 1 and not joints
     assert g.get(status + 880) == hp and len(credit) == credit_count
+    assert len(events) == 4
 
     # A stopped scene freezes flight and marks. A live mark lasts 9000 FZ
     # simulation ticks, and the scene clock counts 60 Hz frames.
@@ -787,11 +823,15 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     assert not visuals()
 
     water = 110.
+    put_vec(camera + 96, 0., -1000., 1000.)
     tick(frame=60., ended=True)
     tick(A, held=held, native_pad=True)
     tick(frame=14.)
     update()
     assert len(rays) == 1 and not joints
+    assert len(events) == 8  # Two launches that hit, one wall, one water.
+    g.cpu.hook_del(g.traps.pop(transport))
+    g.put(0x18843F0, previous_network)
     assert not visuals()
     update()
     assert len(rays) == 1 and not joints
@@ -1055,7 +1095,7 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     assert spent == [-150.] and landings == [(actor, 0)] * 4, (spent, landings)
     for contact in contacts:
         g.run(0x1687A8, contact)
-    return shot_packet, (flight_packet, guided_position, coast_position)
+    return (shot_packet, events, (spawn, stop, visuals)), (flight_packet, guided_position, coast_position)
 
 
 def apply_repel_root(g, actor, clip, start, end):
@@ -1161,6 +1201,7 @@ def setup_magnet_hud(g):
         g.put(bars[0] + 108, bars[1])
         for i, bar in enumerate(bars):
             g.put(bar, 0x178FC48)
+            g.put(bar + 112, animation)
             g.put(bar + 160, 2)
             g.put(members + 4 * (i + 1), bar)
         index = len(groups)
@@ -1172,16 +1213,26 @@ def setup_magnet_hud(g):
 
     g.stub(0x54501C, clone)
     g.stub(0xA344F4, lambda *_: 0)
+    g.put(0x212668C, g.alloc(256))  # GUI renderer defaults used by cGUIObjTexture.
+    # Run the original cGUIObjTexture constructor with a host allocation slot.
+    g.run(0xA56B74)
+    allocator, allocator_vt, allocate = (g.alloc(n) for n in (4, 36, 4))
+    g.put(0x21234C8 + 24, (g.get(0x21234C8 + 24) & ~(63 << 23)) | (63 << 23))
+    g.put(0x18A62E8 + 63 * 4, allocator)
+    g.put(allocator, allocator_vt)
+    g.put(allocator_vt + 32, allocate)
+    g.stub(allocate, lambda _, size, *__: g.alloc(size))
     # Run GU's position, visibility, size and color setters. The replay has
     # no renderer, so stop at the native geometry invalidation callback.
     g.stub(g.get(0x178FC48 + 80), lambda *_: 0)
     g.stub(0xA4DF54, lambda *_: 0)
 
-    def sample(*, boost_tracks=False):
+    def sample(*, boost_tracks=False, flashes=False):
         assert g.run(0x544CC8, layout) == 17
         assert g.get(root + 84) == 3
         fills = []
         tracks = []
+        overlays = []
         signal = 0
         for node, bars in groups:
             if g.get(node + 84) & 3 != 3:
@@ -1202,7 +1253,21 @@ def setup_magnet_hud(g):
                 assert math.isclose(sizes[0][0] + sizes[1][0], 16., abs_tol=.0001)
                 assert sizes[0][1] == sizes[1][1] == 8.
                 assert struct.unpack("<2f", g.cpu.mem_read(bars[1] + 128, 8)) == (sizes[0][0], 0.)
+                sprite = g.get(bars[1] + 108)
+                while sprite:
+                    assert g.get(sprite) == 0x178FCC8 and g.get(sprite + 116) == layout
+                    assert g.get(sprite + 112) == g.get(node + 220)
+                    if g.get(sprite + 84) & 1:
+                        assert struct.unpack("<2f", g.cpu.mem_read(sprite + 128, 8)) == (-10., -12.)
+                        assert struct.unpack("<2f", g.cpu.mem_read(sprite + 180, 8)) == (36., 32.)
+                        assert g.get(g.get(sprite + 260) + 12) == (1024 << 16) | 72
+                        left, top, right, bottom = struct.unpack("<4f", g.cpu.mem_read(sprite + 268, 16))
+                        assert (right - left, bottom - top) == (36., 32.)
+                        overlays.append((len(fills), int(top / 32 * 2 + left / 36)))
+                    sprite = g.get(sprite + 108)
                 fills.append(sizes[0][0])
+        if flashes:
+            return overlays
         return tracks if boost_tracks else (fills, signal)
 
     return sample
@@ -1216,6 +1281,13 @@ def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick,
 
     def number(address, value):
         g.cpu.mem_write(address, struct.pack("<f", value))
+
+    clock = g.get(0x2126764) + 104
+
+    def elapsed(frames):
+        number(clock, frames)
+        g.run(g.hooks[0x16_ABAC], collision)
+        number(clock, 2.)
 
     def draw(affinity):
         for hit in (actor + 12320, actor + 12504):
@@ -1244,16 +1316,23 @@ def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick,
     # Four accepted attraction states consumed one segment each.
     assert charge_attack() == 0x8000 + 12
     assert meter()[0][0] < 16. and meter()[0][1:] == [0.] * 4
+    assert meter(flashes=True) == [(0, 1)]
     tick(frame=20., ended=True)
+    elapsed(1.)
+    assert meter(flashes=True) == [(0, 1)]  # Two GU frames per source tick.
+    elapsed(1.)
     assert charge_attack() == 0
+    assert meter(flashes=True) == [(0, 2)]
+    elapsed(58.)
+    assert meter(flashes=True) == [(0, 31)]
+    elapsed(2.)
+    assert meter(flashes=True) == []
 
     # Nine FZ recharge intervals recover 1800 units, just below one segment.
-    clock = g.get(0x2126764) + 104
-    number(clock, 540.)
-    g.run(g.hooks[0x16_ABAC], collision)
-    number(clock, 2.)
+    elapsed(478.)
     assert charge_attack() == 0
     assert 14.4 - 0.001 <= meter()[0][0] < 16.
+    assert meter(flashes=True) == []
 
     # Swinging and a stale serial leave the gauge unchanged. The same strike
     # handled by GU's damage dispatcher can credit these 43 x 6 units.
@@ -1268,7 +1347,9 @@ def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick,
     g.cpu.mem_write(hit + 52, struct.pack("<H", serial))
     damage(hit, 0, 0, 0)
     assert math.isclose(sum(meter()[0]) - sum(before[0]), 258 * 16 / 2000, abs_tol=.001)
+    assert meter(flashes=True) == [(0, 32)]
     assert charge_attack() == 0x8000 + 12
+    assert meter(flashes=True) == [(0, 1)]
     assert charge_attack() == 0
 
     # Affinity is determined by native damage. Truncate the effective motion
@@ -1289,9 +1370,7 @@ def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick,
     g.cpu.mem_write(g.get(actor + 5060) + 802, bytes(2))
 
     # The other form uses a distinct original action and spends the same amount.
-    number(clock, 600.)
-    g.run(g.hooks[0x16_ABAC], collision)
-    number(clock, 2.)
+    elapsed(600.)
     set_action(1, 0)
     tick(SPECIAL, native_pad=True)
     tick(frame=99., ended=True)
@@ -1450,6 +1529,23 @@ def verify_magnetic_boost(g, actor, monster, collision, set_action, tick, meter)
     assert tracks()[0][0] > 0.
     elapsed(2.)
     assert tracks()[1] == (0., impact)
+
+    # Passive recharge flashes only the cell whose threshold was crossed.
+    set_action(1, 0)
+    tick(X, held=0x800, native_pad=True)
+    assert g.half(actor + 9482) in (0x8000 + 12, 0x8000 + 38)
+    assert meter()[0] == [16.] * 4 + [0.]
+    elapsed(599.)
+    assert meter()[0][-1] < 16. and meter(flashes=True) == []
+    elapsed(1.)
+    assert meter()[0] == [16.] * 5
+    assert meter(flashes=True) == [(4, 33)]  # The refill tick already advanced the animation.
+    elapsed(0.)
+    assert meter(flashes=True) == [(4, 33)]
+    elapsed(38.)
+    assert meter(flashes=True) == [(4, 52)]
+    elapsed(2.)
+    assert meter(flashes=True) == []
     return boosted_slash, boosted_impact, expired_impact
 
 

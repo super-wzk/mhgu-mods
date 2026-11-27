@@ -11,17 +11,50 @@ use mhgu_sdk::{
     sync::Shared,
     weapon::style::{
         action::{self, melee::StrikePower},
-        hud::{Meter, MeterTrack, Signal},
+        hud::{GaugePlate, MAX_METER_SEGMENTS, Meter, MeterOverlay, MeterTrack, Signal},
         hunter, movement, particle,
     },
 };
 
+pub(super) mod network;
+
 struct Projectile {
+    serial: u8,
     area: u8,
     position: [f32; 3],
     velocity: [f32; 3],
     remaining: f32,
     effect: Effect,
+}
+
+impl Projectile {
+    fn new(serial: u8, area: u8, position: [f32; 3], direction: [f32; 3]) -> Self {
+        let speed = f32::from(program::parameter(16)) / 2.;
+        let mut effect = Effect::new(Route::Shot);
+        effect.move_to(position);
+        Self {
+            serial,
+            area,
+            position,
+            velocity: direction.map(|component| component * speed),
+            remaining: program::SHOT.0,
+            effect,
+        }
+    }
+
+    fn end_at(&self, frames: f32) -> [f32; 3] {
+        core::array::from_fn(|i| self.position[i] + frames * self.velocity[i])
+    }
+
+    fn advance(&mut self, position: [f32; 3], frames: f32) -> bool {
+        self.remaining -= frames;
+        self.position = position;
+        if self.remaining <= 0. {
+            return false;
+        }
+        self.effect.move_to(position);
+        true
+    }
 }
 
 struct Mark {
@@ -32,7 +65,23 @@ struct Mark {
 
 struct Gauge {
     units: u16,
-    refill_time: f32,
+    tick_fraction: f32,
+    refill_ticks: u32,
+    spend_flash: u8,
+    refill_flashes: [u8; MAX_METER_SEGMENTS],
+}
+
+const SEGMENT_UNITS: u16 = program::parameter(19);
+const SEGMENTS: u8 = (program::parameter(17) / SEGMENT_UNITS) as u8;
+// FZ includes tick zero in the draw window. Zero here means inactive.
+const SPEND_FRAMES: u8 = 31;
+const REFILL_FRAMES: u8 = 21;
+static FLASH_ATLAS: GaugePlate =
+    GaugePlate::new(0x465a4d53, c"GUI\\frontier_magnet_spike\\flash", [0.; 4])
+        .with_cells(2, [36, 32]);
+
+pub(super) unsafe fn preload() {
+    unsafe { FLASH_ATLAS.preload() };
 }
 
 impl Gauge {
@@ -40,29 +89,77 @@ impl Gauge {
         // FZ 81228740 initializes the hunt's charge and clears the regen timer.
         Self {
             units: program::parameter(18),
-            refill_time: 0.,
+            tick_fraction: 0.,
+            refill_ticks: 0,
+            spend_flash: 0,
+            refill_flashes: [0; MAX_METER_SEGMENTS],
         }
     }
 
     fn add(&mut self, units: u32) {
+        let previous = self.units / SEGMENT_UNITS;
         self.units = u32::from(self.units)
             .saturating_add(units)
             .min(u32::from(program::parameter(17))) as u16;
+        let filled = self.units / SEGMENT_UNITS;
+        // FZ 812281D4 starts each newly filled cell once while its flash is active.
+        for flash in &mut self.refill_flashes[usize::from(previous)..usize::from(filled)] {
+            if *flash == 0 {
+                *flash = REFILL_FRAMES;
+            }
+        }
         if self.units == program::parameter(17) {
-            self.refill_time = 0.;
+            self.refill_ticks = 0;
         }
     }
 
-    fn refill(&mut self, frames: f32) {
-        if self.units == program::parameter(17) {
-            return;
+    fn advance_flashes(&mut self, ticks: u32) {
+        let ticks = ticks.min(u32::from(SPEND_FRAMES)) as u8;
+        self.spend_flash = self.spend_flash.saturating_sub(ticks);
+        for flash in &mut self.refill_flashes {
+            *flash = flash.saturating_sub(ticks);
         }
-        // FZ 8122880E gives parameter 20 after each parameter-21 interval at 30 Hz.
-        let interval = f32::from(program::parameter(21)) * 2.;
-        let elapsed = self.refill_time + frames;
-        let ticks = (elapsed / interval) as u32;
-        self.refill_time = elapsed % interval;
-        self.add(ticks.saturating_mul(u32::from(program::parameter(20))));
+    }
+
+    fn advance(&mut self, frames: f32) {
+        let elapsed = self.tick_fraction + frames / 2.;
+        let mut ticks = elapsed as u32;
+        self.tick_fraction = elapsed % 1.;
+
+        // FZ 8122880E grants charge before decrementing flashes on that tick.
+        // Process due grants in order so old flashes expire even on a long step.
+        let interval = u32::from(program::parameter(21));
+        while self.units < program::parameter(17) {
+            let until_refill = interval - self.refill_ticks;
+            if ticks < until_refill {
+                self.refill_ticks += ticks;
+                break;
+            }
+            self.advance_flashes(until_refill - 1);
+            self.add(u32::from(program::parameter(20)));
+            self.advance_flashes(1);
+            self.refill_ticks = 0;
+            ticks -= until_refill;
+        }
+        self.advance_flashes(ticks);
+    }
+
+    fn overlay(&self) -> MeterOverlay {
+        MeterOverlay {
+            atlas: Some(&FLASH_ATLAS),
+            spend: if self.spend_flash > 0 {
+                1 + SPEND_FRAMES - self.spend_flash
+            } else {
+                0
+            },
+            refill: self.refill_flashes.map(|left| {
+                if left > 0 {
+                    1 + SPEND_FRAMES + REFILL_FRAMES - left
+                } else {
+                    0
+                }
+            }),
+        }
     }
 }
 
@@ -195,14 +292,19 @@ pub extern "C" fn meter(actor: u32) -> Meter {
             } else {
                 program::parameter(18)
             },
-            units_per_segment: program::parameter(19),
-            segments: (program::parameter(17) / program::parameter(19)) as u8,
+            units_per_segment: SEGMENT_UNITS,
+            segments: SEGMENTS,
             signal: match state.range.filter(|_| current) {
                 Some(MarkRange::Repel) => Signal::Near,
                 Some(MarkRange::Attract) => Signal::Far,
                 None => Signal::None,
             },
             tracks: [slash.track(0xfff26752), impact.track(0xff71b6ef)],
+            overlay: if current {
+                state.gauge.overlay()
+            } else {
+                MeterOverlay::default()
+            },
         }
     })
 }
@@ -257,7 +359,7 @@ impl MarkRange {
 }
 
 fn cost(segments: u8) -> u16 {
-    u16::from(segments).saturating_mul(program::parameter(19))
+    u16::from(segments).saturating_mul(SEGMENT_UNITS)
 }
 
 pub fn can_spend(actor: u32, segments: u8) -> bool {
@@ -274,6 +376,10 @@ pub fn spend(actor: u32, segments: u8) -> bool {
             return false;
         };
         state.gauge.units = remaining;
+        if segments > 0 {
+            // FZ 81227F04 restarts the spend flash after every accepted payment.
+            state.gauge.spend_flash = SPEND_FRAMES;
+        }
         true
     })
 }
@@ -310,30 +416,25 @@ pub unsafe fn launch(actor: u32, direction: [f32; 3]) {
         return;
     };
     let area = unsafe { hunter::area(actor) };
-    let (duration, _) = program::SHOT;
-    let speed = f32::from(program::parameter(16)) / 2.;
+    let serial = network::next_serial();
     LOCAL.with(|state| {
         state.select_owner(actor);
-        let mut effect = Effect::new(Route::Shot);
-        effect.move_to(position);
-        state.shots.push(Projectile {
-            area,
-            position,
-            velocity: direction.map(|component| component * speed),
-            remaining: duration,
-            effect,
-        });
+        state
+            .shots
+            .push(Projectile::new(serial, area, position, direction));
     });
+    network::launch(actor, serial, direction);
 }
 
 pub extern "C" fn update(scene: &HurtScene<'_>) {
+    let mut ended = Vec::new();
     LOCAL.with(|state| {
         state.select_owner(scene.owner());
         let frames = scene.frames();
         if frames == 0. {
             return;
         }
-        state.gauge.refill(frames);
+        state.gauge.advance(frames);
         for boost in &mut state.boosts {
             boost.advance(frames);
         }
@@ -353,16 +454,18 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
         let (_, radius) = program::SHOT;
         state.shots.retain_mut(|shot| {
             if shot.area != scene.area() {
+                ended.push(shot.serial);
                 return false;
             }
             let step = frames.min(shot.remaining);
-            let end = core::array::from_fn(|i| shot.position[i] + step * shot.velocity[i]);
+            let end = shot.end_at(step);
             // FZ 81165A8E stops at stage geometry or the higher floor/water surface.
             if scene.terrain(shot.position, end).is_some()
                 || scene
                     .surface_height(end)
                     .is_some_and(|height| end[1] <= height)
             {
+                ended.push(shot.serial);
                 return false;
             }
             if let Some(target) = scene.sweep(shot.position, end, radius) {
@@ -373,15 +476,14 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
                     remaining: 2. * f32::from(program::parameter(14)),
                     effect: Effect::new(Route::Mark),
                 });
+                ended.push(shot.serial);
                 return false;
             }
-            shot.remaining -= step;
-            shot.position = end;
-            if shot.remaining <= 0. {
-                return false;
+            let active = shot.advance(end, step);
+            if !active {
+                ended.push(shot.serial);
             }
-            shot.effect.move_to(end);
-            true
+            active
         });
         // Publish only the range category for the HUD. The scene callback
         // owns the live monster and bone handles used to compute it.
@@ -397,4 +499,7 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
             None
         };
     });
+    for serial in ended {
+        network::stop(scene.owner(), serial);
+    }
 }

@@ -16,6 +16,8 @@ cargo test --workspace --manifest-path tools/mhfz2mhgu/Cargo.toml
 
 `magnet-spike-icon "$MHFZ_DAT" -o OUTPUT.tex` 从本地 MHF-Z 的 `mhf.bin` 原版武器图集读取磁斩锤图标，保留 64×64 像素和透明度，编码为 GU TEX。
 
+`magnet-spike-battle` 还从同一 `mhf.bin` 读取组 4 的动画 0x41、0x42，将消耗和回充的关键帧烘焙为 GU 贴图，写入磁斩锤动作 ARC。
+
 `magnet-spike-battle "$MHFZ_DAT" -o OUTPUT_DIR` 将 `motion/w13.mot` 的猎人动作、`motion/w13w.mot` 的武器部件动作与近战 HTS 写入 `motions.arc`。部件按 `wk451.bin` 中的 11 骨骼模型转换，保留源槽位、空槽和循环起点。近战 HTS 对应判定族 120 的选择器 1 至 8，保留胶囊的半径、端点和挂点。传入 `--material-template` 时，输出同时包含模型、材质和贴图，文件名为 `magnet_spike.arc`。`magnet_spike.fmsa` 包含 `mhfdat.bin` 中的 165 个动作状态及 `mhfsdt.bin` 中判定族 120、121 的记录与形状。第 4 版中，`MSHT` 段按选择器保留原始形状列表，`MSCT` 段保存各状态的磁力消耗格数，`MSPR` 段保存武器参数和状态形态分类。
 
 磁斩锤的 `we13.snd` 与 `common01.snd` 按用到的请求生成 ADPCM、SBKR 和 SRQR，依次装入同一 ARC。输出的 `frontier_ms_sound.flse` 保存动作帧、音效库与加权请求选项，和动作表一起编入 NRO。

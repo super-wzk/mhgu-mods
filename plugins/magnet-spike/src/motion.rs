@@ -98,6 +98,7 @@ pub unsafe extern "C" fn preload(_actor: u32) {
     unsafe {
         crate::combat::preload();
         crate::fx::preload();
+        crate::magnet::preload();
         sound::preload();
     }
 }

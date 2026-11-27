@@ -11,6 +11,7 @@ const ASYNC: u32 = 2;
 const READY: u32 = 1;
 const FAILED_OR_CANCELED: u32 = 0x50;
 
+#[repr(C)]
 pub(super) struct CachedResource {
     kind: u32,
     path: &'static CStr,

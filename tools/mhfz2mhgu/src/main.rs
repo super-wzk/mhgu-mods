@@ -335,6 +335,11 @@ fn main() -> Result<()> {
             let program = hunter::actions(&dat, weapon)?;
             let (sounds, timeline) = sound::magnet_spike(&dat)?;
             assets.extend(sounds);
+            assets.push(mhgu_resource::arc::Asset {
+                name: r"GUI\frontier_magnet_spike\flash".into(),
+                kind: mhgu_resource::arc::TEXTURE,
+                data: hunter_hud::magnet_spike(&dat)?,
+            });
             if let Some(gu_weapon) = gu_weapon {
                 assets.extend(hunter_fx::magnet_spike(&dat, &output.join("effects"), &gu_weapon)?);
             }

@@ -1,6 +1,6 @@
 //! Optional expanded-weapon state on GU's native periodic position packet.
 use super::{Entry, local_entry, local_hunter, packet_action, peer_entry, registered_entry};
-use crate::weapon::{read, set};
+use crate::weapon::{gu, read, set};
 use core::{ptr, sync::atomic::Ordering};
 use mhgu_sdk::{
     service::on_game_thread,
@@ -19,6 +19,10 @@ const POSITION_SERIAL_SHIFT: u32 = 8;
 const ACTION_SERIAL_SHIFT: u32 = 26; // Above all netPlAction state and sheathe bits.
 const MAX_SERIAL: u8 = 63;
 const MAX_VALUE: u8 = 7;
+// Ordinary position snapshots keep their existing action stamp. Explicit
+// events use bit 31 and the remaining bits outside GU's 4..7 nibble.
+const EVENT_PRESENT: u32 = 1 << 31;
+const EVENT_MAX: u32 = (1 << 27) - 1;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Stamp {
@@ -30,6 +34,71 @@ struct Stamp {
 static SENT: Shared<Option<(u32, Stamp)>> = Shared::new(None);
 static ACCEPTED: remote::PeerStates<Stamp> = remote::PeerStates::new();
 static SERVICE: remote::PositionService = remote::PositionService(bind);
+static EVENTS: remote::PositionEvents = remote::PositionEvents {
+    bind: bind_event,
+    send: send_event,
+    peer: event_peer,
+};
+
+static EVENT_TO_SEND: Shared<Option<(u32, u32)>> = Shared::new(None);
+
+fn event_receiver(entry: &Entry) -> Option<remote::ReceivePositionEvent> {
+    let handler = entry.multiplayer.position_event.load(Ordering::Acquire);
+    (!handler.is_null())
+        .then(|| unsafe { core::mem::transmute::<*mut (), remote::ReceivePositionEvent>(handler) })
+}
+
+extern "C" fn bind_event(id: u32, receive: remote::ReceivePositionEvent) -> bool {
+    let Some(entry) = registered_entry(id)
+        .filter(|entry| entry.kind.is_some() && entry.multiplayer.playback().is_some())
+    else {
+        return false;
+    };
+    entry
+        .multiplayer
+        .position_event
+        .store(receive as *mut (), Ordering::Release);
+    true
+}
+
+extern "C" fn event_peer(style: u32, actor: u32) -> bool {
+    on_game_thread()
+        && unsafe { peer_entry(actor) }
+            .is_some_and(|entry| entry.style.id == style && event_receiver(entry).is_some())
+}
+
+extern "C" fn send_event(style: u32, actor: u32, payload: u32) -> bool {
+    if payload > EVENT_MAX
+        || !on_game_thread()
+        || unsafe { local_hunter() } != actor
+        || unsafe { local_entry(actor) }
+            .filter(|entry| entry.style.id == style)
+            .and_then(event_receiver)
+            .is_none()
+    {
+        return false;
+    }
+    unsafe {
+        let network = read::<u32>(forge::mem::text_addr(), 0x18843f0);
+        if network == 0 {
+            return false;
+        }
+        // The same quest position process selected by GU 29C368.
+        let process = gu!(0x227b3c, network, 6);
+        if process == 0 || read::<u8>(process, 16) == 0 || read::<u32>(process, 36) == 0 {
+            return false;
+        }
+        EVENT_TO_SEND.with(|event| {
+            *event = Some((
+                process,
+                EVENT_PRESENT | (payload & 15) | ((payload & !15) << 4),
+            ));
+        });
+        gu!(0x200438, process, actor);
+        EVENT_TO_SEND.with(|event| *event = None);
+    }
+    true
+}
 
 fn codec(entry: &Entry) -> Option<&'static remote::ActionState> {
     unsafe { entry.multiplayer.position.load(Ordering::Acquire).as_ref() }
@@ -134,7 +203,13 @@ unsafe fn send_packet(process: u32, target: u32, packet: u32, priority: u32, cha
         && channel == 4160
         && unsafe { is_position(packet) }
         && on_game_thread()
-        && let Some(extension) = unsafe { position_extension() }
+        && let Some(extension) = EVENT_TO_SEND
+            .with(|event| {
+                event
+                    .filter(|(owner, _)| *owner == process)
+                    .map(|(_, flags)| flags)
+            })
+            .or_else(|| unsafe { position_extension() })
     {
         let flags = unsafe { read::<u32>(packet, POSITION_FLAGS) };
         unsafe { set(packet, POSITION_FLAGS, flags | extension) };
@@ -151,6 +226,18 @@ unsafe fn apply_extension(packet: u32, actor: u32) -> Option<()> {
         return None;
     }
     let flags = unsafe { read::<u32>(packet, POSITION_FLAGS) };
+    if flags & EVENT_PRESENT != 0 {
+        let receive = unsafe { peer_entry(actor) }.and_then(event_receiver)?;
+        let position = unsafe { read::<[f32; 3]>(packet, 16) };
+        if position.iter().all(|coordinate| coordinate.is_finite()) {
+            receive(&remote::PositionEvent {
+                actor,
+                position,
+                payload: ((flags & 0x7fff_ff00) >> 4) | (flags & 15),
+            });
+        }
+        return Some(());
+    }
     if flags & POSITION_PRESENT == 0 {
         return None;
     }
@@ -186,6 +273,7 @@ unsafe fn unpack_position(packet: u32, actor: u32) -> u32 {
 
 pub(super) fn install(base: u32) {
     if unsafe { remote::publish_position(&SERVICE) } {
+        unsafe { remote::publish_position_events(&EVENTS) };
         forge::install_hook!(base, send_packet);
         forge::install_hook!(base, unpack_position);
     }

@@ -7,8 +7,10 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use crate::memory::entry;
 use core::ffi::CStr;
 
-const METER_SERVICE: &CStr = c"mhgu::WeaponMeterV2";
-const METER_MAGIC: u32 = u32::from_le_bytes(*b"WMH2");
+const METER_SERVICE: &CStr = c"mhgu::WeaponMeterV3";
+const METER_MAGIC: u32 = u32::from_le_bytes(*b"WMH3");
+
+pub const MAX_METER_SEGMENTS: usize = 8;
 
 #[repr(u8)]
 #[derive(Clone, Copy)]
@@ -26,6 +28,16 @@ pub struct MeterTrack {
     pub color: u32,
 }
 
+/// Optional atlas frames over the first segment and individual filled segments.
+/// Frame zero hides the corresponding sprite.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct MeterOverlay {
+    pub atlas: Option<&'static GaugePlate>,
+    pub spend: u8,
+    pub refill: [u8; MAX_METER_SEGMENTS],
+}
+
 /// Snapshot of the active hunter's weapon meter. The HUD clamps charge to
 /// the capacity implied by the number and size of the segments.
 #[repr(C)]
@@ -36,6 +48,7 @@ pub struct Meter {
     pub segments: u8,
     pub signal: Signal,
     pub tracks: [MeterTrack; 2],
+    pub overlay: MeterOverlay,
 }
 
 pub type SampleMeter = extern "C" fn(actor: u32) -> Meter;
@@ -68,7 +81,8 @@ unsafe fn write<T>(p: u32, off: u32, value: T) {
         ((p + off) as *mut T).write_unaligned(value);
     }
 }
-/// A private 128 x 1024 HUD texture, drawn through the existing GU weapon widget.
+/// A private 1024-pixel-high HUD texture, drawn through GU sprite objects.
+#[repr(C)]
 pub struct GaugePlate {
     id: u32,
     texture: CachedResource,
@@ -157,6 +171,34 @@ impl GaugePlate {
         }
     }
 
+    fn crop(&self, frame: u32) -> [f32; 4] {
+        let top = (32 * (frame / self.columns)) as f32;
+        let left = (self.cell[0] * (frame % self.columns)) as f32;
+        [
+            left,
+            top,
+            left + self.cell[0] as f32,
+            top + self.cell[1] as f32,
+        ]
+    }
+
+    /// Apply an atlas cell to a sprite created specifically for the meter.
+    /// # Safety
+    /// The sprite must be a live GU texture object owned by the meter on the GUI thread.
+    #[doc(hidden)]
+    pub unsafe fn paint_meter_sprite(&self, sprite: u32, frame: u8) -> Option<[f32; 2]> {
+        if u32::from(frame) >= 32 * self.columns {
+            return None;
+        }
+        let desc = unsafe { self.atlas() }?;
+        unsafe {
+            write(sprite, 256, self.id);
+            write(sprite, 260, desc);
+            set_crop(sprite, self.crop(u32::from(frame)));
+        }
+        Some(self.cell.map(|size| size as f32))
+    }
+
     /// Apply a private cell to a known weapon sprite, or restore its captured native crop.
     /// # Safety
     /// The sprite must be live on the GUI thread and owned by this gauge.
@@ -173,14 +215,7 @@ impl GaugePlate {
                     write(sprite, 256, self.id);
                     write(sprite, 260, desc);
                 }
-                let top = (32 * (frame / self.columns)) as f32;
-                let left = (self.cell[0] * (frame % self.columns)) as f32;
-                [
-                    left,
-                    top,
-                    left + self.cell[0] as f32,
-                    top + self.cell[1] as f32,
-                ]
+                self.crop(frame)
             } else if id == self.id {
                 let bind: unsafe extern "C" fn(u32, u32) = core::mem::transmute(entry(0xa4faf0));
                 bind(sprite, self.stock_id.load(Ordering::Relaxed));
@@ -188,10 +223,15 @@ impl GaugePlate {
             } else {
                 return;
             };
-            let crop: unsafe extern "C" fn(u32, *const f32) = core::mem::transmute(entry(0xa4fb58));
-            crop(sprite, rect.as_ptr());
+            set_crop(sprite, rect);
         }
     }
+}
+
+unsafe fn set_crop(sprite: u32, rect: [f32; 4]) {
+    let crop: unsafe extern "C" fn(u32, *const f32) =
+        unsafe { core::mem::transmute(entry(0xa4fb58)) };
+    unsafe { crop(sprite, rect.as_ptr()) };
 }
 
 /// # Safety

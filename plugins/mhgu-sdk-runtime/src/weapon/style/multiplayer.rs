@@ -15,6 +15,7 @@ pub(super) struct Bindings {
     playback: AtomicPtr<remote::Playback>,
     sheathe: AtomicPtr<Sheathe>,
     position: AtomicPtr<remote::ActionState>,
+    position_event: AtomicPtr<()>,
 }
 
 impl Bindings {
@@ -23,6 +24,7 @@ impl Bindings {
             playback: AtomicPtr::new(ptr::null_mut()),
             sheathe: AtomicPtr::new(ptr::null_mut()),
             position: AtomicPtr::new(ptr::null_mut()),
+            position_event: AtomicPtr::new(ptr::null_mut()),
         }
     }
 

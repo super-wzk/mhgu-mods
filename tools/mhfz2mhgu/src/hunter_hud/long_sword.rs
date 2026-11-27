@@ -293,3 +293,32 @@ pub fn switch_axe(dat:&Path)->Result<Vec<u8>>{
     }
     mhgu_resource::tex::rgba8_unmipped((COLS*W) as u32,ATLAS_H as u32,&atlas)
 }
+
+pub fn magnet_spike(dat: &Path) -> Result<Vec<u8>> {
+    let data = pac::decode(crate::read(&dat.join("mhf.bin"))?)?;
+    let layout = pac::member(&data, 20)?;
+    let sprites = Sprites {
+        layout: &layout,
+        texture: image::decode(&pac::member(&data, 4)?)?,
+    };
+    // Keep the sequence artwork at the same scale as the GU meter cells.
+    const CELL: usize = 36;
+    const COLUMNS: usize = 2;
+    const ATLAS_W: usize = CELL * COLUMNS;
+    let mut atlas = vec![0; ATLAS_W * ATLAS_H * 4];
+    let mut tile = vec![0; W * H * 4];
+    // Frame zero hides the sprite. FZ 8122670E samples group 4 sequences
+    // 0x41 (0..=30) for spending and 0x42 (0..=20) for filling a segment.
+    for (sequence, first, last, x, y) in [(0x41, 1, 30, 18., 16.), (0x42, 32, 20, 9.2, 12.4)] {
+        for frame in 0..=last {
+            tile.fill(0);
+            sprites.sequence_at(&mut tile, sequence, frame, x, y)?;
+            let index = first + frame;
+            for (y, row) in tile.chunks_exact(W * 4).enumerate() {
+                let dst = ((index / COLUMNS * H + y) * ATLAS_W + index % COLUMNS * CELL) * 4;
+                atlas[dst..dst + CELL * 4].copy_from_slice(&row[..CELL * 4]);
+            }
+        }
+    }
+    mhgu_resource::tex::rgba8_unmipped(ATLAS_W as u32, ATLAS_H as u32, &atlas)
+}

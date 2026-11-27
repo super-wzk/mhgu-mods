@@ -233,3 +233,52 @@ pub fn bind_position_state(id: u32, codec: &'static ActionState) -> bool {
         && unsafe { service::find::<PositionService>(POSITION_NAME, POSITION_MAGIC) }
             .is_some_and(|api| (api.0)(id, codec))
 }
+
+const EVENT_NAME: &core::ffi::CStr = c"mhgu::StylePositionEventV1";
+const EVENT_MAGIC: u32 = u32::from_le_bytes(*b"SPE1");
+
+/// An event from a peer wearing the registered expanded weapon. GU supplies
+/// the sender's position on the same update as the 27-bit style payload.
+#[repr(C)]
+pub struct PositionEvent {
+    pub actor: u32,
+    pub position: [f32; 3],
+    pub payload: u32,
+}
+
+pub type ReceivePositionEvent = extern "C" fn(&PositionEvent);
+
+#[doc(hidden)]
+#[repr(C)]
+pub struct PositionEvents {
+    pub bind: extern "C" fn(u32, ReceivePositionEvent) -> bool,
+    pub send: extern "C" fn(u32, u32, u32) -> bool,
+    pub peer: extern "C" fn(u32, u32) -> bool,
+}
+
+/// # Safety
+/// Publish a resident service during Forge initialization.
+#[doc(hidden)]
+pub unsafe fn publish_position_events(api: &'static PositionEvents) -> bool {
+    unsafe { service::publish(EVENT_NAME, EVENT_MAGIC, api) }
+}
+
+fn position_events() -> Option<&'static PositionEvents> {
+    service::on_game_thread().then(|| unsafe { service::find(EVENT_NAME, EVENT_MAGIC) })?
+}
+
+/// Bind to a registered expanded weapon with remote playback.
+pub fn bind_position_events(style: u32, receive: ReceivePositionEvent) -> bool {
+    position_events().is_some_and(|api| (api.bind)(style, receive))
+}
+
+/// Send a 27-bit event alongside the local hunter's native quest position.
+/// Returns whether GU's position sender was called for an active room.
+pub fn send_position_event(style: u32, actor: u32, payload: u32) -> bool {
+    position_events().is_some_and(|api| (api.send)(style, actor, payload))
+}
+
+/// Check whether the peer's current equipment still belongs to this style.
+pub fn is_position_event_peer(style: u32, actor: u32) -> bool {
+    position_events().is_some_and(|api| (api.peer)(style, actor))
+}

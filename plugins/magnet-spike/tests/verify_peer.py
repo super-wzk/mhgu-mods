@@ -41,7 +41,7 @@ def capture_position(g, actor):
 
 
 def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_action, tick, meter,
-                flight_packets, boost_packets, guard_packets, shot_packet, sounds, effects):
+                flight_packets, boost_packets, guard_packets, shot_data, sounds, effects):
     manager, equipment = g.get(0x1885B58), g.get(local + 5060)
     g.put(0x18843F0, g.alloc(0x16280))
     actions = g.alloc(200)
@@ -298,6 +298,7 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
     assert all(parent == second + 600 for _, parent, _ in effects[-6:])
 
     # Remote playback uses the sender's shot action and its source event.
+    shot_packet, shot_events, (spawn_shot, stop_shot, visuals) = shot_data
     first_sound = len(sounds)
     receive(second, shot_packet)
     frame(second, 0.)
@@ -305,6 +306,52 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
     frame(second, 12.)
     frame(second, 12.)
     assert [cue for owner, _, cue, _ in sounds[first_sound:] if owner == second] == [8, 74, 9]
+
+    stub(0x3267D0, spawn_shot)
+    stub(0x32A400, stop_shot)
+    # A native-weapon receiver still advances peer effects. Use the sender's
+    # origin to compensate for the receiver's lagging position interpolation.
+    clock = g.get(0x2126764) + 104
+    g.cpu.mem_write(first + 64, struct.pack("<3f", 10., 0., 0.))
+    g.cpu.mem_write(second + 64, bytes(12))
+    hit_origin = struct.unpack_from("<3f", shot_events[0], 16)
+    origin = tuple(a + b for a, b in zip(hit_origin, (15., 100., 50.)))
+    hp_before = g.get(status + 880)
+    position(first, shot_events[0])
+    position(first, shot_events[0])
+    position(second, shot_events[1])  # Reordered stop cannot be undone by the late launch.
+    position(second, shot_events[0])
+    assert visuals() == [(i, origin) for i in range(8)]
+    g.cpu.mem_write(clock, struct.pack("<f", 0.))
+    g.run(DISPATCH, local)
+    assert visuals() == [(i, origin) for i in range(8)]
+    g.cpu.mem_write(clock, struct.pack("<f", 2.))
+    g.run(DISPATCH, local)
+    assert visuals() == [(i, (origin[0], origin[1], origin[2] + 500.)) for i in range(8)]
+    position(first, shot_events[1])
+    position(first, shot_events[0])
+    assert not visuals() and g.get(status + 880) == hp_before
+    assert g.half(second + 9482) == 0x8000 + 84
+
+    # Sloped shots use the sender's signed pitch. Changing area retires the
+    # effect even if its final packet is missing.
+    position(second, shot_events[6])
+    start = visuals()[0][1]
+    g.run(DISPATCH, local)
+    moved = visuals()[0][1]
+    assert abs(moved[0] - start[0]) < .001
+    assert abs((moved[1] - start[1]) + 353.5534) < .001
+    assert abs((moved[2] - start[2]) - 353.5534) < .001
+    g.cpu.mem_write(second + 4180, b"\1")
+    g.run(DISPATCH, local)
+    assert not visuals()
+    g.cpu.mem_write(second + 4180, b"\0")
+    position(second, shot_events[4])
+    assert len(visuals()) == 8
+    g.cpu.mem_write(clock, struct.pack("<f", 150.))
+    g.run(DISPATCH, local)
+    assert not visuals()
+    g.cpu.mem_write(clock, struct.pack("<f", 2.))
 
     receive(first, repeated_flight)
     frame(first, 8.)

@@ -225,6 +225,7 @@ unsafe extern "C" fn tick(actor: u32, state: u8) {
 }
 
 unsafe extern "C" fn observe(local: u32) {
+    unsafe { magnet::network::observe(local) };
     let roster = unsafe { Roster::current() };
     let area = roster.as_ref().map(|_| unsafe { hunter::area(local) });
     for index in 0..remote::PLAYER_COUNT {
