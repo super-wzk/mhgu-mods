@@ -166,6 +166,10 @@ impl Replay {
                     fx::guard(actor, Mode::Slash);
                 },
                 113 => unsafe { fx::guard(actor, Mode::Impact) },
+                66 | 67 => unsafe {
+                    let mode = pose(actor).unwrap_or_default().mode;
+                    magnet::network::begin_repel(index, actor, mode);
+                },
                 _ => {}
             }
         }

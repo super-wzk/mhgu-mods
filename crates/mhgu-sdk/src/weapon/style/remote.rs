@@ -1,5 +1,6 @@
 //! Playback of a peer's accepted private weapon action on the game thread.
 use super::hunter;
+use crate::combat::collision::hurt::Target;
 use crate::service;
 use core::{
     cell::UnsafeCell,
@@ -296,4 +297,46 @@ pub fn send_position_event(style: u32, actor: u32, payload: u32) -> bool {
 /// Check whether the peer's current equipment still belongs to this style.
 pub fn is_position_event_peer(style: u32, actor: u32) -> bool {
     position_events().is_some_and(|api| (api.peer)(style, actor))
+}
+
+const TARGET_NAME: &core::ffi::CStr = c"mhgu::StyleTargetEventV1";
+const TARGET_MAGIC: u32 = u32::from_le_bytes(*b"STE1");
+
+/// A peer's contact with a live monster in the same area.
+#[repr(C)]
+pub struct TargetEvent {
+    pub actor: u32,
+    pub serial: u8,
+    pub target: Target,
+}
+
+pub type ReceiveTargetEvent = extern "C" fn(&TargetEvent);
+
+#[doc(hidden)]
+#[repr(C)]
+pub struct TargetEvents {
+    pub bind: extern "C" fn(u32, ReceiveTargetEvent) -> bool,
+    pub send: extern "C" fn(u32, u32, u8, &Target) -> bool,
+}
+
+/// # Safety
+/// Publish a resident service during Forge initialization.
+#[doc(hidden)]
+pub unsafe fn publish_target_events(api: &'static TargetEvents) -> bool {
+    unsafe { service::publish(TARGET_NAME, TARGET_MAGIC, api) }
+}
+
+fn target_events() -> Option<&'static TargetEvents> {
+    service::on_game_thread().then(|| unsafe { service::find(TARGET_NAME, TARGET_MAGIC) })?
+}
+
+/// Bind monster contact events to a registered expanded weapon with playback.
+pub fn bind_target_events(style: u32, receive: ReceiveTargetEvent) -> bool {
+    target_events().is_some_and(|api| (api.bind)(style, receive))
+}
+
+/// Synchronize a contact belonging to the local hunter through GU's monster
+/// data procedure. Returns whether GU's sender was called for an active room.
+pub fn send_target_event(style: u32, actor: u32, serial: u8, target: &Target) -> bool {
+    target_events().is_some_and(|api| (api.send)(style, actor, serial, target))
 }

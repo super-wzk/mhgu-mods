@@ -12,7 +12,7 @@ use mhgu_sdk::{
     weapon::style::{
         action::{self, melee::StrikePower},
         hud::{GaugePlate, MAX_METER_SEGMENTS, Meter, MeterOverlay, MeterTrack, Signal},
-        hunter, movement, particle,
+        hunter, movement, particle, remote,
     },
 };
 
@@ -61,6 +61,15 @@ struct Mark {
     target: Target,
     remaining: f32,
     effect: Effect,
+}
+
+const MARK_FRAMES: f32 = 2. * program::parameter(14) as f32;
+
+fn mark_clock_running(actor: u32) -> bool {
+    let (group, slot) = unsafe { action::current(actor) };
+    // FZ 8122880E / 8121FA3E pause the countdown during these actions.
+    !action::custom_id(group, slot)
+        .is_some_and(|id| program::is_attraction(id) || matches!(id, 63 | 69 | 73))
 }
 
 struct Gauge {
@@ -465,11 +474,7 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
         state.gauge.advance(frames);
         let mark = &mut state.mark;
         if let Some(current) = mark {
-            let (group, slot) = unsafe { action::current(scene.owner()) };
-            let using_mark = action::custom_id(group, slot)
-                .is_some_and(|id| program::is_attraction(id) || matches!(id, 63 | 69 | 73));
-            // FZ 8122880E / 8121FA3E pause the countdown during these actions.
-            if !using_mark {
+            if mark_clock_running(scene.owner()) {
                 current.remaining -= frames;
             }
             if current.remaining <= 0. {
@@ -479,7 +484,7 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
         let (_, radius) = program::SHOT;
         state.shots.retain_mut(|shot| {
             if shot.area != scene.area() {
-                ended.push(shot.serial);
+                ended.push((shot.serial, None));
                 return false;
             }
             let step = frames.min(shot.remaining);
@@ -490,7 +495,7 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
                     .surface_height(end)
                     .is_some_and(|height| end[1] <= height)
             {
-                ended.push(shot.serial);
+                ended.push((shot.serial, None));
                 return false;
             }
             if let Some(target) = scene.sweep(shot.position, end, radius) {
@@ -498,15 +503,15 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
                 // native simulation ticks (30 Hz), while GU time is 60 Hz.
                 *mark = Some(Mark {
                     target,
-                    remaining: 2. * f32::from(program::parameter(14)),
+                    remaining: MARK_FRAMES,
                     effect: Effect::new(Route::Mark),
                 });
-                ended.push(shot.serial);
+                ended.push((shot.serial, Some(target)));
                 return false;
             }
             let active = shot.advance(end, step);
             if !active {
-                ended.push(shot.serial);
+                ended.push((shot.serial, None));
             }
             active
         });
@@ -529,7 +534,10 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
             state.repel = None;
         }
     });
-    for serial in ended {
+    for (serial, target) in ended {
         network::stop(scene.owner(), serial);
+        if let Some(target) = target {
+            remote::send_target_event(crate::STYLE.id, scene.owner(), serial, &target);
+        }
     }
 }

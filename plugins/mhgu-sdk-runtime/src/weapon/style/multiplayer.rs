@@ -10,12 +10,14 @@ use mhgu_sdk::weapon::style::{
 };
 
 mod position;
+mod target;
 
 pub(super) struct Bindings {
     playback: AtomicPtr<remote::Playback>,
     sheathe: AtomicPtr<Sheathe>,
     position: AtomicPtr<remote::PositionState>,
     position_event: AtomicPtr<()>,
+    target_event: AtomicPtr<()>,
 }
 
 impl Bindings {
@@ -25,6 +27,7 @@ impl Bindings {
             sheathe: AtomicPtr::new(ptr::null_mut()),
             position: AtomicPtr::new(ptr::null_mut()),
             position_event: AtomicPtr::new(ptr::null_mut()),
+            target_event: AtomicPtr::new(ptr::null_mut()),
         }
     }
 
@@ -284,5 +287,6 @@ pub(super) fn install(base: u32) {
         forge::install_hook!(base, pack_action);
         forge::install_hook!(base, unpack_action);
         position::install(base);
+        target::install(base);
     }
 }

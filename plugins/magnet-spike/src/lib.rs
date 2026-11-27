@@ -115,6 +115,7 @@ fn register_weapon() -> Result<(), RegisterError> {
         || !unsafe { remote::bind_playback(STYLE.id, &peer::PLAYBACK) }
         || !remote::bind_position_state(STYLE.id, &peer::POSITION)
         || !remote::bind_position_events(STYLE.id, magnet::network::receive)
+        || !remote::bind_target_events(STYLE.id, magnet::network::receive_target)
         || !fx::bind(STYLE.id)
         || !hud::bind_meter(STYLE.id, magnet::meter)
         || !world_contact::bind_hurt(STYLE.id, magnet::update)

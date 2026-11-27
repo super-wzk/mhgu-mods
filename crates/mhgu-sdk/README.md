@@ -86,6 +86,8 @@ GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提�
 
 扩展武器可调用 [`remote::bind_position_events`](src/weapon/style/remote.rs) 登记任务位置事件。发送时沿用 GU 的任务位置包，在保留位携带 27 位武器数据。SDK 验证发射者装备，并把发射者的原生坐标一起交给接收回调。内容插件负责载荷格式、重复事件和效果清理。[磁力弹回放](../../plugins/magnet-spike/src/magnet/network.rs)
 
+扩展武器可通过 `remote::bind_target_events` 接收队友的怪物部位接触，再用 `remote::send_target_event` 发送本地扫掠取得的 `Target`。SDK 复用 GU 的怪物资料包，按原生发送者槽、装备、区域、怪物配置 ID、复活序号和受击形状行解析目标。风格使用事件序号处理先后顺序，可在后续动作中继续查询目标骨骼上的接触点。[怪物接触接口](src/weapon/style/remote.rs)
+
 `remote::bind_position_state` 通过 `PositionState` 登记 GU 周期位置包的编解码回调。`PositionSample::action` 可携带同一私有动作内的 0–7 值，按动作 ID 与动作序号核对。`PositionSample::weapon` 可携带跨动作的 0–3 值，按该武器状态的更新序号核对，待机时也能使用。两个字段都用 `u8::MAX` 表示本次未提供。位置与朝向由 GU 接收。[位置包实现](../../plugins/mhgu-sdk-runtime/src/weapon/style/multiplayer/position.rs)
 
 `Style::commands` 可在 GU 装载命令表时追加一组有序的武器派生，由 GU 缓冲先接收的输入并在指定帧切换动作。`action::enter` 走 GU 的公共动作切换。已判定的单条派生可通过 `action::transition` 提交，狩技使用 `Transition::HUNTER_ART`。`action::play_motion` 使用猎人的原生动作编码。`Attack::submit` 把动作值和形状交给 GU 的攻击构造器及武器修正。注册器在大剑的首个有效攻击事件处理兽魂附身。`guard::Policy` 提供一次格挡结果，注册器负责把结果交给 GU 的受击、斩味和回正流程，内容插件可以用 `guard::take` 进入后续招式。

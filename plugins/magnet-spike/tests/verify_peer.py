@@ -360,7 +360,7 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
     assert all(parent == second + 600 for _, parent, _ in effects[-6:])
 
     # Remote playback uses the sender's shot action and its source event.
-    shot_packet, shot_events, (spawn_shot, stop_shot, visuals) = shot_data
+    shot_packet, shot_events, (spawn_shot, stop_shot, visuals), mark_data = shot_data
     first_sound = len(sounds)
     receive(second, shot_packet)
     frame(second, 0.)
@@ -412,6 +412,82 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
     g.cpu.mem_write(clock, struct.pack("<f", 150.))
     g.run(DISPATCH, local)
     assert not visuals()
+    g.cpu.mem_write(clock, struct.pack("<f", 2.))
+
+    # Send the contact through GU's serializer and receiving procedure. The
+    # same enemy lives in a different slot here, beside one of the same kind.
+    marks, repel, pose, repel_effects = mark_data
+    packet, payload = g.alloc(48), g.alloc(40)
+    g.put(0x185A994, 0x9876)
+    stub(0x49694)
+    enemies = g.get(0x1851FE0)
+    decoy, decoy_status = g.alloc(47000), g.alloc(26000)
+    g.put(enemies + 28, decoy)
+    g.put(enemies + 40, monster)
+    g.put(enemies + 9492, 1)
+    g.put(decoy, g.get(monster))
+    g.put(decoy + 5160, decoy_status)
+    g.put(decoy + 46576, g.get(monster + 46576))
+    g.cpu.mem_write(decoy + 46585, b"\1")
+    g.cpu.mem_write(decoy + 30290, b"\1")
+    g.cpu.mem_write(decoy_status + 416, b"\1")
+    g.cpu.mem_write(decoy_status + 23744, b"\7")
+    g.put(decoy_status + 880, hp_before)
+
+    def mark_receive(sample, source=1):
+        g.cpu.mem_write(packet, sample)
+        g.run(0x1EFFBC, packet, payload)
+        assert bytes(g.cpu.mem_read(payload, 40)) == sample[8:]
+        g.cpu.mem_write(packet + 8, bytes(40))
+        g.run(0x1EFE80, packet, payload)
+        assert bytes(g.cpu.mem_read(packet, 48)) == sample
+        assert g.run(0x1F51F4, 0, packet, 1, source) == 1
+
+    newer = marks[1]
+    position(first, shot_events[4])
+    assert len(visuals()) == 8
+    modified = bytearray(newer)
+    modified[14] += 1  # Previous monster incarnation.
+    mark_receive(bytes(modified))
+    modified = bytearray(newer)
+    modified[36] += 1  # Mismatched part in the same hurt-volume row.
+    mark_receive(bytes(modified))
+    assert len(visuals()) == 8
+    mark_receive(newer)
+    mark_receive(newer)
+    mark_receive(marks[0])  # A delayed hit cannot replace the later contact.
+    assert not visuals()
+
+    g.cpu.mem_write(pose + 48, struct.pack("<3f", 125., 110., 575.))
+    mark_point = tuple(a + b for a, b in zip((125., 110., 575.), struct.unpack_from("<3f", newer, 24)))
+    repel_effects.clear()
+    receive(first, repel)
+    frame(first, 0.)
+    assert g.half(first + 1204) == 1429
+    observe(2.)
+    observe(0.)
+    assert not repel_effects
+    observe(2.)
+    assert [effect[:3] for effect in repel_effects[4:]] == (
+        [(i, first + 600, (60., 0., 60.)) for i in range(105, 126)]
+        + [(i, 0, mark_point) for i in range(126, 142)]
+    )
+    observe(2.)
+    assert [entry[0] for entry in repel_effects[41:]] == list(range(126, 142))
+    assert g.get(status + 880) == hp_before
+
+    # A respawn retires the active mark in place. Replay a new repel attack
+    # after returning to idle and observe only the hunter-side rear flash.
+    g.cpu.mem_write(status + 23744, b"\10")
+    receive(first, idle_boost[0])
+    observe(2.)
+    repel_effects.clear()
+    receive(first, repel)
+    frame(first, 0.)
+    observe(4.)
+    assert not repel_effects
+    observe(2.)
+    assert [entry[0] for entry in repel_effects] == list(range(126, 142))
     g.cpu.mem_write(clock, struct.pack("<f", 2.))
 
     receive(first, repeated_flight)

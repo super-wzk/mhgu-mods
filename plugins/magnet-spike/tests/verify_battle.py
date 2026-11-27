@@ -669,12 +669,14 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     # Keep the engine's monster and joint lookup, sphere expansion and
     # sphere/capsule intersection. Isolate background and scene scheduling.
     # GU may still be settling a melee hit. Geometric marks are independent.
-    roster = g.alloc(80)
+    roster = g.alloc(9520)
     g.put(0x1851FE0, roster)
     g.put(roster + 28, monster)
     for address in (monster + 46585, monster + 30290, status + 416):
         g.cpu.mem_write(address, b"\1")
     put_vec(status + 428, 1., 1.)
+    g.cpu.mem_write(status + 438, struct.pack("<H", 0x1234))
+    g.cpu.mem_write(status + 23744, b"\7")
     pose, resolve_joint = g.alloc(64), g.alloc(4)
     matrix(pose, 25., 100., 1100.)
     joints = []
@@ -717,14 +719,25 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     g.put(network + 520, room)
     g.put(room + 232, 2)
     g.put(network + 992 + 4 * 6, process)
+    g.put(network + 992 + 4 * 68, process)
     g.put(process + 16, 1)
     g.put(process + 36, 1)
+    g.stub(0x49694, lambda *_: 1)
     events = []
+    mark_events = []
     transport = g.originals[0x9FC3D8]
 
     def send(sender, target, packet, priority):
-        assert (sender, target, priority, g.get(packet)) == (process, 1, 4, 0x17423E4)
+        assert (sender, target) == (process, 1)
         assert g.get(g.cpu.reg_read(UC_ARM_REG_SP)) == 4160
+        if priority == 16:
+            assert g.get(packet) == 0x1741604
+            mark = bytes(g.cpu.mem_read(packet, 48))
+            assert mark[11:24] == b"\x09\x34\x12\x07\x00MHT1\x10\x00\x00\x00"
+            assert struct.unpack_from("<HB", mark, 36) == (3, 0)
+            mark_events.append(mark)
+            return
+        assert priority == 4 and g.get(packet) == 0x17423E4
         assert g.get(packet + 44) >> 31 == 1
         assert g.cpu.mem_read(packet + 16, 12) == g.cpu.mem_read(actor + 64, 12)
         events.append(bytes(g.cpu.mem_read(packet, 48)))
@@ -763,6 +776,8 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     hit_point = visuals()[0][1]
     assert hit_point[:2] == (25., 100.) and 1000. <= hit_point[2] <= 1100.
     assert visuals() == [(i, hit_point) for i in range(8, 13)]
+    assert len(mark_events) == 1
+    assert struct.unpack_from("<3f", mark_events[0], 24) == (0., 0., hit_point[2] - 1100.)
     rays.clear()
     joints.clear()
     matrix(pose, 100., 95., 2150.)
@@ -842,6 +857,7 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     update()
     assert len(rays) == 1 and not joints
     assert len(events) == 8  # Two launches that hit, one wall, one water.
+    assert len(mark_events) == 2
     g.cpu.hook_del(g.traps.pop(transport))
     g.put(0x18843F0, previous_network)
     assert not visuals()
@@ -919,6 +935,7 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     assert repel() == 0  # Recheck the native monster even between collision ticks.
     g.put(status + 880, hp)
     assert repel() == 0x8000 + 66 and g.half(actor + 1204) == 1429
+    repel_packet = capture_action(g, actor)
     facing = g.half(actor + 4076)
     # The selected point is on the hurt sphere, so it can be off the centerline.
     assert facing == g.half(actor + 5280) and abs(facing - 0x4000) < 0x800, facing
@@ -1143,7 +1160,8 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     assert spent == [-150.] and landings == [(actor, 0)] * 4, (spent, landings)
     for contact in contacts:
         g.run(0x1687A8, contact)
-    return (shot_packet, events, (spawn, stop, visuals)), (flight_packet, guided_position, coast_position)
+    mark_data = mark_events, repel_packet, pose, repel_effects
+    return (shot_packet, events, (spawn, stop, visuals), mark_data), (flight_packet, guided_position, coast_position)
 
 
 def apply_repel_root(g, actor, clip, start, end):

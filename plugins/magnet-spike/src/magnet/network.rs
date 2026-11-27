@@ -1,17 +1,17 @@
 //! Play the firing hunter's magnetic shot without resolving contacts twice.
-use super::Projectile;
-use crate::STYLE;
+use super::{MARK_FRAMES, Projectile, mark_clock_running};
+use crate::{STYLE, fx::RepelEffect, program::Mode};
 use alloc::vec::Vec;
 use core::{
     f32::consts::TAU,
     sync::atomic::{AtomicU8, Ordering},
 };
 use mhgu_sdk::{
-    combat::collision::hurt::HurtScene,
+    combat::collision::hurt::{HurtScene, Target},
     geometry::Angle,
     weapon::style::{
         hunter, movement, particle,
-        remote::{self, PeerStates, PositionEvent, Roster},
+        remote::{self, PeerStates, PositionEvent, Roster, TargetEvent},
     },
 };
 
@@ -56,7 +56,10 @@ struct Replay {
     newest: Option<u8>,
     launches: u32,
     stops: u32,
+    last_mark: u32,
     shots: Vec<Projectile>,
+    mark: Option<(Target, f32)>,
+    repel: Option<RepelEffect>,
 }
 
 impl Replay {
@@ -69,6 +72,7 @@ impl Replay {
             *old = serial;
             self.launches <<= advance;
             self.stops <<= advance;
+            self.last_mark <<= advance;
             Some(1)
         } else {
             1u32.checked_shl(64 - u32::from(advance))
@@ -79,6 +83,47 @@ impl Replay {
         self.stops |= bit;
         self.shots.retain(|shot| shot.serial != serial);
     }
+
+    fn advance_mark(&mut self, actor: u32, scene: &HurtScene<'_>, frames: f32) -> Option<[f32; 3]> {
+        let (target, remaining) = self.mark.as_mut()?;
+        if mark_clock_running(actor) {
+            *remaining -= frames;
+        }
+        let point = (*remaining > 0.).then(|| scene.position(target)).flatten();
+        if point.is_none() {
+            self.mark = None;
+        }
+        point
+    }
+}
+
+pub(crate) extern "C" fn receive_target(event: &TargetEvent) {
+    let actor = event.actor;
+    let Some(index) = (unsafe { Roster::current() }).and_then(|roster| roster.peer_index(actor))
+    else {
+        return;
+    };
+    if event.serial > SERIAL_MASK {
+        return;
+    }
+    SHOTS.update(index, actor, |saved, _| {
+        let replay = saved.get_or_insert_with(Replay::default);
+        let Some(bit) = replay.bit(event.serial) else {
+            return;
+        };
+        replay.stop(event.serial, bit);
+        if replay.last_mark == 0 || bit < replay.last_mark {
+            replay.last_mark = bit;
+            replay.mark = Some((event.target, MARK_FRAMES));
+        }
+    });
+}
+
+pub(crate) unsafe fn begin_repel(index: usize, actor: u32, mode: Mode) {
+    let area = unsafe { hunter::area(actor) };
+    SHOTS.update(index, actor, |saved, _| {
+        saved.get_or_insert_with(Replay::default).repel = Some(RepelEffect::new(area, mode));
+    });
 }
 
 pub(crate) extern "C" fn receive(event: &PositionEvent) {
@@ -122,8 +167,6 @@ pub(crate) unsafe fn observe(local: u32) {
     let scene = roster
         .as_ref()
         .and_then(|_| unsafe { HurtScene::from_raw(local) });
-    let area = scene.as_ref().map(HurtScene::area);
-    let frames = scene.as_ref().map_or(0., HurtScene::frames);
     for index in 0..remote::PLAYER_COUNT {
         let actor = roster
             .as_ref()
@@ -131,9 +174,17 @@ pub(crate) unsafe fn observe(local: u32) {
             .filter(|&actor| remote::is_position_event_peer(STYLE.id, actor))
             .unwrap_or(0);
         SHOTS.update(index, actor, |saved, _| {
-            if let Some(replay) = saved {
+            if let (Some(replay), Some(scene)) = (saved, &scene) {
+                let frames = scene.frames();
+                let area = scene.area();
+                if unsafe { hunter::area(actor) } != area {
+                    replay.shots.clear();
+                    replay.mark = None;
+                    replay.repel = None;
+                    return;
+                }
                 replay.shots.retain_mut(|shot| {
-                    if Some(shot.area) != area || unsafe { hunter::area(actor) } != shot.area {
+                    if shot.area != area {
                         return false;
                     }
                     if frames == 0. {
@@ -142,6 +193,12 @@ pub(crate) unsafe fn observe(local: u32) {
                     let step = frames.min(shot.remaining);
                     shot.advance(shot.end_at(step), step)
                 });
+                let point = replay.advance_mark(actor, scene, frames);
+                if let Some(repel) = &mut replay.repel
+                    && !unsafe { repel.advance(actor, area, frames, point) }
+                {
+                    replay.repel = None;
+                }
             }
         });
     }

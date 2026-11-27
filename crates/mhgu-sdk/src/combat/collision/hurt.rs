@@ -6,23 +6,45 @@ const ROSTER: u32 = 0x1851fe0;
 const BACKGROUND: u32 = 0x21270e0;
 const AREA: Field<u8> = Field::at(4180);
 const MONSTER_ID: Field<u16> = Field::at(46576);
+const SET_ID: Field<u16> = Field::at(438);
+const REVISION: Field<u8> = Field::at(23744);
+
+/// GU monster identity and contact relative to a hurt volume's joint.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct Contact {
+    pub set_id: u16,
+    pub revision: u8,
+    pub row: u8,
+    pub part: u16,
+    pub offset: [f32; 3],
+}
 
 /// A monster part and an impact point in its joint's local coordinates.
 /// This value can be kept across passes. Its position is resolved against the
 /// current roster before any native object is accessed.
 #[derive(Clone, Copy)]
+#[repr(C)]
 pub struct Target {
     slot: u8,
     monster: u32,
     status: u32,
     id: u16,
     area: u8,
-    pub part: u16,
     joint: u16,
-    offset: [f32; 3],
+    contact: Contact,
 }
 
 impl Target {
+    /// The GU roster slot on this console, which can differ between peers.
+    pub fn local_slot(&self) -> u8 {
+        self.slot
+    }
+
+    pub fn contact(&self) -> Contact {
+        self.contact
+    }
+
     /// Resolve this contact while the owner's action is being updated.
     ///
     /// # Safety
@@ -134,16 +156,51 @@ impl<'a> HurtScene<'a> {
             return None;
         }
         let (monster, status) = self.monster(unsafe { singleton(ROSTER) }?, target.slot)?;
+        let contact = target.contact;
         if (monster.addr(), status.addr()) != (target.monster, target.status)
             || monster.get(MONSTER_ID) != target.id
-            || part_disabled(monster, target.part)
+            || status.get(SET_ID) != contact.set_id
+            || status.get(REVISION) != contact.revision
+            || part_disabled(monster, contact.part)
         {
             return None;
         }
-        Some(transform_offset(
-            &joint_matrix(monster, target.joint),
-            target.offset,
-        ))
+        let point = transform_offset(&joint_matrix(monster, target.joint), contact.offset);
+        point.iter().all(|axis| axis.is_finite()).then_some(point)
+    }
+
+    /// Resolve a synchronized contact in the current area. The original
+    /// hurt volume must still exist on the same spawn of the monster.
+    pub fn resolve_contact(&self, contact: Contact) -> Option<Target> {
+        if contact.row == u8::MAX || !contact.offset.iter().all(|axis| axis.is_finite()) {
+            return None;
+        }
+        let roster = unsafe { singleton(ROSTER) }?;
+        let (slot, monster, status) = (0..10).find_map(|slot| {
+            let (monster, status) = self.monster(roster, slot)?;
+            (status.get(SET_ID) == contact.set_id && status.get(REVISION) == contact.revision)
+                .then_some((slot, monster, status))
+        })?;
+        let rows = hurt_rows(monster)?;
+        let row = (0..=contact.row)
+            .map(|index| unsafe { rows.embedded(usize::from(index) * 44) })
+            .take_while(|row| row.get::<u16>(Field::at(0)) != u16::MAX)
+            .nth(usize::from(contact.row))?;
+        if row.get::<u16>(Field::at(12)) != contact.part
+            || row.get::<u16>(Field::at(10)) & 0x8152 != 0
+            || part_disabled(monster, contact.part)
+        {
+            return None;
+        }
+        Some(Target {
+            slot,
+            monster: monster.addr(),
+            status: status.addr(),
+            area: self.area(),
+            id: monster.get(MONSTER_ID),
+            joint: row.get(Field::at(0)),
+            contact,
+        })
     }
 
     /// Sweep a sphere against active monster body parts, without submitting an
@@ -167,15 +224,13 @@ impl<'a> HurtScene<'a> {
             let Some((monster, status)) = self.monster(roster, slot) else {
                 continue;
             };
-            let rows: unsafe extern "C" fn(u32) -> u32 =
-                unsafe { core::mem::transmute(entry(0x710b0)) };
-            let Some(rows) = (unsafe { Object::at(rows(monster.addr())) }) else {
+            let Some(rows) = hurt_rows(monster) else {
                 continue;
             };
             // Match 16ABAC's expansion inputs. Expanding here preserves the
             // raw part index when native expansion skips a disabled shape.
-            for index in 0..255 {
-                let row = unsafe { rows.embedded(index * 44) };
+            for index in 0..u8::MAX {
+                let row = unsafe { rows.embedded(usize::from(index) * 44) };
                 let bone = row.get::<u16>(Field::at(0));
                 if bone == u16::MAX {
                     break;
@@ -212,14 +267,24 @@ impl<'a> HurtScene<'a> {
                     status: status.addr(),
                     area: self.area(),
                     id: monster.get(MONSTER_ID),
-                    part,
                     joint: bone,
-                    offset,
+                    contact: Contact {
+                        set_id: status.get(SET_ID),
+                        revision: status.get(REVISION),
+                        row: index,
+                        part,
+                        offset,
+                    },
                 });
             }
         }
         nearest
     }
+}
+
+fn hurt_rows(monster: Object<'_>) -> Option<Object<'_>> {
+    let rows: unsafe extern "C" fn(u32) -> u32 = unsafe { core::mem::transmute(entry(0x710b0)) };
+    unsafe { Object::at(rows(monster.addr())) }
 }
 
 pub(crate) fn terrain_between(
