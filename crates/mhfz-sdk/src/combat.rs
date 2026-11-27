@@ -7,6 +7,20 @@ pub const fn attacker_hitstop(source_ticks: u8) -> u8 {
     ((2 * source_ticks as u16 + 1) / 3) as u8
 }
 
+/// Convert SDT delay and duration to GU contact clock units. 8183F4DE
+/// truncates them to FZ ticks. 817006A6 activates one tick after delay
+/// reaches zero and spends the first duration tick there; GU 16919C
+/// activates on reaching zero and first spends duration on the next tick.
+pub fn contact_window(delay: u16, duration: u16) -> (f32, f32) {
+    let delay = f32::from(delay & !1);
+    let duration = f32::from(duration & !1);
+    let activation_tick = if delay > 0. { 2. } else { 0. };
+    (
+        delay + activation_tick,
+        (duration - activation_tick).max(0.),
+    )
+}
+
 /// FZ 816FD8A2 consumes the first matching contact of either blade, even
 /// when the effective hitzone is soft enough to keep swinging.
 #[cfg(all(target_arch = "arm", target_endian = "little"))]

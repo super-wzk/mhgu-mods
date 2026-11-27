@@ -19,7 +19,7 @@ from gu_replay import SDK_NRO as PROVIDER
 NX = ROOT / "dist/great-sword-extreme/romfs/nativeNX"
 PROVIDER_BASE = 0x9000000
 CONTENT = NX / "plugins/great_sword_extreme.nro"
-SAVE = "savedata:/mhgu-sdk-0-1.json"
+SAVE = "savedata:/mhgu-sdk-0.json"
 STYLE_IDS = {
     "great-sword-extreme": 10,
     "dual-blades-extreme": 11,
@@ -59,11 +59,14 @@ SNS_DRAW_ROUTE = 0x1169020
 COLLISION_PASS = 0x16ABAC
 SA_DRAW_ROUTE = 0x119FCF4
 QUEST_CAMERA = 0x898AC0
+QUEST_CAMERA_ORBIT = 0x255CC
+QUEST_CAMERA_UPDATE, QUEST_CAMERA_TERRAIN = 0x21A90, 0x26E64
 EQUIPMENT_GRIP = 0x308834
 CHANGE_ACTION, GS_CHANGE_ACTION = 0x2AB670, 0x1160650
 COMMAND_BIND, COMMAND_CONDITION = 0x2E9B7C, 0x2ECEFC
 COMMAND_UPDATE = 0x2E9D54
 SHARED_MENU, CHAT_UPDATE, TOUCH_MENU = 0x66F0A8, 0x678894, 0x793424
+TARGET_CAMERA = 0x1FEC4
 SHARPNESS = 0x2AD288
 HIT_EXPAND, MODEL_DEPTH = 0x1696FC, 0xA957CC
 HUNTER_COLLISION = 0x16BB38
@@ -146,9 +149,9 @@ def style_descriptor(g, ident, weapon, encode=0, art_slots=0):
     return descriptor
 
 
-def character_save(weapons, *, slot=0, generation=1, sets=None):
+def character_save(weapons, *, slot=0, sets=None):
     return json.dumps({
-        "version": 1, "slot": slot, "generation": generation,
+        "version": 1, "slot": slot,
         "data": {
             "weapons": [weapons.get(weapon) for weapon in range(15)],
             "equipment_sets": {} if sets is None else sets,
@@ -187,16 +190,19 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         CHANGE_ACTION,
         COMMAND_BIND,
         COMMAND_CONDITION,
-        SHARED_MENU, CHAT_UPDATE, TOUCH_MENU,
+        SHARED_MENU, CHAT_UPDATE, TOUCH_MENU, TARGET_CAMERA,
         GS_CHANGE_ACTION,
         DRAW_ROUTE,
         DB_DRAW_ROUTE,
         LS_DRAW_ROUTE,
         SA_DRAW_ROUTE, SNS_DRAW_ROUTE, COLLISION_PASS, QUEST_CAMERA,
+        QUEST_CAMERA_ORBIT, QUEST_CAMERA_UPDATE, QUEST_CAMERA_TERRAIN,
         FX_RELEASE,
         SHARPNESS,
         HIT_EXPAND,
         HUNTER_COLLISION,
+        0xA2C04, 0x1EB1E8, 0xCC154,
+        0x9D67C, 0x9A828, 0x16C0C0,
         BLOCK,
         SETTLE_GUARD,
         0x1FED90, 0x1FF308,
@@ -252,9 +258,11 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             ART_CAPACITY,
             VALOR_HUD,
             *WEAPON_HUD_HOOKS,
+            0x27EBBC,  # Style input ownership before GU resolves common commands.
             DISPATCH,
             INIT_HUNTER,
             0x3078B8,  # Registered weapon part tracks after native attachment.
+            0x951A80,  # Hold the incoming pose during registered Frontier blends.
             0x53AAD8,  # Registered weapon part joints in native HTS.
             0xBCAD18, 0xB39F58,  # Private release ARC lookup and dependency order.
             WEAPON_DISPATCH,
@@ -270,20 +278,23 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             CHANGE_ACTION,
             COMMAND_BIND,
             COMMAND_CONDITION,
-            SHARED_MENU, CHAT_UPDATE, TOUCH_MENU,
+            SHARED_MENU, CHAT_UPDATE, TOUCH_MENU, TARGET_CAMERA,
             GS_CHANGE_ACTION,
             DRAW_ROUTE,
             DB_DRAW_ROUTE,
             LS_DRAW_ROUTE, SA_DRAW_ROUTE, SNS_DRAW_ROUTE, COLLISION_PASS, QUEST_CAMERA,
+            QUEST_CAMERA_ORBIT, QUEST_CAMERA_UPDATE, QUEST_CAMERA_TERRAIN,
             BLOCK,
             SETTLE_GUARD,
             SHARPNESS,
             GUARD_REACTION,
             DRAW_MODEL,
             SUBMIT_MODEL,
-            0x3DFAFC, 0x3E21B8, 0x3E0980, 0x3E1308, 0x8775F4, 0x6E8558, 0x6F1AE8, 0x592FE0, 0x593514,
+            0xA2C04, 0x1EB1E8, 0xCC154,  # Ground restraint and native monster action sync.
+            0x9D67C, 0x9A828, 0x16C0C0,  # Authored reactions during native damage settlement.
+            0x3DFAFC, 0x3E21B8, 0x3E0980, 0x3E1308, 0x6E8558, 0x6F1AE8, 0x592FE0, 0x593514,
             0x56E6A8,
-            0x6EB9FC, 0x6EB6C0, 0x6EC2CC, 0x6ECE8C, 0x6ED128, 0x6ED200, 0x6F53E4, 0x6F8648, 0x6F9B18, 0x6FCABC, 0x6FB224, 0x6FB364, 0x6ED344, 0x6FBF4C, 0x54F260, 0x6ED600, 0x6FC2C8, 0x6F9438,
+            0x6EB9FC, 0x6EB6C0, 0x6EC2CC, 0x6ECE8C, 0x6ED128, 0x6ED200, 0x6F53E4, 0x6F8648, 0x6F9B18, 0x6FCABC, 0x6FB224, 0x6FB364, 0x6ED344, 0x6FBF4C, 0x54F260, 0x6ED600, 0x6FC2C8, 0x6F9438, 0x6FF02C, 0x6FFD40, 0x702D9C, 0x7045DC,
         }
         if "registry" in order
         else set()
@@ -2565,6 +2576,21 @@ def verify():
     assert g.run(service(g)[1], 0) == 0 and len(g.files) == 1
     g = boot(elf, None, mount_ok=False)
     assert not g.files and g.run(service(g)[1], 0) == 0
+
+    # An older development build's files are ignored, including a pending trade.
+    g = boot(elf, None)
+    old_files = {f"savedata:/mhgu-sdk-0-{suffix}.json": on for suffix in ("0", "1", "trade")}
+    g.files.update(old_files)
+    select_character(g, 0)
+    assert g.run(service(g)[1], 0) == 0 and g.files == old_files
+    # Only an interrupted replacement can leave the verified file under its temp name.
+    temp = "savedata:/mhgu-sdk-0.tmp"
+    g.files[temp] = on
+    select_character(g, 0)
+    assert g.run(service(g)[1], 0) == 10 and g.files == {**old_files, SAVE: on}
+    g.files[temp] = on[:-1]
+    select_character(g, 0)
+    assert g.run(service(g)[1], 0) == 10 and g.files == {**old_files, SAVE: on}
 
     # A second plugin may register after config load. Its ID applies only to its weapon.
     g = boot(elf, character_save({0: 10, 1: 42, 8: 42}))

@@ -35,7 +35,7 @@ mod entry {
         guard_half_angle: 0x4000,
         deflection: Some(mhfz_sdk::combat::deflection),
         ground_motion: Some(finish_ground_motion),
-        camera_offset: None,
+        ..Rules::EMPTY
     };
 
     extern "C" fn finish_ground_motion(slot: u16, phase: u8, motion: u32) -> bool {
@@ -96,7 +96,9 @@ mod entry {
         if !unsafe { remote::bind_playback(EXTREME.id, &super::battle::PLAYBACK) } {
             forge::log::prelude::warn!("Style {}: remote action playback unavailable", EXTREME.id);
         }
-        if !unsafe { mhgu_sdk::weapon::style::world_contact::bind(EXTREME.id, super::combat::expand) } {
+        if !unsafe {
+            mhgu_sdk::weapon::style::world_contact::bind(EXTREME.id, super::combat::expand)
+        } {
             forge::log::prelude::warn!("Extreme GS: world contact service unavailable");
         }
         super::fx::install(EXTREME.id);

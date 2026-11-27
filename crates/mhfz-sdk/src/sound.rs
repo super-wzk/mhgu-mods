@@ -39,6 +39,18 @@ impl Clock {
         };
         self.clip = clip;
         self.frame = frame;
+        unsafe { play_events(timeline, clip, |time| from < time && time <= frame, |bank, cue| {
+            if let Some(bank) = banks.get(usize::from(bank)) { bank.play(actor, cue); }
+        }) };
+    }
+}
+
+/// Select the authored variant for each event in the sampled interval.
+///
+/// # Safety
+/// Run on the game thread for access to the hunter random generator.
+pub unsafe fn play_events(timeline: &[u8], clip: u16, contains: impl Fn(f32) -> bool, mut play: impl FnMut(u8, u8)) {
+    if !(1000..1500).contains(&clip) { return; }
         let index = 4 * usize::from(clip - 1000);
         let Some(&[a, b, c, d]) = timeline.as_chunks::<4>().0.get(index / 4) else {
             return;
@@ -50,12 +62,9 @@ impl Clock {
         };
         for row in track.chunks_exact(12) {
             let time = f32::from(u16::from_le_bytes([row[0], row[1]]));
-            if time <= from || time > frame {
+            if !contains(time) {
                 continue;
             }
-            let Some(bank) = banks.get(usize::from(row[2])) else {
-                continue;
-            };
             let Some(choices) = row.get(4..4 + 2 * usize::from(row[3])) else {
                 continue;
             };
@@ -71,14 +80,13 @@ impl Clock {
             for c in choices.chunks_exact(2) {
                 if roll < u32::from(c[1]) {
                     if c[0] != 255 {
-                        unsafe { bank.play(actor, c[0]) };
+                        play(row[2], c[0]);
                     }
                     break;
                 }
                 roll -= u32::from(c[1]);
             }
         }
-    }
 }
 
 impl Default for Clock {

@@ -17,14 +17,27 @@ pub struct MotionEvent {
     pub offset: [f32; 3],
 }
 
-#[derive(Default)]
 pub struct MotionClock {
     clip: u16,
     frame: f32,
     scanned_until: f32,
 }
 
+impl Default for MotionClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MotionClock {
+    pub const fn new() -> Self {
+        Self {
+            clip: 0,
+            frame: 0.,
+            scanned_until: 0.,
+        }
+    }
+
     pub fn seek(&mut self, clip: u16, frame: f32) {
         *self = Self {
             clip,

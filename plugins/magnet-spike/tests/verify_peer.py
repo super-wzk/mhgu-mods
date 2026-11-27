@@ -2,7 +2,9 @@
 
 import struct
 
-from verify_style import CHANGE_ACTION, DECODE, DISPATCH, ENCODE, WEAPON_DISPATCH
+from unicorn.arm_const import UC_ARM_REG_SP
+
+from verify_style import CHANGE_ACTION, COLLISION_PASS, DECODE, DISPATCH, ENCODE, WEAPON_DISPATCH
 
 
 def capture_action(g, actor):
@@ -40,8 +42,28 @@ def capture_position(g, actor):
     return packet
 
 
+def shock_contacts(g, collision):
+    # Supply an empty frame list, then exercise the SDK insertion and GU's
+    # native contact clock, active check and expansion on every linked contact.
+    g.put(collision + 8224, 0)
+    g.put(collision + 10288, 0)
+    g.run(g.hooks[COLLISION_PASS], collision)
+    hit = g.get(collision + 8224)
+    contacts = {}
+    while hit:
+        assert hit not in contacts
+        g.run(0x16919C, hit)
+        if g.run(0x169328, hit):
+            index = g.get(collision + 10288)
+            assert g.run(0x1696FC, hit) == 1
+            contacts[hit] = struct.unpack("<B3x7f", g.cpu.mem_read(collision + 8240 + 32 * index, 32))
+        hit = g.get(hit + 44)
+    g.put(collision + 8224, 0)
+    return contacts
+
+
 def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_action, tick, meter,
-                flight_packets, boost_packets, guard_packets, shot_data, sounds, effects):
+                flight_packets, boost_packets, guard_packets, shot_data, sounds, effects, evade_events):
     manager, equipment = g.get(0x1885B58), g.get(local + 5060)
     g.put(0x18843F0, g.alloc(0x16280))
     actions = g.alloc(200)
@@ -108,6 +130,16 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
     landing = capture(0)
     set_action(16, 0x8000 + 68)
     repeated_flight = capture(1)
+    set_action(16, 0x8000 + 161)
+    step_follow_up = capture(1)
+    set_action(16, 0x8000 + 162)
+    enhanced_step_follow_up = capture(1)
+    set_action(16, 0x8000 + 94)
+    impact_bind = capture(0)
+    attraction_branches = []
+    for follow in (61, 62, 71, 72):
+        set_action(16, 0x8000 + follow)
+        attraction_branches.append(capture(int(follow >= 71)))
 
     profile = g.alloc(1472)
     g.cpu.mem_write(profile + 8, bytes(g.cpu.mem_read(equipment, 1376)))
@@ -130,6 +162,7 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
         for offset in (12320, 12504):
             g.run(0x1687A8, actor + offset)
         g.put(actor + 9120, weapon)
+        g.put(weapon, g.get(part))
         g.put(weapon + 48, actor)
         g.put(weapon + 240, g.alloc(128))
         g.put(weapon + 1172, g.get(part + 1172))
@@ -147,16 +180,70 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
         g.cpu.mem_write(actions, packet)
         g.run(0x1FF308, actions, actor)
 
-    def frame(actor, number, ended=False):
+    def frame(actor, number, ended=False, next_frame=None):
         g.cpu.mem_write(actor + 1280, struct.pack("<f", number))
+        g.cpu.mem_write(actor + 1276, struct.pack("<f", number if next_frame is None else next_frame))
         g.cpu.mem_write(actor + 1206, bytes([4 * ended]))
         assert g.run(WEAPON_DISPATCH, actor) != 0xBAD
+
+    def motion_rate(actor):
+        return struct.unpack("<f", g.cpu.mem_read(actor + 5296, 4))[0]
+
+    receive(first, impact_bind)
+    g.cpu.mem_write(first + 10057, b"\x01")
+    frame(first, 0.)
+    frame(first, 18.)
+    assert g.half(first + 1204) == 1052 and not (g.get(first + 10057) & 0x40)
+    frame(first, 20.)
+    assert g.get(first + 10057) & 0x40
+    frame(first, 23., ended=True)
+    assert g.half(first + 1204) == 1421
+    first_bind_fx = len(effects)
+    g.cpu.mem_write(first + 64, struct.pack("<3f", 70., 30., 200.))
+    g.cpu.mem_write(first + 4076, b"\0\0")
+    g.put(first + 1268, 0)
+    frame(first, 2., next_frame=4.)
+    assert effects[first_bind_fx:] == (
+        [(layer, 0, (70., 30., 150.)) for layer in range(336, 346)]
+        + [(layer, first + 600, (30., 0., 140.)) for layer in range(297, 304)]
+    )
+    frame(first, 2., next_frame=4.)
+    assert len(effects) == first_bind_fx + 17
+    frame(first, 44.)
+    hit = first + 12320
+    assert g.half(hit + 56) == 1 and g.get(hit + 112) == first
+    g.run(0x1687A8, hit)
+
+    receive(second, step_follow_up)
+    frame(second, 0.)
+    assert g.half(second + 1204) == 1449
+    assert abs(motion_rate(second) - 1.1) < 1e-6
+    stub(g.originals[COLLISION_PASS], lambda *_: 1)
+    first_flash, first_sound = len(effects), len(sounds)
+    for _ in range(11):
+        assert not shock_contacts(g, collision)
+    assert len(effects) == first_flash and len(sounds) == first_sound
+    frame(second, 14., ended=True)
+    assert g.half(second + 1204) == 1082 and abs(motion_rate(second) - 1.1) < 1e-6
+    first_flash, first_sound = len(effects), len(sounds)
+    for _ in range(11):
+        assert not shock_contacts(g, collision)
+    assert [layer for layer, _, _ in effects[first_flash:]] == [
+        *range(252, 254), *range(252, 254), *range(252, 254), *range(254, 270),
+    ]
+    assert sounds[first_sound:] == [(second, "blade", cue, (-150., 0., 0.)) for cue in (23, 5)]
+    g.cpu.hook_del(g.traps.pop(g.originals[COLLISION_PASS]))
+    frame(second, 84.)
+    assert motion_rate(second) == 1.
 
     # Each peer starts its own cursor and emits the original hit once, after
     # entering the second clip. The contact is owned by the peer, not the host.
     for actor, packet, state, start, swing, contact in (
         (first, impact, 79, 1023, 1413, 30.), (second, slash, 78, 1440, 1049, 40.)
     ):
+        # Independent replay; the previous scenario skipped the scene clock.
+        for offset in (12320, 12504):
+            g.run(0x1687A8, actor + offset)
         receive(actor, packet)
         assert g.half(actor + 9482) == 0x8000 + state
         frame(actor, 0.)
@@ -189,6 +276,102 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
     g.run(0x97DDC, monster)
     assert g.get(status + 880) == hp - damage
 
+    # The controlling console combines two peers' hits even with its own
+    # hunter using a stock weapon. Use a fresh spawn for the quest threshold.
+    quest_manager, quest, affinity = g.alloc(168), g.alloc(64), g.alloc(4)
+    paralysis = g.alloc(16)
+    g.cpu.mem_write(paralysis, struct.pack("<4h", 400, 0, 0, 200))
+    changes = (
+        (0x188AD90, struct.pack("<I", quest_manager)),
+        (g.get(monster + 30188) + 160, struct.pack("<I", paralysis)),
+        (monster + 46576, struct.pack("<H", 1)),
+        (status + 438, struct.pack("<H", 0x1270)),
+    )
+    saved_fields = [(address, bytes(g.cpu.mem_read(address, len(value)))) for address, value in changes]
+    for address, value in changes:
+        g.cpu.mem_write(address, value)
+    g.put(quest_manager + 164, quest)
+    g.cpu.mem_write(quest + 44, b"\1")
+    hurt = g.run(0x710B0, monster, 0)
+    first_power = g.half(first + 12320 + 56)
+    assert g.half(hit + 56) == 43 and first_power > 0
+
+    def bind_hit(actor):
+        g.put(affinity, 0x3f800000)
+        g.run(0x17885C, 0, actor + 12320, monster, hurt, actor, affinity)
+        assert g.get(affinity) == 0x3f800000
+
+    first_flash = len(effects)
+    stub(g.originals[COLLISION_PASS], lambda *_: 1)
+
+    def bind_flashes():
+        g.put(local + 5060, equipment)
+        g.run(COLLISION_PASS, collision)
+        g.put(local + 5060, stock)
+        return [layer for layer, _, _ in effects[first_flash:] if 284 <= layer < 290]
+
+    for _ in range(41):
+        bind_hit(second)
+    # Leave exactly one valid first-peer hit between the meter and readiness.
+    for _ in range((1800 - 1 - 41 * 43) // first_power):
+        bind_hit(first)
+    assert not bind_flashes()
+    g.cpu.mem_write(monster + 29728, b"\0")
+    bind_hit(first)
+    g.cpu.mem_write(monster + 29728, b"\1")
+    assert not bind_flashes()
+    serial = first + 12320 + 52
+    original_serial = bytes(g.cpu.mem_read(serial, 2))
+    g.cpu.mem_write(serial, struct.pack("<H", g.half(serial) ^ 1))
+    bind_hit(first)
+    g.cpu.mem_write(serial, original_serial)
+    assert not bind_flashes()
+    bind_hit(first)
+    assert bind_flashes() == list(range(284, 290))
+    for address, value in saved_fields:
+        g.cpu.mem_write(address, value)
+
+    # Rear enhanced impact starts its own request on entering 1082. Replay
+    # two senders independently and give each native damage credit.
+    stub(g.originals[COLLISION_PASS], lambda *_: 1)
+    for actor, x in ((first, 1000.), (second, 2000.)):
+        g.cpu.mem_write(actor + 64, struct.pack("<3f", x, 0., 0.))
+        g.put(actor + 4076, 0)
+        g.cpu.mem_write(g.get(actor + 5060) + 800, struct.pack("<h", 150))
+        receive(actor, enhanced_step_follow_up)
+        frame(actor, 0.)
+        frame(actor, 14., ended=True)
+        assert g.half(actor + 1204) == 1082
+        frame(actor, 56.)
+    first_flash, first_sound = len(effects), len(sounds)
+    for _ in range(3):
+        assert not shock_contacts(g, collision)
+    active = shock_contacts(g, collision)
+    assert len(active) == 2
+    for index, actor, x in ((1, first, 880.), (2, second, 1880.)):
+        pulse, = (pulse for pulse in active if g.get(pulse + 12) == actor)
+        assert active[pulse] == (2, 100., x, 400., 170., x, 0., 170.)
+        assert g.half(pulse + 56) == g.cpu.mem_read(pulse + 86, 1)[0] == 5
+        g.run(0x9D67C, monster)
+        hp = g.get(status + 880)
+        g.cpu.mem_write(collision + 28, struct.pack("<B3x4f", 1, 2., x, 0., 170.))
+        g.run(0x16C0C0, collision, pulse, monster)
+        damage = g.half(status + 1160)
+        assert damage > 0 and credit[-1] == (0, index, damage), credit
+        g.run(0x97DDC, monster)
+        assert g.get(status + 880) == hp - damage
+    g.cpu.mem_write(first + 4180, b"\x01")
+    assert [g.get(pulse + 12) for pulse in shock_contacts(g, collision)] == [second]
+    g.cpu.mem_write(first + 4180, b"\0")
+    for _ in range(25):
+        assert all(g.get(pulse + 12) == second for pulse in shock_contacts(g, collision))
+    assert not shock_contacts(g, collision)
+    assert {layer for layer, _, _ in effects[first_flash:]} == set(range(205, 234))
+    assert [(owner, bank, cue) for owner, bank, cue, _ in sounds[first_sound:]] == [
+        (owner, "blade", cue) for owner in (first, second) for cue in (23, 5)
+    ]
+    g.cpu.hook_del(g.traps.pop(g.originals[COLLISION_PASS]))
+
     receive(first, recoil)
     frame(first, 0.)
     assert g.half(first + 1204) == 1223
@@ -206,7 +389,7 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
     assert g.get(first + 10057) & 0x40
     receive(first, landing)
     frame(first, 0.)
-    assert g.half(first + 1204) == 1473
+    assert g.half(first + 1204) == 1473 and not (g.get(first + 10057) & 0x40)
 
     # Guided and coasting snapshots originate in the native position sender
     # and are applied by GU's ordinary interpolator, with no action restart.
@@ -252,6 +435,9 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
     for actor, (packet, snapshot), state, contact, power in (
         (first, boosted_slash, 78, 40., 47), (second, boosted_impact, 79, 30., 48),
     ):
+        # Independent replay; the previous scenario skipped the scene clock.
+        for offset in (12320, 12504):
+            g.run(0x1687A8, actor + offset)
         receive(actor, packet)
         assert g.half(actor + 9482) == 0x8000 + state
         position(actor, snapshot)
@@ -342,9 +528,9 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
         assert actual == power, (state, actual, power)
         if state == 77:
             assert [cue for owner, name, cue, _ in sounds[first_sound:]
-                    if owner == actor and name == "blade"] == [13, 12]
+                    if owner == actor and name == "blade"] == [13, 12, 14, 5]
             assert [(selector, parent) for selector, parent, _ in effects[first_effect:]] == [
-                (i, actor + 600) for i in list(range(13, 37)) + list(range(93, 99))
+                (i, actor + 600) for i in [*range(13, 37), *range(93, 99), *range(1208, 1230), *range(304, 314)]
             ]
         else:
             assert len(effects) == first_effect
@@ -364,6 +550,8 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
     first_sound = len(sounds)
     receive(second, shot_packet)
     frame(second, 0.)
+    frame(second, 2., next_frame=4.)
+    frame(second, 6., next_frame=8.)
     frame(second, 11.)
     frame(second, 12.)
     frame(second, 12.)
@@ -476,6 +664,37 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
     assert [entry[0] for entry in repel_effects[41:]] == list(range(126, 142))
     assert g.get(status + 880) == hp_before
 
+    # The 29-frame and 11-frame openers end before the wrist flash. Both
+    # forms carry the same event cursor into the next clip at frame 34 or 10.
+    for branch, opener, launch, last, entry in zip(
+        attraction_branches, (1069, 1414, 1079, 1415), (1472, 1472, 1460, 1460),
+        (28, 10, 28, 10), (34, 10, 34, 10),
+    ):
+        repel_effects.clear()
+        receive(first, branch)
+        frame(first, 0.)
+        assert g.half(first + 1204) == opener
+        frame(first, 10.)
+        frame(first, last, ended=True)
+        assert g.half(first + 1204) == launch
+        frame(first, entry)
+        if entry == 10:
+            frame(first, 24.)
+            frame(first, 29.)
+            assert not repel_effects
+            frame(first, 30.)
+        frame(first, max(entry, 30))
+        offset = (60., 0., 60.) if launch == 1472 else (0., 0., 170.)
+        assert [effect[:3] for effect in repel_effects] == [
+            (i, first + 600, offset) for i in range(105, 126)
+        ]
+    # Retire the guided particles while their native effect handles are installed.
+    g.cpu.mem_write(first + 4180, b"\x01")
+    stub(g.originals[COLLISION_PASS], lambda *_: 1)
+    shock_contacts(g, collision)
+    g.cpu.hook_del(g.traps.pop(g.originals[COLLISION_PASS]))
+    g.cpu.mem_write(first + 4180, b"\0")
+
     # A respawn retires the active mark in place. Replay a new repel attack
     # after returning to idle and observe only the hunter-side rear flash.
     g.cpu.mem_write(status + 23744, b"\10")
@@ -513,9 +732,62 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
         g.run(g.hooks[0x3078B8], weapon, actor, 6)
         assert g.half(weapon + 1204) & 255 == slot, (slot, hex(g.half(weapon + 1204)))
 
+    # The flash needs only the confirmation event and the rendered weapon
+    # pose. Both peers are still in GU's common roll, with separate joints.
+    g.cpu.hook_del(g.traps.pop(0x280548))
+    units = {}
+
+    def evade_layer(_, unit, handle, group):
+        layer = g.get(g.cpu.reg_read(UC_ARM_REG_SP))
+        assert handle == group == 1 and 180 <= layer < 205
+        units[unit] = layer
+        return 1
+
+    def stop_evade(unit, immediate, *_):
+        assert immediate == 1
+        del units[unit]
+
+    def flashed_at():
+        return [(layer, struct.unpack("<3f", g.cpu.mem_read(unit + 304, 12)))
+                for unit, layer in units.items()]
+
+    stub(0x3267D0, evade_layer)
+    stub(0x32A400, stop_evade)
+    weapon_matrices = []
+    for weapon, x in ((first_part, 40.), (second_part, 150.)):
+        matrix, joints = g.alloc(160), g.alloc(256)
+        g.put(weapon + 1172, matrix)
+        g.put(weapon + 1176, joints)
+        g.cpu.mem_write(joints, bytes([255] * 4 + [0] + [255] * 251))
+        g.cpu.mem_write(matrix + 16, struct.pack(
+            "<16f", 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., x, 20., 30., 1.,
+        ))
+        weapon_matrices.append(matrix + 16)
+    old, confirmed, later = evade_events
+    position(first, confirmed)
+    position(first, confirmed)
+    position(first, old)
+    wrong_area = bytearray(later)
+    flags, = struct.unpack_from("<I", wrong_area, 44)
+    struct.pack_into("<I", wrong_area, 44, flags | 1 << 10)
+    position(first, bytes(wrong_area))
+    position(second, later)
+    assert flashed_at() == [(i, (x, 20., 85.)) for x in (40., 150.) for i in range(180, 205)]
+    g.cpu.mem_write(weapon_matrices[0] + 48, struct.pack("<3f", 60., 21., 33.))
+    observe(2.)
+    assert flashed_at()[:25] == [(i, (60., 21., 88.)) for i in range(180, 205)]
+    g.cpu.mem_write(second + 4180, b"\x01")
+    observe(2.)
+    assert len(units) == 25
+    g.cpu.mem_write(second + 4180, b"\0")
+    position(second, later)
+    assert len(units) == 25
+
     # A replaced native record invalidates its SDK equipment identity even if
     # the raw fallback category and the GU actor pointer have stayed the same.
     g.run(0x274400, manager, 1, g.get(first + 5060))
+    observe(2.)
+    assert not units
     receive(first, impact)
     assert g.half(first + 9482) != 0x8000 + 79
     assert meter() == ([], 0)

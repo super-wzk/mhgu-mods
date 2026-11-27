@@ -3,12 +3,22 @@ use core::{
     sync::atomic::{AtomicPtr, Ordering},
 };
 use mhgu_sdk::{
+    combat::collision::hurt::MonsterSpawn,
+    service,
     sync::Shared,
-    weapon::style::action::{
-        self, Attack,
-        melee::{self, BLADE_CONTACT_OFFSETS, Strike, StrikeContact, StrikePower},
+    weapon::style::{
+        action::{
+            self, Attack,
+            melee::{
+                self, BLADE_CONTACT_OFFSETS, MonsterReaction, MonsterStrikes, Strike,
+                StrikeContact, StrikePower, WorldStrikePower,
+            },
+        },
+        remote::{PLAYER_COUNT, PeerStates, Roster},
     },
 };
+
+mod reaction;
 
 struct HitData {
     actor: u32,
@@ -24,16 +34,32 @@ struct RegisteredStrike {
     style: u32,
     serial: u16,
     power: StrikePower,
+    reaction: MonsterReaction,
 }
 
 struct MeleeRow {
     row: [u32; 14],
     power: StrikePower,
+    reaction: MonsterReaction,
 }
 
 static LOCAL_STRIKES: Shared<[Option<RegisteredStrike>; 2]> = Shared::new([None; 2]);
+static PEER_STRIKES: PeerStates<[Option<RegisteredStrike>; 2]> = PeerStates::new();
+
+pub(super) fn begin_hunt() {
+    LOCAL_STRIKES.with(|strikes| *strikes = [None; 2]);
+    for index in 0..PLAYER_COUNT {
+        PEER_STRIKES.update(index, 0, |_, _| {});
+    }
+    for entry in super::registered_entries() {
+        if let Some(observer) = unsafe { entry.monster_strikes.load(Ordering::Acquire).as_ref() } {
+            (observer.begin_hunt)();
+        }
+    }
+}
 
 pub(super) fn clear(actor: u32) {
+    reaction::clear(actor);
     LOCAL_STRIKES.with(|strikes| {
         for strike in strikes {
             strike.take_if(|contact| contact.actor == actor);
@@ -51,32 +77,166 @@ extern "C" fn bind_contact(id: u32, callback: StrikeContact) -> bool {
     true
 }
 
+extern "C" fn bind_monster(id: u32, observer: &'static MonsterStrikes) -> bool {
+    let Some(entry) = super::registered_entry(id).filter(|entry| entry.style.independent) else {
+        return false;
+    };
+    entry
+        .monster_strikes
+        .store(ptr::from_ref(observer).cast_mut(), Ordering::Release);
+    true
+}
+
+extern "C" fn bind_world(id: u32, callback: WorldStrikePower) -> bool {
+    let Some(entry) = super::registered_entry(id).filter(|entry| entry.style.independent) else {
+        return false;
+    };
+    entry
+        .world_strike_power
+        .store(callback as *mut (), Ordering::Release);
+    true
+}
+
+unsafe fn recorded_strike(
+    actor: u32,
+    hit: u32,
+    hand: usize,
+    local: bool,
+) -> Option<RegisteredStrike> {
+    let mut found = None;
+    if local {
+        found = LOCAL_STRIKES.with(|strikes| strikes[hand]);
+    } else if let Some(index) = unsafe { Roster::current() }.and_then(|r| r.peer_index(actor)) {
+        PEER_STRIKES.update(index, actor, |strikes, _| {
+            found = strikes.as_ref().and_then(|strikes| strikes[hand]);
+        });
+    }
+    found.filter(|s| {
+        s.actor == actor && s.serial == unsafe { super::deflection::contact_serial(hit) }
+    })
+}
+
+// Only a recorded restraint finisher gets the target/row override.
+unsafe fn finisher_owner(hit: u32) -> Option<(u32, bool, u32)> {
+    let actor = unsafe { crate::weapon::read::<u32>(hit, 12) };
+    let hand = BLADE_CONTACT_OFFSETS
+        .iter()
+        .position(|&n| hit.wrapping_sub(actor) == n)?;
+    let local = unsafe { super::local_hunter() } == actor;
+    let strike = unsafe { recorded_strike(actor, hit, hand, local) }?;
+    (strike.reaction == MonsterReaction::Topple).then_some((actor, local, strike.style))
+}
+
+#[forge::hook(offset = 0x16c0c0)]
+unsafe fn intersect_monster(manager: u32, hit: u32, target: u32) -> u32 {
+    use crate::weapon::{read, set};
+    use melee::RestrainedContact;
+    let Some((actor, local, style_id)) = (unsafe { finisher_owner(hit) }) else {
+        return original!(manager, hit, target);
+    };
+    unsafe {
+        let entry = if local {
+            crate::weapon::style::local_entry(actor)
+        } else {
+            crate::weapon::style::multiplayer::peer_entry(actor)
+        };
+        let Some(observer) = entry
+            .filter(|e| e.style.id == style_id)
+            .and_then(|e| e.monster_strikes.load(Ordering::Acquire).as_ref())
+        else {
+            return 0;
+        };
+        let Some(spawn) = MonsterSpawn::from_owned_damage_target(actor, target) else {
+            return 0;
+        };
+        let row = match (observer.restrained_contact)(actor, &spawn) {
+            RestrainedContact::Reject => return 0,
+            RestrainedContact::AnyPart => None,
+            RestrainedContact::Row(row) => Some(row),
+        };
+        let index = read::<u32>(hit, 28);
+        if index >= 64 {
+            return 0;
+        }
+        let sphere = manager + 8240 + index * 32;
+        if read::<u8>(sphere, 0) != 1 {
+            return 0;
+        }
+        // FZ 816FE7F4..816FE840 accepts the caster's captive at the marked
+        // hurt row regardless of distance. Let GU settle the resulting hit.
+        mhgu_sdk::combat::collision::hurt::with_restrained_row(manager, target, row, |point| {
+            let center = read::<[f32; 3]>(sphere, 8);
+            set(sphere, 8, point);
+            let result = original!(manager, hit, target);
+            set(sphere, 8, center);
+            result
+        })
+        .unwrap_or(0)
+    }
+}
+
 unsafe fn notify_contact(actor: u32, hit: u32, target: u32, affinity: *const f32) {
-    if actor == 0 || target == 0 || actor != unsafe { super::local_hunter() } {
+    if target == 0 {
         return;
     }
-    let Some(hand) = BLADE_CONTACT_OFFSETS
+    let local = unsafe { super::local_hunter() } == actor;
+    let entry = unsafe {
+        if local {
+            super::local_entry(actor)
+        } else {
+            super::multiplayer::peer_entry(actor)
+        }
+    };
+    let Some(entry) = entry else {
+        return;
+    };
+    let callback = if local {
+        entry.strike_contact.load(Ordering::Acquire)
+    } else {
+        ptr::null_mut()
+    };
+    let observer = unsafe { entry.monster_strikes.load(Ordering::Acquire).as_ref() };
+    let (power, reaction) = if let Some(hand) = BLADE_CONTACT_OFFSETS
         .iter()
         .position(|&offset| offset == hit.wrapping_sub(actor))
-    else {
-        return;
+    {
+        let Some(strike) = (unsafe { recorded_strike(actor, hit, hand, local) })
+            .filter(|s| s.style == entry.style.id)
+        else {
+            return;
+        };
+        (strike.power, strike.reaction)
+    } else {
+        let lookup = entry.world_strike_power.load(Ordering::Acquire);
+        if (callback.is_null() && observer.is_none()) || lookup.is_null() {
+            return;
+        }
+        let lookup: WorldStrikePower = unsafe { core::mem::transmute(lookup) };
+        let mut power = StrikePower {
+            motion: 0,
+            bonus: 0,
+        };
+        if !lookup(actor, hit, &mut power) {
+            return;
+        }
+        (power, MonsterReaction::Native)
     };
-    let strike = LOCAL_STRIKES.with(|strikes| strikes[hand]);
-    let Some(strike) = strike.filter(|strike| {
-        strike.actor == actor && strike.serial == unsafe { super::deflection::contact_serial(hit) }
-    }) else {
-        return;
-    };
-    let Some(entry) =
-        (unsafe { super::local_entry(actor) }).filter(|entry| entry.style.id == strike.style)
-    else {
-        return;
-    };
-    let callback = entry.strike_contact.load(Ordering::Acquire);
+    if (observer.is_some() || reaction != MonsterReaction::Native)
+        && service::on_game_thread()
+        && let Some(spawn) = unsafe { MonsterSpawn::from_owned_damage_target(actor, target) }
+    {
+        if let Some(observer) = observer {
+            (observer.contact)(actor, &spawn, power, unsafe { affinity.read() });
+        }
+        if reaction == MonsterReaction::Topple {
+            reaction::queue(actor, entry.style.id, target, spawn);
+        }
+    }
     if !callback.is_null() {
+        let spawn = unsafe { MonsterSpawn::from_damage_target(actor, target) };
         let notify: StrikeContact = unsafe { core::mem::transmute(callback) };
         // All three GU damage paths initialize this multiplier to 1.0.
-        notify(actor, strike.power, unsafe { affinity.read() });
+        notify(actor, power, unsafe { affinity.read() }, spawn.as_ref());
     }
 }
 
@@ -124,17 +284,7 @@ unsafe extern "C" fn submit_melee(actor: u32, strike: *const Strike, shape: u32)
     {
         return 0;
     }
-    // GU's 56-byte HDP data for a basic player melee contact.
-    let mut row = [0u32; 14];
-    row[2] = 1 | (30 << 16);
-    row[3] = strike.damage as u32;
-    row[4] = 2;
-    row[8] = 255 << 24; // No repeating hit interval.
-    row[9] = 255 | (u32::from(strike.hitstop) << 8);
-    row[10] = 1f32.to_bits();
-    row[11] = 1f32.to_bits();
     let power = strike.power.adjusted(1.);
-    row[12] = u32::from(power);
     // Bits 1 and 2 apply weapon attributes and critical hits. Bit 0
     // also applies retail spirit and shield-strengthening modifiers.
     let mut flags = (Attack::WEAPON_MODIFIERS & !1) | Attack::PUNISHING_DRAW;
@@ -152,8 +302,9 @@ unsafe extern "C" fn submit_melee(actor: u32, strike: *const Strike, shape: u32)
     };
     let stun = (strike.stun != 0).then_some(strike.stun);
     let melee = MeleeRow {
-        row,
+        row: strike.hdp(),
         power: strike.power,
+        reaction: strike.reaction,
     };
     unsafe { submit_row(actor, &attack, stun, Some(melee)) }
 }
@@ -228,15 +379,12 @@ unsafe fn submit_row(
             hit_shape.write(attack.shape);
         }
         let hand = if registered.is_some() {
-            let decode: unsafe extern "C" fn(u32) -> u32 = core::mem::transmute(base + 0x53a058);
-            let motion = decode(actor);
             BLADE_CONTACT_OFFSETS
                 .iter()
                 .position(|offset| {
                     let hit = actor + offset;
                     ((hit + 5) as *const u8).read() == 0
                         || ((hit + 96) as *const f32).read() <= 0.
-                        || ((hit + 116) as *const u32).read() != motion
                 })
                 .unwrap_or(0)
         } else {
@@ -280,7 +428,9 @@ unsafe fn submit_row(
                 // 169548 reads the computed melee attack only with bit 0x20.
                 // Set it after 2B76CC, without enabling retail weapon bonuses.
                 let hit_flags = (hit + 48) as *mut u32;
-                hit_flags.write(hit_flags.read() & !0x800 | 0x20);
+                // FZ family 120/121 events spawn with flags zero. Their scene
+                // lifetime continues across play-rate and animation changes.
+                hit_flags.write(hit_flags.read() & !(0x800 | 0x300) | 0x20);
             } else {
                 let vtable = (actor as *const *const u32).read();
                 let adjust = vtable.add(1992 / 4).read();
@@ -291,31 +441,39 @@ unsafe fn submit_row(
                 }
             }
         });
-        // Recoil decisions belong to the sender. A remote swing must not
-        // displace a pending hit in the local hunter's deflection window.
+        let recorded = registered.map(|melee| RegisteredStrike {
+            actor,
+            style: style.id,
+            serial: super::deflection::contact_serial(hit),
+            power: melee.power,
+            reaction: melee.reaction,
+        });
+        // Recoil decisions belong to the sender. Peer receipts are only for
+        // the console currently simulating the hit monster.
         if super::local_hunter() == actor {
-            LOCAL_STRIKES.with(|strikes| {
-                strikes[hand] = registered.map(|melee| RegisteredStrike {
-                    actor,
-                    style: style.id,
-                    serial: super::deflection::contact_serial(hit),
-                    power: melee.power,
-                });
-            });
+            LOCAL_STRIKES.with(|strikes| strikes[hand] = recorded);
             let serial = (attack.flags & Attack::DEFLECTABLE != 0)
                 .then(|| super::deflection::contact_serial(hit));
             super::deflection::submitted(actor, slot, hand, serial);
+        } else if let Some(index) = Roster::current().and_then(|r| r.peer_index(actor)) {
+            PEER_STRIKES.update(index, actor, |strikes, _| {
+                strikes.get_or_insert([None; 2])[hand] = recorded;
+            });
         }
         1
     }
 }
 
 pub(super) fn install(base: u32) {
+    reaction::install(base);
+    forge::install_hook!(base, intersect_monster);
     use mhgu_sdk::weapon::style::action::stun;
     static SERVICE: stun::Service = stun::Service(submit_stun);
     static MELEE: melee::StrikeService = melee::StrikeService {
         submit: submit_melee,
         bind: bind_contact,
+        bind_world,
+        bind_monster,
     };
     unsafe { stun::publish(&SERVICE) };
     unsafe { melee::publish_strike(&MELEE) };

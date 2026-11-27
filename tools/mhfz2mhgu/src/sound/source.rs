@@ -54,6 +54,11 @@ impl Bank {
     pub fn player_bytes(file: &[u8], cues: impl IntoIterator<Item = u8>) -> Result<Self> {
         Self::parse(file, &member(file, 2)?, cues, None)
     }
+    /// Model requests 32..47 target the second instrument loaded by 818E058C,
+    /// the hunter voice. Preserve the model request's note and gain.
+    pub fn model_voice(path: &Path, model: &[u8], cues: impl IntoIterator<Item = u8>) -> Result<Self> {
+        Self::parse(&fs::read(path)?, &member(model, 2)?, cues, None)
+    }
     fn parse(
         file: &[u8],
         seq: &[u8],

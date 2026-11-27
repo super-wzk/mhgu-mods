@@ -135,6 +135,22 @@ impl Cursor {
         }
     }
 
+    /// 81816422 does not test the current cycle's frame until the incoming
+    /// clip has finished interpolating. Immediate and blend-count rows have
+    /// their own gates and can still fire on entry.
+    pub fn next_motion_event(&mut self) -> Option<(u16, u16, f32)> {
+        let row = self.events.chunks_exact(12).nth(self.event)?;
+        if self.time.blend > 0.
+            && half(row, 0) == u16::from(self.time.step)
+            && row[2] == 0
+            && row[3] as i8 <= 0
+            && half(row, 6) == self.time.cycles
+        {
+            return None;
+        }
+        self.next_event()
+    }
+
     pub fn next_event(&mut self) -> Option<(u16, u16, f32)> {
         let row = self.events.chunks_exact(12).nth(self.event)?;
         if !self.time.reached(row) {

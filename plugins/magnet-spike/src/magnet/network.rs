@@ -1,6 +1,10 @@
-//! Play the firing hunter's magnetic shot without resolving contacts twice.
+//! Replay the firing hunter's magnetic shot and confirmed magnetic evade.
 use super::{MARK_FRAMES, Projectile, mark_clock_running};
-use crate::{STYLE, fx::RepelEffect, program::Mode};
+use crate::{
+    STYLE,
+    fx::{EvadeFlash, RepelEffect},
+    program::Mode,
+};
 use alloc::vec::Vec;
 use core::{
     f32::consts::TAU,
@@ -16,11 +20,26 @@ use mhgu_sdk::{
 };
 
 const SERIAL_MASK: u8 = 63;
+// Launch uses all 26 low bits. Only control events set bit 26.
 const STOP: u32 = 1 << 26;
+const EVADE: u32 = STOP | 1 << 25;
+const AREA_SHIFT: u32 = 6;
+const AREA_MASK: u32 = 0xff << AREA_SHIFT;
 const YAW_MASK: u32 = (1 << 11) - 1;
 const PITCH_MASK: u32 = (1 << 9) - 1;
 static NEXT: AtomicU8 = AtomicU8::new(0);
+static NEXT_EVADE: AtomicU8 = AtomicU8::new(0);
 static SHOTS: PeerStates<Replay> = PeerStates::new();
+
+pub(super) fn marked_target(actor: u32, member: usize) -> Option<Target> {
+    let mut target = None;
+    SHOTS.update(member, actor, |peer, _| {
+        target = peer
+            .as_ref()
+            .and_then(|peer| peer.mark.map(|(target, _)| target));
+    });
+    target
+}
 
 pub(super) fn next_serial() -> u8 {
     NEXT.fetch_add(1, Ordering::Relaxed) & SERIAL_MASK
@@ -42,6 +61,15 @@ pub(super) fn stop(actor: u32, serial: u8) {
     remote::send_position_event(STYLE.id, actor, STOP | u32::from(serial));
 }
 
+pub(super) fn evade(actor: u32, area: u8) {
+    let serial = NEXT_EVADE.fetch_add(1, Ordering::Relaxed) & SERIAL_MASK;
+    remote::send_position_event(
+        STYLE.id,
+        actor,
+        EVADE | u32::from(serial) | (u32::from(area) << AREA_SHIFT),
+    );
+}
+
 fn direction(payload: u32) -> [f32; 3] {
     let yaw = ((payload >> 6) & YAW_MASK) as u16;
     let pitch = ((payload >> 17) & PITCH_MASK) as u16;
@@ -60,6 +88,8 @@ struct Replay {
     shots: Vec<Projectile>,
     mark: Option<(Target, f32)>,
     repel: Option<RepelEffect>,
+    last_evade: Option<u8>,
+    evade_flash: Option<EvadeFlash>,
 }
 
 impl Replay {
@@ -89,11 +119,13 @@ impl Replay {
         if mark_clock_running(actor) {
             *remaining -= frames;
         }
-        let point = (*remaining > 0.).then(|| scene.position(target)).flatten();
-        if point.is_none() {
-            self.mark = None;
+        if *remaining > 0. {
+            if let Ok(point) = scene.refresh_mark(target) {
+                return point;
+            }
         }
-        point
+        self.mark = None;
+        None
     }
 }
 
@@ -129,8 +161,13 @@ pub(crate) unsafe fn begin_repel(index: usize, actor: u32, mode: Mode) {
 pub(crate) extern "C" fn receive(event: &PositionEvent) {
     let actor = event.actor;
     let payload = event.payload;
-    let is_stop = payload & STOP != 0;
-    if is_stop && payload & !(STOP | u32::from(SERIAL_MASK)) != 0 {
+    let control = payload & EVADE;
+    let control_mask = if control == EVADE {
+        EVADE | AREA_MASK
+    } else {
+        STOP
+    };
+    if control & STOP != 0 && payload & !(control_mask | u32::from(SERIAL_MASK)) != 0 {
         return;
     }
     let Some(index) = (unsafe { Roster::current() }).and_then(|roster| roster.peer_index(actor))
@@ -142,13 +179,26 @@ pub(crate) extern "C" fn receive(event: &PositionEvent) {
     if !same_area {
         return;
     }
+    if control == EVADE && (payload & AREA_MASK) >> AREA_SHIFT != u32::from(area) {
+        return;
+    }
     let serial = payload as u8 & SERIAL_MASK;
     SHOTS.update(index, actor, |saved, _| {
         let replay = saved.get_or_insert_with(Replay::default);
+        if control == EVADE {
+            if replay
+                .last_evade
+                .is_none_or(|last| matches!(serial.wrapping_sub(last) & SERIAL_MASK, 1..=31))
+            {
+                replay.last_evade = Some(serial);
+                replay.evade_flash = unsafe { EvadeFlash::emit(actor, area) };
+            }
+            return;
+        }
         let Some(bit) = replay.bit(serial) else {
             return;
         };
-        if is_stop {
+        if control == STOP {
             replay.stop(serial, bit);
         } else if (replay.launches | replay.stops) & bit == 0 {
             replay.launches |= bit;
@@ -179,9 +229,15 @@ pub(crate) unsafe fn observe(local: u32) {
                 let area = scene.area();
                 if unsafe { hunter::area(actor) } != area {
                     replay.shots.clear();
-                    replay.mark = None;
+                    replay.advance_mark(actor, scene, frames);
                     replay.repel = None;
+                    replay.evade_flash = None;
                     return;
+                }
+                if let Some(flash) = &replay.evade_flash
+                    && !unsafe { flash.advance(actor, area) }
+                {
+                    replay.evade_flash = None;
                 }
                 replay.shots.retain_mut(|shot| {
                     if shot.area != area {

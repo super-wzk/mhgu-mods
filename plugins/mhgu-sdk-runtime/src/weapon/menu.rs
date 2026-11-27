@@ -138,7 +138,7 @@ fn ranged(kind: u32) -> bool {
     inventory::weapon_type(kind as u16).is_some_and(|(_, weapon)| weapon.ranged)
 }
 
-pub(super) mod grid;
+pub(in crate::weapon) mod grid;
 const EXTENSION_TITLE: &CStr = c"扩展装备箱";
 
 // GU's first page has nine real row widgets. Stock row 5 uses message

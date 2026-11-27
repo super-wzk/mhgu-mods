@@ -64,8 +64,9 @@ pub(super) fn timeline(dat: &Path, weapon: usize) -> Result<(Vec<u8>, [BTreeSet<
         // w06 action event 16 plays this cue through 818DD2DC.
         cues[0].insert(1);
     } else if weapon == 13 {
-        // Magnetic shot (811659F8) and slash block (8102D32E, 8122119A).
-        cues[0].extend([9, 12, 13]);
+        cues[1].extend([46, 112]);
+        // Impact charge, magnetic shot, slash block, bind and enhanced impact.
+        cues[0].extend([5, 6, 7, 9, 12, 13, 14, 17, 18, 19, 23, 24, 26, 27, 36]);
     }
     let mut compiled = BTreeMap::<(usize, u16, u8), Vec<(u8, u8)>>::new();
     let native = match weapon {
@@ -95,7 +96,7 @@ pub(super) fn timeline(dat: &Path, weapon: usize) -> Result<(Vec<u8>, [BTreeSet<
         }
     }
     let mut emit = |clip: usize, frame: u16, bank: u8, options: &[(u8, u8)]| -> Result<()> {
-        if bank == 2 && options.iter().all(|c| c.0 >= 32) {
+        if weapon != 13 && bank == 2 && options.iter().all(|c| c.0 >= 32) {
             return Ok(());
         }
         ensure!(options.len() <= 4, "too many sound variants");
@@ -106,8 +107,8 @@ pub(super) fn timeline(dat: &Path, weapon: usize) -> Result<(Vec<u8>, [BTreeSet<
         for (i, &(cue, weight)) in options.iter().enumerate() {
             row[4 + 2 * i] = cue;
             row[5 + 2 * i] = weight;
-            if cue != 255 {
-                cues[usize::from(bank)].insert(cue);
+            if cue != 255 && let Some(set) = cues.get_mut(usize::from(bank)) {
+                set.insert(cue);
             }
         }
         clips
@@ -145,9 +146,8 @@ pub(super) fn timeline(dat: &Path, weapon: usize) -> Result<(Vec<u8>, [BTreeSet<
             let r = word(&b, p + 4)? + 22 * j;
             let bank = match h(r + 2)? {
                 0 => 1,
-                // w13 uses its own we13 bank. The trial model has no
-                // wk451.snd in the model archive.
-                3 | 4 if weapon == 13 => continue,
+                1 if weapon == 13 => 3, // Hunter's current floor material.
+                5 if weapon == 13 => 4, // Armour attached to the source body slot.
                 3 | 4 => 2,
                 6 => 0,
                 _ => continue,

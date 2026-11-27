@@ -25,6 +25,12 @@ pub unsafe fn area(actor: u32) -> u8 {
 }
 
 /// # Safety
+/// The actor must be a live quest hunter on the game thread.
+pub unsafe fn is_alive(actor: u32) -> bool {
+    unsafe { ((actor + 5078) as *const i16).read() > 0 }
+}
+
+/// # Safety
 /// The actor must be a live GU hunter on the game thread.
 pub unsafe fn equipped_weapon(actor: u32) -> Option<u8> {
     unsafe {

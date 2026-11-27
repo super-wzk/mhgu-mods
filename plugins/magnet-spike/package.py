@@ -33,6 +33,8 @@ def package(dat, romfs):
         for table in ("magnet_spike.fmsa", "frontier_ms_sound.flse"):
             shutil.copy2(Path(staging) / table, assets)
         shutil.copy2(Path(staging) / "effects/routes.bin", assets / "frontier_ms_routes.bin")
+        shutil.copy2(Path(staging) / "effects/motion_fx.bin", assets / "frontier_ms_motion_fx.bin")
+        shutil.copy2(Path(staging) / "effects/selectors.bin", assets / "frontier_ms_selectors.bin")
         subprocess.run(["cargo", "forge", "build", "--release"], cwd=ROOT, env=env, check=True)
         for src, dest in (
             (arc, nx / "arc/frontier"),

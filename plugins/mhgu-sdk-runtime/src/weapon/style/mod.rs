@@ -10,10 +10,10 @@ use core::{
 mod archive;
 mod attack;
 mod camera;
-mod chat;
 mod commands;
 mod deflection;
 mod effect;
+mod ground_input;
 mod guard;
 mod manual;
 mod menu;
@@ -39,12 +39,17 @@ pub(super) struct Entry {
     pub(super) details: CString,
     next: *mut Entry,
     multiplayer: multiplayer::Bindings,
+    input_filter: AtomicPtr<()>,
     physical: AtomicPtr<mhgu_sdk::weapon::style::physical::Rule>,
     world_contact: AtomicPtr<()>,
     collision_pass: AtomicPtr<()>,
+    attack_pass: AtomicPtr<()>,
     hurt_pass: AtomicPtr<()>,
+    hurt_observer: AtomicPtr<()>,
     blade_contact: AtomicPtr<()>,
     strike_contact: AtomicPtr<()>,
+    monster_strikes: AtomicPtr<action::melee::MonsterStrikes>,
+    world_strike_power: AtomicPtr<()>,
     particle_release: AtomicPtr<()>,
     prepare: AtomicPtr<()>,
     pub(super) part_motion: AtomicPtr<part_motion::Motions>,
@@ -112,12 +117,17 @@ pub(super) unsafe fn register_entry(
             details,
             next: head,
             multiplayer: multiplayer::Bindings::new(),
+            input_filter: AtomicPtr::new(ptr::null_mut()),
             physical: AtomicPtr::new(ptr::null_mut()),
             world_contact: AtomicPtr::new(ptr::null_mut()),
             collision_pass: AtomicPtr::new(ptr::null_mut()),
+            attack_pass: AtomicPtr::new(ptr::null_mut()),
             hurt_pass: AtomicPtr::new(ptr::null_mut()),
+            hurt_observer: AtomicPtr::new(ptr::null_mut()),
             blade_contact: AtomicPtr::new(ptr::null_mut()),
             strike_contact: AtomicPtr::new(ptr::null_mut()),
+            monster_strikes: AtomicPtr::new(ptr::null_mut()),
+            world_strike_power: AtomicPtr::new(ptr::null_mut()),
             particle_release: AtomicPtr::new(ptr::null_mut()),
             prepare: AtomicPtr::new(ptr::null_mut()),
             part_motion: AtomicPtr::new(ptr::null_mut()),
@@ -218,6 +228,36 @@ impl Entry {
     }
 }
 
+unsafe extern "C" fn bind_input_filter(id: u32, filter: input::Filter) -> bool {
+    let Some(entry) = registered_entry(id) else {
+        return false;
+    };
+    entry
+        .input_filter
+        .store(filter as *mut (), Ordering::Release);
+    true
+}
+
+// 27ECCC has already suppressed gameplay input for menus and disabled hunters.
+// The virtual weapon mapper, buffered ground transitions and 282DA8 run later.
+#[forge::hook(offset = 0x27ebbc)]
+unsafe fn filter_pad(actor: u32) -> u32 {
+    unsafe {
+        ground_input::clear(actor);
+        if let Some(entry) = local_entry(actor) {
+            let filter = entry.input_filter.load(Ordering::Acquire);
+            if !filter.is_null() {
+                let filter: input::Filter = core::mem::transmute(filter);
+                let pad = &mut *((actor + 5108) as *mut input::Buttons);
+                let before = pad.held | pad.pressed | pad.released;
+                filter(actor, pad);
+                ground_input::claim(actor, before, pad);
+            }
+        }
+    }
+    original!(actor)
+}
+
 unsafe extern "C" fn bind_rules(id: u32, rules: *const rules::Rules) -> bool {
     let Some(entry) = registered_entry(id) else {
         return false;
@@ -248,6 +288,9 @@ unsafe extern "C" fn bind_preload(id: u32, prepare: preload::Prepare) -> bool {
 #[forge::hook(offset = 0x29b7d4)]
 unsafe fn init_hunter(actor: u32) -> u32 {
     let result = original!(actor);
+    if actor != 0 && unsafe { local_hunter() == actor && hunter::is_quest(actor) } {
+        attack::begin_hunt();
+    }
     if let Some(entry) = unsafe { local_entry(actor) } {
         let callback = entry.prepare.load(Ordering::Acquire);
         if !callback.is_null() {
@@ -273,8 +316,14 @@ unsafe fn playback_style(actor: u32) -> Option<&'static Style> {
     }
     unsafe {
         local_style(actor).or_else(|| {
-            let style = multiplayer::peer_entry(actor)?.style;
+            let entry = multiplayer::peer_entry(actor)?;
+            let style = entry.style;
             let current = action::current(actor);
+            // Only the confirmed expanded equipment profile can select its
+            // locomotion bank. Retail peers can share a fallback weapon type.
+            if current.0 == 1 && entry.kind.is_some() {
+                return Some(style);
+            }
             let (group, slot) = if current == Sheathe::ACTION {
                 // Common sheathe can bind a custom follow-up to the preceding action.
                 action::previous(actor)
@@ -416,7 +465,7 @@ unsafe fn controller_frame(actor: u32, custom_id: Option<u8>) -> u32 {
             stick_strength: *((actor + 5136) as *const i16),
             auxiliary_pressed: pressed & input::auxiliary_shoulder_mask(),
         };
-        let result = tick(actor, &input);
+        let result = ground_input::during_controller(actor, || tick(actor, &input));
         if result == PASS {
             let (group, slot) = action::current(actor);
             if action::custom(group, slot) {
@@ -438,6 +487,15 @@ unsafe fn dispatch(actor: u32) -> u32 {
         unsafe {
             routes::finish_ground_motion(actor, style, Sheathe::ACTION.1, finish_peer_sheathe)
         };
+    } else if let Some(entry) =
+        unsafe { multiplayer::peer_entry(actor) }.filter(|e| e.kind.is_some())
+    {
+        let (group, slot) = unsafe { action::current(actor) };
+        if group == 1
+            && let Some(finish) = entry.rules().and_then(|r| r.ground_motion)
+        {
+            unsafe { routes::finish_ground_motion(actor, entry.style, slot, finish) };
+        }
     }
     original!(actor)
 }
@@ -468,6 +526,9 @@ unsafe fn change_action(actor: u32, group: u32, slot: u32, flags: u32) -> u32 {
     // movement, guarding, damage and interactions remain available, but stock
     // weapon requests must not change state before the new style consumes GU's
     // resolved command buffer. Custom slots use the same native lifecycle.
+    if unsafe { ground_input::blocked(actor, group as u16, slot as u16) } {
+        return 0;
+    }
     let slot = if group == u32::from(action::GROUP) {
         match unsafe { resolve_weapon_slot(actor, slot as u16, flags as u16) } {
             Some(slot) => u32::from(slot),
@@ -624,8 +685,11 @@ pub(super) fn install(base: u32) -> bool {
     }
     static RULES: rules::Service = rules::Service(bind_rules);
     unsafe { rules::publish(&RULES) };
+    static INPUT_FILTER: input::FilterService = input::FilterService(bind_input_filter);
+    if unsafe { input::publish_filter(&INPUT_FILTER) } {
+        forge::install_hook!(base, filter_pad);
+    }
     archive::install(base);
-    chat::install(base);
     forge::install_hook!(base, encode);
     forge::install_hook!(base, decode);
     forge::install_hook!(base, game_style);

@@ -184,8 +184,19 @@ pub(crate) fn motion_assets(dat: &Path, weapon: Weapon) -> Result<Vec<arc::Asset
             let bake_layers = |rig: &Rig| -> Result<_> {
                 let (lo, a) = bake(&lower, rig, Some(0), Some(0))
                     .with_context(|| format!("{source} lower {group}:{slot}"))?;
-                let (hi, b) = bake(&upper, rig, Some(1), Some(0))
+                let (hi, mut b) = bake(&upper, rig, Some(1), Some(0))
                     .with_context(|| format!("{source} upper {}:{slot}", group + 1))?;
+                // FZ node 10 is the parent of both wrists. Its bind translation
+                // differs from GU joint 2 when w13 leaves this channel implicit.
+                if weapon == Weapon::MagnetSpike
+                    && !a.iter().chain(&b).any(|t| t.bone == 10 && t.usage == Usage::Translation)
+                {
+                    b.push(Track {
+                        bone: 10,
+                        usage: Usage::Translation,
+                        samples: vec![rig.joints[10].pos.extend(1.)],
+                    });
+                }
                 Ok((lo.max(hi), [a, b]))
             };
             let (frames, male) = bake_layers(&rigs[0])?;
@@ -194,15 +205,6 @@ pub(crate) fn motion_assets(dat: &Path, weapon: Weapon) -> Result<Vec<arc::Asset
                 frames == female_frames,
                 "model-specific duration at {source} {group}:{slot}"
             );
-            // FZ 8173208A plays the last sample of the Shining Sword loop
-            // for one 30 Hz tick. GU 951A80 wraps as soon as it reaches the
-            // end, so hold that pose for two motion frames in the LMT.
-            let frames = frames
-                + if weapon == Weapon::GreatSword && group == 4 && slot == 65 {
-                    2
-                } else {
-                    0
-                };
             let loop_frame = match (lower.metadata_present, upper.metadata_present) {
                 (0, 0) => None,
                 (1, 1) if lower.metadata == upper.metadata => {
@@ -215,6 +217,11 @@ pub(crate) fn motion_assets(dat: &Path, weapon: Weapon) -> Result<Vec<arc::Asset
                 }
                 _ => anyhow::bail!("unmatched hunter loop points at {group}:{slot}"),
             };
+            // 8173208A presents the inclusive last pose for one FZ tick.
+            // GU 951A80 wraps on reaching the end; its boundary is exclusive.
+            let hold_last = (weapon == Weapon::GreatSword && group == 4 && slot == 65)
+                || (weapon == Weapon::MagnetSpike && loop_frame.is_some());
+            let frames = frames + 2 * u32::from(hold_last);
             let male = merge(&rigs[0], male, frames as usize)?;
             let female = merge(&rigs[1], female, frames as usize)?;
             let variant = (!same_tracks(&male, &female)).then_some((FEMALE_SLOT, female));
@@ -292,7 +299,7 @@ pub(crate) fn motion_assets(dat: &Path, weapon: Weapon) -> Result<Vec<arc::Asset
     }
     if weapon == Weapon::MagnetSpike {
         assets.extend(magnet_spike_weapon_tracks(dat)?);
-        assets.extend(magnet_spike_melee_shapes(dat)?);
+        assets.extend(magnet_spike_shapes(dat)?);
     }
     Ok(assets)
 }
@@ -321,7 +328,7 @@ fn magnet_spike_weapon_tracks(dat: &Path) -> Result<Vec<arc::Asset>> {
             let Some(motion) = archive.motion(group, slot)? else {
                 continue;
             };
-            let (frames, tracks) = bake(&motion, &rig, Some(0), Some(0))
+            let (frames, mut tracks) = bake(&motion, &rig, Some(0), Some(0))
                 .with_context(|| format!("w13w {group}:{slot}"))?;
             let loop_frame = match motion.metadata_present {
                 0 => None,
@@ -335,6 +342,12 @@ fn magnet_spike_weapon_tracks(dat: &Path) -> Result<Vec<arc::Asset>> {
                 }
                 _ => anyhow::bail!("unknown w13w metadata at {group}:{slot}"),
             };
+            let frames = frames + 2 * u32::from(loop_frame.is_some());
+            if loop_frame.is_some() {
+                for track in tracks.iter_mut().filter(|t| t.samples.len() > 1) {
+                    track.samples.resize(frames as usize, *track.samples.last().unwrap());
+                }
+            }
             writer.clip_with_loop(slot, frames, &tracks, loop_frame)?;
         }
         assets.push(arc::Asset {
@@ -537,7 +550,7 @@ pub fn actions(dat: &Path, kind: Weapon) -> Result<Vec<u8>> {
     let mut out = magic.to_vec();
     let version = match kind {
         Weapon::SwitchAxe => 4u16,
-        Weapon::MagnetSpike => 4,
+        Weapon::MagnetSpike => 7,
         _ => 2,
     };
     out.extend(version.to_le_bytes());
@@ -820,6 +833,29 @@ fn append_magnet_spike_parameters(data: &[u8], states: usize, out: &mut Vec<u8>)
             *slot = u8::try_from(cost)?;
         }
     }
+    // 812255B4 skips the first list and uses explicit yaw caps from the second.
+    // Both also contain virtual targets outside the physical state directory.
+    let mut turns = vec![-1i16; states];
+    let caps = word(data, directory + 52)?;
+    let count = word(data, directory + 16)? & 0xffff;
+    ensure!(count % 2 == 0, "unpaired w13 turn cap");
+    for i in (0..count).step_by(2) {
+        let pair = word(data, caps + 2 * i)?;
+        if let Some(turn) = turns.get_mut(pair & 0xffff) {
+            *turn = (pair >> 16) as i16;
+        }
+    }
+    let skip = word(data, directory + 40)?;
+    let count = word(data, directory + 10)? & 0xffff;
+    for i in 0..count {
+        if let Some(turn) = turns.get_mut(word(data, skip + 2 * i)? & 0xffff) {
+            *turn = 0;
+        }
+    }
+    out.extend(b"MSTR");
+    for turn in turns {
+        out.extend(turn.to_le_bytes());
+    }
     out.extend(b"MSCT");
     out.extend(costs);
     out.extend(b"MSPR");
@@ -867,7 +903,7 @@ fn shape_records(sdt: &[u8], start: usize) -> Result<&[u8]> {
     Ok(&records[..count * 40])
 }
 
-fn magnet_spike_melee_shapes(dat: &Path) -> Result<Vec<arc::Asset>> {
+fn magnet_spike_shapes(dat: &Path) -> Result<Vec<arc::Asset>> {
     use mhgu_resource::hts::ShapeGroups;
 
     let sdt = pac::decode(read(&dat.join("mhfsdt.bin"))?)?;
@@ -877,27 +913,45 @@ fn magnet_spike_melee_shapes(dat: &Path) -> Result<Vec<arc::Asset>> {
         "unexpected w13 melee shape directory"
     );
     let directory = word(&sdt, bank + 16)?;
-    (1..9)
-        .map(|selector| {
-            let start = word(&sdt, directory + selector * 32)?;
+    let effect_bank = 10 * 28;
+    ensure!(
+        word(&sdt, effect_bank)? == 121 << 16 && word(&sdt, effect_bank + 4)? >> 16 == 14,
+        "unexpected w13 effect shape directory"
+    );
+    let effect_directory = word(&sdt, effect_bank + 16)?;
+    let melee = (1..9).map(|selector| (format!("melee_{selector}"), directory + selector * 32));
+    melee
+        .chain([
+            ("shock".into(), effect_directory + 12 * 32),
+            ("bind_finisher".into(), effect_directory + 8 * 32),
+        ])
+        .map(|(name, entry)| {
+            let records = shape_records(&sdt, word(&sdt, entry)?)?;
             let mut shapes = Vec::new();
-            for row in shape_records(&sdt, start)?.chunks_exact(40) {
-                ensure!(row[1..4] == [0, 1, 0], "unsupported w13 melee shape");
-                let joint: u16 = match (word(row, 8)?, row[0]) {
-                    (8, joint @ 4..=7) => 0x4000 | u16::from(joint),
-                    (0, 0) => 255, // GU hunter root relative to its position and yaw.
-                    _ => anyhow::bail!("unsupported w13 melee anchor"),
+            for row in records.chunks_exact(40) {
+                let kind = match &row[1..4] {
+                    [0, 1, 0] => 1,
+                    [0, 0, 0] if name == "bind_finisher" => 0,
+                    _ => anyhow::bail!("unsupported w13 shape for {name}"),
+                };
+                let joint: u16 = match (word(row, 8)?, row[0], name.as_str()) {
+                    (8, joint @ 4..=7, _) => 0x4000 | u16::from(joint),
+                    (0, 0, _) => 255, // GU hunter root relative to its position and yaw.
+                    // SDK expands this shape in world space. GU uses the retained
+                    // row for its shape count and the native damage metadata.
+                    (0, 127, "shock") => 255,
+                    _ => anyhow::bail!("unsupported w13 anchor for {name}"),
                 };
                 let mut shape = [0u8; 48];
                 shape[..2].copy_from_slice(&joint.to_le_bytes());
-                shape[4] = 1; // Both endpoints use the same joint.
+                shape[4] = kind;
                 shape[12..28].copy_from_slice(&row[12..28]);
                 shape[32..44].copy_from_slice(&row[28..40]);
                 shapes.push(shape);
             }
-            ensure!(!shapes.is_empty(), "empty w13 melee selector {selector}");
+            ensure!(!shapes.is_empty(), "empty w13 shape for {name}");
             Ok(arc::Asset {
-                name: format!("player\\hit\\frontier_ms\\melee_{selector}"),
+                name: format!("player\\hit\\frontier_ms\\{name}"),
                 kind: 0x5653c1b0, // rHitShape
                 data: ShapeGroups::new(vec![shapes]).encode()?,
             })

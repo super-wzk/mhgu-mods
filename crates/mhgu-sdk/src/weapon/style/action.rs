@@ -179,7 +179,12 @@ pub unsafe fn set_weapon_drawn(actor: u32, drawn: bool) {
 /// The live quest hunter must be in an accepted private weapon state.
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub unsafe fn start_weapon_state(actor: u32) {
-    unsafe { start_custom_movement(actor, 0) };
+    unsafe {
+        start_custom_movement(actor, 0);
+        // GU 2B6F68 clears the airborne flag as part of ground action entry.
+        let flags = (actor + 10057) as *mut u8;
+        flags.write(flags.read() & !0x40);
+    }
 }
 
 /// Prepare a private weapon state for GU's airborne movement.
@@ -253,10 +258,15 @@ core::arch::global_asm!(
 /// The actor must be a live airborne hunter on the game thread.
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub unsafe fn land(actor: u32) -> bool {
+    unsafe { land_with_tolerance(actor, 0.) }
+}
+
+#[cfg(all(target_arch = "arm", target_endian = "little"))]
+pub(super) unsafe fn land_with_tolerance(actor: u32, tolerance: f32) -> bool {
     unsafe extern "C" {
         fn mhgu_style_land(actor: u32, tolerance: u32, entry: usize) -> u32;
     }
-    unsafe { mhgu_style_land(actor, 0, crate::memory::entry(0x2a84d8)) == 1 }
+    unsafe { mhgu_style_land(actor, tolerance.to_bits(), crate::memory::entry(0x2a84d8)) == 1 }
 }
 
 /// Play a motion request through GU's registered weapon motion encoder.

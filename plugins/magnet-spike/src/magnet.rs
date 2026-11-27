@@ -1,18 +1,28 @@
 //! Magnetic shot and attached mark, updated on the GU scene clock.
 use crate::{
-    fx::{BoostEffects, Effect, RepelEffect, Route},
+    bind::{BindInput, METERS, Meters},
+    fx::{BoostEffects, Effect, EvadeFlash, RepelEffect, Route},
     motion,
     program::{self, Mode},
 };
 use alloc::vec::Vec;
 use mhgu_sdk::{
-    combat::collision::hurt::{HurtScene, Target},
+    combat::collision::{
+        hurt::{HurtScene, MonsterSpawn, Target},
+        scene_frames,
+    },
     geometry::{Angle, Bearing},
     sync::Shared,
     weapon::style::{
+        Input,
         action::{self, melee::StrikePower},
-        hud::{GaugePlate, MAX_METER_SEGMENTS, Meter, MeterOverlay, MeterTrack, Signal},
-        hunter, movement, particle, remote,
+        hud::{
+            GaugePlate, MAX_METER_SEGMENTS, METER_SPRITES, Meter, MeterOverlay, MeterSprite,
+            MeterTrack, Signal,
+        },
+        hunter,
+        input::{Pad, PadButton},
+        movement, particle, remote,
     },
 };
 
@@ -60,7 +70,7 @@ impl Projectile {
 struct Mark {
     target: Target,
     remaining: f32,
-    effect: Effect,
+    effect: Option<Effect>,
 }
 
 const MARK_FRAMES: f32 = 2. * program::parameter(14) as f32;
@@ -68,13 +78,15 @@ const MARK_FRAMES: f32 = 2. * program::parameter(14) as f32;
 fn mark_clock_running(actor: u32) -> bool {
     let (group, slot) = unsafe { action::current(actor) };
     // FZ 8122880E / 8121FA3E pause the countdown during these actions.
-    !action::custom_id(group, slot)
-        .is_some_and(|id| program::is_attraction(id) || matches!(id, 63 | 69 | 73))
+    !action::custom_id(group, slot).is_some_and(|id| {
+        program::is_attraction(id) || matches!(id, 63 | 69 | 73 | 94 | 97..=100 | 105 | 156 | 157)
+    })
 }
 
 struct Gauge {
     units: u16,
     tick_fraction: f32,
+    scene_tick: u16,
     refill_ticks: u32,
     spend_flash: u8,
     refill_flashes: [u8; MAX_METER_SEGMENTS],
@@ -89,8 +101,15 @@ static FLASH_ATLAS: GaugePlate =
     GaugePlate::new(0x465a4d53, c"GUI\\frontier_magnet_spike\\flash", [0.; 4])
         .with_cells(2, [36, 32]);
 
+static PANEL_ATLAS: GaugePlate =
+    GaugePlate::new(0x465a4d50, cr"GUI\frontier_magnet_spike\panel", [0.; 4])
+        .with_cells(18, [192, 32]);
+
 pub(super) unsafe fn preload() {
-    unsafe { FLASH_ATLAS.preload() };
+    unsafe {
+        FLASH_ATLAS.preload();
+        PANEL_ATLAS.preload()
+    };
 }
 
 impl Gauge {
@@ -99,6 +118,7 @@ impl Gauge {
         Self {
             units: program::parameter(18),
             tick_fraction: 0.,
+            scene_tick: 0,
             refill_ticks: 0,
             spend_flash: 0,
             refill_flashes: [0; MAX_METER_SEGMENTS],
@@ -134,6 +154,7 @@ impl Gauge {
         let elapsed = self.tick_fraction + frames / 2.;
         let mut ticks = elapsed as u32;
         self.tick_fraction = elapsed % 1.;
+        self.scene_tick = self.scene_tick.wrapping_add(ticks as u16);
 
         // FZ 8122880E grants charge before decrementing flashes on that tick.
         // Process due grants in order so old flashes expire even on a long step.
@@ -209,6 +230,16 @@ impl Boost {
         };
     }
 
+    fn icon(self, mode: usize, bright: bool, tick: u32) -> u16 {
+        let phase = match self {
+            Self::Charging(value) if value >= BOOST_CAPACITY => 2 + tick % 35,
+            Self::Charging(value) => u32::from(value >= BOOST_CAPACITY / 2),
+            Self::Active(_) => 38 + tick % 13,
+            Self::Cooling(_) => 37,
+        };
+        303 + (mode as u16 * 51) + u16::from(!bright) * 102 + phase as u16
+    }
+
     fn track(self, color: u32) -> MeterTrack {
         let (fraction, color) = match self {
             Self::Charging(units) => (f32::from(units) / f32::from(BOOST_CAPACITY), color),
@@ -227,6 +258,7 @@ struct Magnet {
     shots: Vec<Projectile>,
     mark: Option<Mark>,
     repel: Option<RepelEffect>,
+    evade_flash: Option<EvadeFlash>,
     gauge: Gauge,
     range: Option<MarkRange>,
     boosts: [Boost; 2],
@@ -240,6 +272,7 @@ impl Magnet {
             shots: Vec::new(),
             mark: None,
             repel: None,
+            evade_flash: None,
             gauge: Gauge::new(),
             range: None,
             boosts: [Boost::Charging(0); 2],
@@ -252,10 +285,12 @@ impl Magnet {
             self.shots.clear();
             self.mark = None;
             self.repel = None;
+            self.evade_flash = None;
             self.gauge = Gauge::new();
             self.range = None;
             self.boosts = [Boost::Charging(0); 2];
             self.boost_effects = BoostEffects::new();
+            METERS.with(Meters::end_local);
             self.owner = owner;
         }
     }
@@ -270,8 +305,63 @@ impl Magnet {
 
 static LOCAL: Shared<Magnet> = Shared::new(Magnet::new());
 
+pub(super) fn scene_tick() -> u16 {
+    LOCAL.with(|state| state.gauge.scene_tick)
+}
+
 pub fn reset() {
     LOCAL.with(|state| state.select_owner(0));
+}
+
+pub(super) unsafe fn begin_bind(actor: u32, late: f32) {
+    let area = unsafe { hunter::area(actor) };
+    // FZ 81164FDE records the world origin. 811663F2 rotates an 80-unit
+    // forward offset by the hunter's yaw when it initializes selector 3.
+    let (center, _) = unsafe { particle::world_offset(actor, [0., 0., 80.]) };
+    LOCAL.with(|state| state.select_owner(actor));
+    METERS.with(|meters| meters.begin_landing(area, center, late));
+}
+
+pub(super) fn marked_target(actor: u32, peer: Option<usize>) -> Option<Target> {
+    if let Some(member) = peer {
+        network::marked_target(actor, member)
+    } else {
+        LOCAL.with(|state| {
+            state
+                .mark
+                .as_ref()
+                .filter(|_| state.owner == actor)
+                .map(|mark| mark.target)
+        })
+    }
+}
+
+pub(super) fn marked_row(actor: u32, peer: Option<usize>, spawn: MonsterSpawn) -> Option<u8> {
+    let target = marked_target(actor, peer)?;
+    (target.spawn() == spawn && unsafe { target.position_for(actor) }.is_some())
+        .then(|| target.contact().row)
+}
+
+pub(super) fn bind_input(actor: u32, input: &Input, pad: &Pad) -> Option<BindInput> {
+    if LOCAL.with(|state| state.owner == actor) {
+        METERS.with(|meters| meters.input(input, pad, scene_frames()))
+    } else {
+        None
+    }
+}
+
+pub(super) fn begin_bind_finisher(actor: u32) {
+    if LOCAL.with(|state| state.owner == actor) {
+        METERS.with(Meters::begin_finisher);
+    }
+}
+
+pub(super) fn bind_finisher_target(actor: u32) -> Option<[f32; 3]> {
+    if LOCAL.with(|state| state.owner == actor) {
+        METERS.with(|meters| meters.finisher_target())
+    } else {
+        None
+    }
 }
 
 pub(super) unsafe fn begin_repel(actor: u32, mode: Mode) {
@@ -280,6 +370,16 @@ pub(super) unsafe fn begin_repel(actor: u32, mode: Mode) {
         state.select_owner(actor);
         state.repel = Some(RepelEffect::new(area, mode));
     });
+}
+
+pub(super) unsafe fn flash_evade(actor: u32) {
+    let area = unsafe { hunter::area(actor) };
+    let flash = unsafe { EvadeFlash::emit(actor, area) };
+    LOCAL.with(|state| {
+        state.select_owner(actor);
+        state.evade_flash = flash;
+    });
+    network::evade(actor, area);
 }
 
 pub fn boost_ready(actor: u32, mode: Mode) -> bool {
@@ -303,6 +403,103 @@ pub fn boosts(actor: u32) -> u8 {
         }
         state.active_boosts()
     })
+}
+
+fn artwork(actor: u32, state: &Magnet, current: bool) -> [MeterSprite; METER_SPRITES] {
+    let mut sprites = [MeterSprite::default(); METER_SPRITES];
+    let sprite = |atlas, frame, offset| MeterSprite {
+        atlas: Some(atlas),
+        frame,
+        centered: false,
+        offset,
+        scale: [1.; 2],
+    };
+    let gauge = if current { &state.gauge } else { &Gauge::new() };
+    let signal = match state.range.filter(|_| current) {
+        None => 0,
+        Some(MarkRange::Repel) => 1,
+        Some(MarkRange::Attract) => 2,
+    };
+    // Reserve the stock sharpness blade and the 18-unit overhang of the spend flash.
+    let x = 120.;
+    let y = 6.;
+    let cells = (gauge.units / SEGMENT_UNITS) as u8;
+    sprites[0] = sprite(
+        &PANEL_ATLAS,
+        gauge.units / (program::parameter(17) / 100) + 101 * signal,
+        [x, y],
+    );
+    let drawn = unsafe { action::weapon_drawn(actor) };
+    let mode = motion::local_pose(actor).unwrap_or_default().mode;
+    for i in 0..2 {
+        let boost = if current {
+            state.boosts[i]
+        } else {
+            Boost::Charging(0)
+        };
+        let frame = boost.icon(i, drawn && mode as usize == i, u32::from(gauge.scene_tick));
+        sprites[1 + i] = sprite(&PANEL_ATLAS, frame, [x + 17.6 + 28.8 * i as f32, y + 26.4]);
+    }
+    let overlay = gauge.overlay();
+    if overlay.spend != 0 {
+        sprites[3] = sprite(&FLASH_ATLAS, u16::from(overlay.spend), [x - 18., y - 16.]);
+    }
+    for (i, &frame) in overlay.refill.iter().take(usize::from(cells)).enumerate() {
+        if frame != 0 {
+            sprites[4 + i] = sprite(
+                &FLASH_ATLAS,
+                u16::from(frame),
+                [x + 12.4 + 19.2 * i as f32, y - 0.4],
+            );
+        } else {
+            let phase = gauge.scene_tick % 46;
+            let frame = 531 + if phase < 16 { phase } else { 0 };
+            sprites[4 + i] = sprite(&PANEL_ATLAS, frame, [x + 21.6 + 19.2 * i as f32, y + 11.2]);
+        }
+    }
+    let (group, slot) = unsafe { action::current(actor) };
+    // FZ 81226C80 requires a drawn, controllable hunter. 824F0F6C
+    // excludes the grounded bind and finisher from the aiming sight.
+    if drawn
+        && unsafe { Pad::sample(actor) }.held(PadButton::Zl)
+        && (movement::ground_idle((group, slot))
+            || action::custom_id(group, slot)
+                .is_some_and(|id| !matches!(id, 98..=100 | 105 | 156 | 157)))
+    {
+        // W13 8122652C uses the center of the viewport for the orbit camera.
+        // The atlas contains the original 46×46 sprite at two thirds scale.
+        sprites[9] = MeterSprite {
+            atlas: Some(&PANEL_ATLAS),
+            frame: match signal {
+                1 => 547,
+                2 => 548,
+                _ => 507,
+            },
+            centered: true,
+            offset: [-24.; 2],
+            scale: [1.5; 2],
+        };
+    }
+    if current && let Some((travel, frame)) = METERS.with(|m| m.indicator()) {
+        // 81143BDE centers the 174×13 plate, then places the cursor one
+        // source pixel below it. The converter samples both at 0.8 scale.
+        let scale = [1.25; 2];
+        sprites[10] = MeterSprite {
+            atlas: Some(&PANEL_ATLAS),
+            centered: true,
+            frame: 508,
+            scale,
+            offset: [-87., -6.5],
+        };
+        sprites[11] = MeterSprite {
+            atlas: Some(&PANEL_ATLAS),
+            centered: true,
+            frame,
+            scale,
+            offset: [-97. + travel as f32, -18.],
+        };
+    }
+    sprites
 }
 
 pub extern "C" fn meter(actor: u32) -> Meter {
@@ -331,6 +528,12 @@ pub extern "C" fn meter(actor: u32) -> Meter {
                 state.gauge.overlay()
             } else {
                 MeterOverlay::default()
+            },
+            sprites: artwork(actor, state, current),
+            panel: if current {
+                METERS.with(|meters| meters.panel())
+            } else {
+                Default::default()
             },
         }
     })
@@ -411,7 +614,15 @@ pub fn spend(actor: u32, segments: u8) -> bool {
     })
 }
 
-pub extern "C" fn melee_contact(actor: u32, power: StrikePower, affinity: f32) {
+pub extern "C" fn strike_contact(
+    actor: u32,
+    power: StrikePower,
+    affinity: f32,
+    target: Option<&MonsterSpawn>,
+) {
+    if target.is_none() {
+        return;
+    }
     // FZ 81EC73F0 truncates motion power after affinity. 812281D4
     // applies the gauge rate and then the charge skill, truncating each step.
     let power = power.adjusted(affinity);
@@ -458,6 +669,11 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
     LOCAL.with(|state| {
         state.select_owner(scene.owner());
         let frames = scene.frames();
+        if let Some(flash) = &state.evade_flash
+            && !unsafe { flash.advance(scene.owner(), scene.area()) }
+        {
+            state.evade_flash = None;
+        }
         for boost in &mut state.boosts {
             boost.advance(frames);
         }
@@ -504,7 +720,7 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
                 *mark = Some(Mark {
                     target,
                     remaining: MARK_FRAMES,
-                    effect: Effect::new(Route::Mark),
+                    effect: None,
                 });
                 ended.push((shot.serial, Some(target)));
                 return false;
@@ -517,17 +733,29 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
         });
         // Publish only the range category for the HUD. The scene callback
         // owns the live monster and bone handles used to compute it.
-        let point = mark.as_mut().and_then(|current| {
-            let point = scene.position(&current.target)?;
-            current.effect.move_to(point);
-            Some(point)
-        });
-        state.range = if let Some(point) = point {
-            MarkRange::between(unsafe { movement::position(scene.owner()) }, point)
-        } else {
-            *mark = None;
-            None
+        let point = match mark.as_mut() {
+            Some(current) => match scene.refresh_mark(&mut current.target) {
+                Ok(Some(point)) => {
+                    current
+                        .effect
+                        .get_or_insert_with(|| Effect::new(Route::Mark))
+                        .move_to(point);
+                    Some(point)
+                }
+                Ok(None) => {
+                    current.effect = None;
+                    None
+                }
+                Err(_) => {
+                    *mark = None;
+                    None
+                }
+            },
+            None => None,
         };
+        state.range = point.and_then(|point| {
+            MarkRange::between(unsafe { movement::position(scene.owner()) }, point)
+        });
         if let Some(repel) = &mut state.repel
             && !unsafe { repel.advance(scene.owner(), scene.area(), frames, point) }
         {

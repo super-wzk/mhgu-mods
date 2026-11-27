@@ -4,7 +4,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use mhgu_sdk::{
     sync::Shared,
     weapon::style::hud::{
-        self, GaugePlate, MAX_METER_SEGMENTS, Meter, MeterService, SampleMeter, Signal,
+        self, GaugePlate, MAX_METER_SEGMENTS, METER_SPRITES, Meter, MeterLabel, MeterPanel,
+        MeterService, MeterSprite, SampleMeter, Signal,
     },
 };
 
@@ -14,6 +15,11 @@ const VITAL_WIDGET: u32 = 0x1777d58;
 const SHARPNESS: u32 = 5; // hud0.gui: Anm_sharp.
 const HUD_ROOT: u32 = 10; // hud0.gui: Nul_hud0.
 const BAR_TEMPLATE: u32 = 5; // hud0.gui: vital_gauge, root and two polygons.
+const LABEL_TEMPLATE: u32 = 16; // hud0.gui: pl_name, root and Mes_plname.
+const PANEL_CENTER: f32 = 640.; // hud0.gui uses a 1280 by 720 canvas.
+const PANEL_WIDTH: f32 = 224.;
+const PANEL_LABEL_Y: f32 = 308.;
+const PANEL_TRACK_Y: f32 = 337.;
 const SIGNAL_INDEX: usize = MAX_METER_SEGMENTS;
 const TRACK_START: usize = SIGNAL_INDEX + 1;
 const STEP: f32 = 19.;
@@ -108,6 +114,8 @@ struct MeterLayout {
     owner: u32,
     root: u32,
     groups: [Option<MeterGroup>; TRACK_START + 2],
+    panel: PanelLayout,
+    sprites: [Option<(HudGroup, u32)>; METER_SPRITES],
 }
 
 impl MeterLayout {
@@ -116,6 +124,8 @@ impl MeterLayout {
             owner,
             root,
             groups: [None; TRACK_START + 2],
+            panel: PanelLayout::new(),
+            sprites: [None; METER_SPRITES],
         }
     }
 }
@@ -123,32 +133,148 @@ impl MeterLayout {
 static METER: Shared<MeterLayout> = Shared::new(MeterLayout::new(0, 0));
 
 #[derive(Clone, Copy)]
-struct MeterGroup {
+struct HudGroup {
     index: u32,
     node: u32,
-    refill_sprite: u32,
-    spend_sprite: u32,
 }
 
-impl MeterGroup {
-    unsafe fn create(layout: u32) -> Option<Self> {
+impl HudGroup {
+    unsafe fn create(layout: u32, template: u32) -> Option<Self> {
         unsafe {
             let index = gu!(
                 0x54501c,
                 layout,
                 u32::MAX,
-                BAR_TEMPLATE,
+                template,
                 HUD_ROOT,
                 forge::mem::text_addr() + 0x2123290
             );
             let node = group(layout, index);
-            (node != 0).then_some(Self {
-                index,
-                node,
-                refill_sprite: 0,
-                spend_sprite: 0,
-            })
+            (node != 0).then_some(Self { index, node })
         }
+    }
+
+    unsafe fn set_visible(self, layout: u32, visible: bool) {
+        unsafe { gu!(0x54533c, layout, self.index, u32::from(visible)) };
+    }
+
+    unsafe fn position(self, layout: u32, xy: [f32; 2]) {
+        unsafe { gu!(0x545bcc, layout, self.index, xy.as_ptr() as u32) };
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MeterGroup {
+    group: HudGroup,
+    refill_sprite: u32,
+    spend_sprite: u32,
+}
+
+struct PanelLayout {
+    caption: Option<HudGroup>,
+    label: Option<&'static MeterLabel>,
+    tracks: [Option<HudGroup>; 2],
+}
+
+impl PanelLayout {
+    const fn new() -> Self {
+        Self {
+            caption: None,
+            label: None,
+            tracks: [None; 2],
+        }
+    }
+
+    unsafe fn update(&mut self, layout: u32, sample: MeterPanel) {
+        unsafe {
+            if self
+                .caption
+                .is_some_and(|g| group(layout, g.index) != g.node)
+            {
+                self.caption = None;
+                self.label = None;
+            }
+            if sample.label.is_some() && self.caption.is_none() {
+                self.caption = HudGroup::create(layout, LABEL_TEMPLATE);
+            }
+            let mut visible = false;
+            if let Some(caption) = self.caption {
+                if let Some(label) = sample.label
+                    && let Some(message) = message(caption.node)
+                {
+                    if self.label.is_none_or(|old| !core::ptr::eq(old, label)) {
+                        // Align the native text geometry around the panel's center.
+                        let align = read::<u32>(message, 160);
+                        set(message, 160, (align & !15) | 1);
+                        set(message, 84, read::<u32>(message, 84) | 0x20000);
+                        let corner = [0f32; 2];
+                        gu!(0x545d60, layout, caption.index, 1, corner.as_ptr() as u32);
+                        caption.position(layout, [PANEL_CENTER, PANEL_LABEL_Y]);
+                        let text = label.text();
+                        gu!(
+                            0xa537d0,
+                            message,
+                            text.as_ptr() as u32,
+                            text.to_bytes().len() as u32
+                        );
+                        self.label = Some(label);
+                    }
+                    visible = true;
+                }
+                caption.set_visible(layout, visible);
+            }
+            for (row, slot) in self.tracks.iter_mut().enumerate() {
+                if slot.is_some_and(|g| group(layout, g.index) != g.node) {
+                    *slot = None;
+                }
+                let track = sample.tracks[row];
+                let show = visible && track.color != 0;
+                if show && slot.is_none() {
+                    *slot = HudGroup::create(layout, BAR_TEMPLATE);
+                }
+                let Some(bar) = *slot else { continue };
+                let polygons = show.then(|| polygons(bar.node, 3)).flatten();
+                if let Some(polygons) = polygons {
+                    let width = PANEL_WIDTH * f32::from(track.percent.min(100)) / 100.;
+                    bar.position(
+                        layout,
+                        [
+                            PANEL_CENTER - PANEL_WIDTH / 2.,
+                            PANEL_TRACK_Y + 12. * row as f32,
+                        ],
+                    );
+                    progress_bar(
+                        layout,
+                        bar.index,
+                        polygons,
+                        PANEL_WIDTH,
+                        width,
+                        HEIGHT,
+                        track.color,
+                    );
+                }
+                bar.set_visible(layout, polygons.is_some());
+            }
+        }
+    }
+}
+
+unsafe fn message(node: u32) -> Option<u32> {
+    unsafe {
+        if read::<u32>(node, 212) != LABEL_TEMPLATE || gu!(0xa38ffc, node) != 2 {
+            return None;
+        }
+        let members = read::<u32>(node, 216);
+        if members == 0 {
+            return None;
+        }
+        let child = read::<u32>(members, 4);
+        (child != 0
+            && matches!(
+                read::<u32>(child, 0).wrapping_sub(forge::mem::text_addr()),
+                0x178fdc8 | 0x178fe58 // cGUIObjMessage / cGUIObjText
+            ))
+        .then_some(child)
     }
 }
 
@@ -167,7 +293,7 @@ unsafe fn overlay_sprite(
         if *sprite == 0 {
             return;
         }
-        let size = atlas.and_then(|atlas| atlas.paint_meter_sprite(*sprite, frame));
+        let size = atlas.and_then(|atlas| atlas.paint_meter_sprite(*sprite, u16::from(frame)));
         if let Some(size) = size {
             let corner = [(WIDTH - size[0]) * 0.5, (HEIGHT - size[1]) * 0.5];
             if read::<[f32; 2]>(*sprite, 128) != corner {
@@ -241,6 +367,79 @@ unsafe fn rectangle(
     }
 }
 
+unsafe fn progress_bar(
+    layout: u32,
+    index: u32,
+    [front, back]: [u32; 2],
+    width: f32,
+    fill: f32,
+    height: f32,
+    color: u32,
+) {
+    unsafe {
+        rectangle(layout, index, 1, front, [0., 0.], [fill, height], color);
+        rectangle(
+            layout,
+            index,
+            2,
+            back,
+            [fill, 0.],
+            [width - fill, height],
+            TRACK,
+        );
+    }
+}
+
+unsafe fn update_artwork(
+    layout: u32,
+    origin: [f32; 2],
+    slot: &mut Option<(HudGroup, u32)>,
+    sample: Option<MeterSprite>,
+) {
+    unsafe {
+        if slot.is_some_and(|(g, _)| group(layout, g.index) != g.node) {
+            *slot = None;
+        }
+        if sample.is_some() && slot.is_none() {
+            let Some(group) = HudGroup::create(layout, BAR_TEMPLATE) else {
+                return;
+            };
+            *slot = Some((group, 0));
+        }
+        let Some((group, sprite)) = slot else { return };
+        let Some(sample) = sample else {
+            group.set_visible(layout, false);
+            return;
+        };
+        if *sprite == 0 {
+            if let Some(bars) = polygons(group.node, 3) {
+                for bar in bars {
+                    set(bar, 84, read::<u32>(bar, 84) & !1);
+                }
+            }
+            *sprite = create_overlay_sprite(layout, group.node);
+        }
+        let size = (*sprite != 0)
+            .then(|| sample.atlas?.paint_meter_sprite(*sprite, sample.frame))
+            .flatten();
+        group.set_visible(layout, size.is_some());
+        if let Some(size) = size {
+            let origin = if sample.centered {
+                [640., 360.]
+            } else {
+                origin
+            };
+            group.position(
+                layout,
+                [origin[0] + sample.offset[0], origin[1] + sample.offset[1]],
+            );
+            let size = [size[0] * sample.scale[0], size[1] * sample.scale[1]];
+            gu!(0xa4fbf4, *sprite, size.as_ptr() as u32);
+            set(*sprite, 84, read::<u32>(*sprite, 84) | 1);
+        }
+    }
+}
+
 unsafe fn update_meter(layout: u32, sample: Option<Meter>) {
     unsafe {
         let root = group(layout, HUD_ROOT);
@@ -262,6 +461,18 @@ unsafe fn update_meter(layout: u32, sample: Option<Meter>) {
                 }
                 *state = MeterLayout::new(layout, root);
             }
+            let artwork = sample.is_some_and(|meter| meter.sprites[0].atlas.is_some());
+            for (index, slot) in state.sprites.iter_mut().enumerate() {
+                update_artwork(
+                    layout,
+                    origin,
+                    slot,
+                    sample
+                        .map(|meter| meter.sprites[index])
+                        .filter(|sprite| sprite.atlas.is_some()),
+                );
+            }
+            let count = if artwork { 0 } else { count };
             for (i, slot) in state.groups.iter_mut().enumerate() {
                 let track = i
                     .checked_sub(TRACK_START)
@@ -272,16 +483,20 @@ unsafe fn update_meter(layout: u32, sample: Option<Meter>) {
                         && count != 0
                         && sample.is_some_and(|m| !matches!(m.signal, Signal::None)))
                     || track.is_some();
-                if slot.is_some_and(|g| group(layout, g.index) != g.node) {
+                if slot.is_some_and(|m| group(layout, m.group.index) != m.group.node) {
                     *slot = None;
                 }
                 if show && slot.is_none() {
-                    *slot = MeterGroup::create(layout);
+                    *slot = HudGroup::create(layout, BAR_TEMPLATE).map(|group| MeterGroup {
+                        group,
+                        refill_sprite: 0,
+                        spend_sprite: 0,
+                    });
                 }
                 let Some(group) = slot else {
                     continue;
                 };
-                let MeterGroup { index, node, .. } = *group;
+                let HudGroup { index, node } = group.group;
                 let Some(meter) = sample.filter(|_| show) else {
                     gu!(0x54533c, layout, index, 0);
                     continue;
@@ -327,16 +542,7 @@ unsafe fn update_meter(layout: u32, sample: Option<Meter>) {
                             CHARGE,
                         )
                     };
-                    rectangle(layout, index, 1, front, [0., 0.], [fill, height], color);
-                    rectangle(
-                        layout,
-                        index,
-                        2,
-                        back,
-                        [fill, 0.],
-                        [WIDTH - fill, height],
-                        TRACK,
-                    );
+                    progress_bar(layout, index, [front, back], WIDTH, fill, height, color);
                     if i < count {
                         let overlay = meter.overlay;
                         let refill = if fill == WIDTH { overlay.refill[i] } else { 0 };
@@ -360,6 +566,8 @@ unsafe fn update_meter(layout: u32, sample: Option<Meter>) {
                 }
                 gu!(0x54533c, layout, index, 1);
             }
+            let panel = sample.map_or_else(MeterPanel::default, |meter| meter.panel);
+            state.panel.update(layout, panel);
         });
     }
 }

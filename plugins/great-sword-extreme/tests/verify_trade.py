@@ -6,14 +6,11 @@ from unicorn import UC_HOOK_CODE
 from unicorn.arm_const import UC_ARM_REG_R0, UC_ARM_REG_R2, UC_ARM_REG_R3, UC_ARM_REG_SP
 
 from verify_menu import register_weapon
-from verify_style import MANAGER, REPO, api_for, boot, select_character
+from verify_style import MANAGER, REPO, SAVE, api_for, boot, save_character, select_character
 
 SHOP, SMITH = 0x6E8558, 0x6F1AE8
 PANEL_VTABLE, PAGE_VTABLE, PANEL_UPDATE = 0x176F384, 0x176F45C, 0x4C
-START_WRITE = 0x8775F4
 A, B, UP, DOWN, LEFT, RIGHT = 0x2000, 0x4000, 0x10, 0x40, 0x80, 0x20
-JOURNAL = "savedata:/mhgu-sdk-0-trade.json"
-GEN_ONE = "savedata:/mhgu-sdk-0-1.json"
 
 
 class Facility:
@@ -21,6 +18,10 @@ class Facility:
         self.g = g
         self.update = SMITH if smith else SHOP
         self.smith = smith
+        if 0x13EFD7C not in g.traps:
+            g.stub(0x13EFD7C, lambda dst, size, *_: g.cpu.mem_write(dst, bytes(size)))
+        if 0x13EFF20 not in g.traps:
+            g.stub(0x13EFF20, lambda dst, size, value, *_: g.cpu.mem_write(dst, bytes([value & 255]) * size))
         self.owner = g.alloc(13200)
         self.panel = g.alloc(96)
         self.page = g.alloc(84)
@@ -53,8 +54,10 @@ class Facility:
             g.cpu.mem_write(native_label, f"Native {row}\0".encode())
             g.put(desc + 4 + 8 * row, 1)
             g.put(desc + 8 + 8 * row, native_label)
-        for offset in ((8036, 8072, 8360) if smith else (92, 128, 164, 200, 236)):
+        for offset in ((8036, 8072, 8108, 8144, 8180, 8216) if smith else (92, 128, 164, 200, 236)):
             g.run(0x54ED74, self.owner + offset)
+        if smith:
+            g.run(0x553030, self.owner + 8360)
         g.run(0x54EDEC, self.cursor, self.stock, 1, 0)
         g.run(0x54EE34, self.cursor, stock_total, 3)
         def observed_parent(cpu, *_):
@@ -256,7 +259,7 @@ def verify():
     smith.press(LEFT)
     assert smith.page_counter() == (1, 3)
     smith.open()
-    assert smith.rows[0]=="Custom weapon" and "#1" in smith.rows[1]
+    assert smith.rows == {0: "Custom weapon"}
     smith.press(A)
     assert g.half(smith.owner + 11820) == 3 and g.half(smith.owner + 11822) == 5, (
         g.cpu.mem_read(smith.owner + 4, 2), g.get(smith.owner + 168), g.half(smith.owner + 11820),
@@ -280,16 +283,19 @@ def verify():
     smith.press(A)
     smith.press(A)
     assert g.get(wallet+36)==500
-    smith.press(DOWN)
+    smith.press(B)
+    smith.press(B)
+    smith.render_category()
+    g.run(0x557D90, smith.cursor, 3)
     smith.press(A)
     smith.press(A)
-    assert g.get(wallet + 36) == 100, (g.get(wallet + 36), g.cpu.mem_read(smith.owner + 4, 2),
-                                      g.run(0x557D78, smith.cursor), smith.rows)
+    smith.press(A)
+    smith.press(A)
+    smith.press()
+    assert g.get(wallet + 36) == 100
     assert g.get(item_box + 26) == item(100, 1)
     assert g.run(instance, 1, result) and g.half(result + 6) == 1
     assert g.run(instance, 2, result) and g.half(result + 6) == 0
-
-    smith.answer_equip(False)
 
     # A full SDK box still permits upgrades, but crafting and buying cannot spend.
     for ident in range(3, 129):
@@ -304,9 +310,13 @@ def verify():
     smith = Facility(g, True)
     smith.connect()
     smith.open()
-    g.run(0x557D90,smith.cursor,126)
-    smith.press(DOWN)
-    assert "#128" in smith.rows[7]
+    assert smith.rows == {0: "Custom weapon"}
+    smith.press(B)
+    smith.press(B)
+    smith.render_category()
+    g.run(0x557D90, smith.cursor, 3)
+    smith.press(A)
+    assert g.half(smith.owner + 8388) == 128 and g.half(smith.owner + 8386) == 2
 
     shop = Facility(g, False)
     shop.connect()
@@ -347,52 +357,26 @@ def verify():
     assert 0x143160 not in native_calls
     assert retail_grants and set(retail_grants) == {(0, 0)}
     verify_save(g, instance, result)
-    print("GU purchase and forging controllers, native debit, SDK rewards and trade save recovery passed")
+    print("GU purchase and forging controllers, native debit, SDK rewards and single-file save passed")
 
 
-def verify_save(g, instance, result):
-    buffer = g.alloc(12800)
-    g.put(MANAGER + 40, buffer)
-    g.put(buffer + 16, 64)
-    # Stand in for native serialization and call the actual pre-write hook at
-    # the same boundary as 3E0980. The slot header results are supplied below.
-    trampoline = g.hooks[START_WRITE]
-    g.cpu.hook_del(g.traps[0x3E0980])
-    g.cpu.mem_write(0x3E0980, struct.pack(
-        "<8I", 0xE92D4008, 0xE59F3010, 0xE12FFF33, 0xE3500000,
-        0x03A00001, 0x13A00000, 0xE8BD8008, trampoline,
-    ))
-    started = []
-    g.stub(START_WRITE, lambda *_: started.append(True))
-    # Canceled or failed native write leaves the old native slot on disk.
-    g.put(buffer + 64 + 36, 100)
+def verify_save(g, instance, result, *, expected_upgrade=1, last_instance=128):
+    before = g.files.copy()
+    save_character(g, success=False)
+    assert g.files == before
     g.mount_available = False
-    assert g.run(g.hooks[0x3E0980], MANAGER, 0) == 0 and not started
-    assert JOURNAL not in g.files and GEN_ONE not in g.files
+    save_character(g)
+    assert g.files == before
     g.mount_available = True
-    assert g.run(g.hooks[0x3E0980], MANAGER, 0) == 1 and len(started) == 1
-    journal = json.loads(g.files[JOURNAL])
-    assert journal["save"]["data"]["inventory"]["instances"]["1"]["upgrade"] == 1
-    assert GEN_ONE not in g.files
-    g.write_success = False
-    g.put(MANAGER + 60, 21)
-    g.run(g.hooks[0x3E1308], MANAGER)
-    assert GEN_ONE not in g.files
-    g.put(buffer + 64 + 36, 1000)
-    select_character(g, 0)
-    assert not g.run(instance, 1, result)
-    # Model exiting after GU commits but before the SDK callback writes A/B.
-    g.put(buffer + 64 + 36, 100)
+    save_character(g)
+    assert set(g.files) == set(before) | {SAVE}
+    data = json.loads(g.files[SAVE])["data"]["inventory"]
+    assert data["instances"]["1"]["upgrade"] == expected_upgrade
     select_character(g, 1)
     assert not g.run(instance, 1, result)
     select_character(g, 0)
-    assert g.run(instance, 1, result) and g.half(result + 6) == 1
-    # The next native save seals the journal before permitting native changes.
-    assert g.run(g.hooks[0x3E0980], MANAGER, 0) == 1
-    assert json.loads(g.files[GEN_ONE]) == journal["save"]
-    g.put(buffer + 64 + 36, 999)
-    select_character(g, 0)
-    assert g.run(instance, 128, result)
+    assert g.run(instance, 1, result) and g.half(result + 6) == expected_upgrade
+    assert g.run(instance, last_instance, result)
 
 
 if __name__ == "__main__":

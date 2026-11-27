@@ -2,13 +2,15 @@
 //! Panel 2 consumes GU's 8-row catalogue, and smithy panel 10 its recipe.
 use super::{Offer, global, has_offers, inventory, offers, read};
 use alloc::borrow::ToOwned;
-use alloc::{ffi::CString, format, vec::Vec};
+use alloc::{ffi::CString, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::{cell::Cell, ffi::CStr};
 use forge::log::prelude::info;
 use mhgu_sdk::sync::Shared;
 
 mod native;
+mod smith_home;
+mod upgrade;
 
 const ACCEPT: u32 = 0x2000;
 const BACK: u32 = 0x4000;
@@ -134,16 +136,7 @@ impl Catalogue {
             .iter()
             .map(|o| {
                 let name = inventory::definition(o.equipment).unwrap().1.name;
-                match (o.instance, o.kind) {
-                    (Some(id), super::Kind::Upgrade(level)) => CString::new(format!(
-                        "{} #{} Lv.{}",
-                        name.to_string_lossy(),
-                        id,
-                        u32::from(level) + 2
-                    ))
-                    .unwrap(),
-                    _ => name.to_owned(),
-                }
+                name.to_owned()
             })
             .collect();
     }
@@ -218,6 +211,14 @@ unsafe fn update(owner: u32, place: Place, original: impl FnOnce() -> u32) -> Op
             if phase == place.trade_phase() {
                 let result = native::tick(&mut current, original);
                 return Some(keep_category(current, result));
+            }
+        }
+        if place == Place::Smith {
+            if read::<u8>(owner + 4) == 1 {
+                return smith_home::update(owner, original);
+            }
+            if read::<u8>(owner + 4) == 7 && upgrade::opened(owner) {
+                return Some(upgrade::tick(owner, original));
             }
         }
         if !place.category(owner) {
@@ -359,7 +360,10 @@ unsafe fn category(panel: u32) -> u32 {
         else {
             return original!(panel);
         };
-        let owner = cursor - place.cursor();
+        let Some(owner) = cursor.checked_sub(place.cursor()) else { return original!(panel) };
+        if place == Place::Smith && read::<u8>(owner + 4) == 1 {
+            return smith_home::draw(owner, panel, || original!(panel));
+        }
         if !place.category(owner) {
             return original!(panel);
         }
@@ -466,4 +470,5 @@ pub(super) fn install(base: u32) {
     forge::install_hook!(base, category);
     forge::install_hook!(base, category_page);
     native::install(base);
+    upgrade::install(base);
 }

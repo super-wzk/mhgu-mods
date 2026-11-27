@@ -450,7 +450,7 @@ impl Bank {
 }
 
 /// # Safety
-/// The actor must be a live GU hunter with its model initialized.
+/// The actor must be a live GU hunter or monster on the game thread.
 pub unsafe fn parent(actor: u32) -> Option<u32> {
     unsafe {
         let actor = Object::at(actor)?;
@@ -518,6 +518,13 @@ pub unsafe fn weapon_joint_pose(actor: u32, joint: u8) -> Option<[f32; 16]> {
 /// # Safety
 /// The actor must be a live GU hunter on the game thread.
 pub unsafe fn ground_heights(actor: u32, position: [f32; 3]) -> Option<(f32, Option<f32>)> {
+    unsafe { ground_heights_with_tolerance(actor, position, 1.) }
+}
+
+/// Sample a shallow surface within the caller's permitted depth below the local floor.
+/// # Safety
+/// The actor must be a live hunter in the current scene.
+pub unsafe fn ground_heights_with_tolerance(actor: u32, position: [f32; 3], depth: f32) -> Option<(f32, Option<f32>)> {
     unsafe {
         let manager = singleton(0x21270e0)?;
         let actor = Object::at(actor)?;
@@ -554,7 +561,7 @@ pub unsafe fn ground_heights(actor: u32, position: [f32; 3]) -> Option<(f32, Opt
         let surface = f32::from_bits(hit[5]);
         Some((
             floor,
-            (surface > -100000. && surface >= floor - 1.).then_some(surface),
+            (surface > -100000. && surface >= floor - depth).then_some(surface),
         ))
     }
 }

@@ -61,7 +61,7 @@ def damage_target(g, weapon_vtable, *, native_affinity=False):
         0x173944,
         0x8172C,
     ):
-        g.stub(pc, zero)
+        g.stub(g.originals.get(pc, pc), zero)
     if not native_affinity:
         g.stub(g.originals.get(0x17885C, 0x17885C), zero)
     # 178030's two output factors are initialized to 1.0 by the damage dispatcher.

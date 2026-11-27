@@ -18,6 +18,8 @@ pub(super) struct Bindings {
     position: AtomicPtr<remote::PositionState>,
     position_event: AtomicPtr<()>,
     target_event: AtomicPtr<()>,
+    monster_state: AtomicPtr<()>,
+    monster_exchange: AtomicPtr<()>,
 }
 
 impl Bindings {
@@ -28,6 +30,8 @@ impl Bindings {
             position: AtomicPtr::new(ptr::null_mut()),
             position_event: AtomicPtr::new(ptr::null_mut()),
             target_event: AtomicPtr::new(ptr::null_mut()),
+            monster_state: AtomicPtr::new(ptr::null_mut()),
+            monster_exchange: AtomicPtr::new(ptr::null_mut()),
         }
     }
 

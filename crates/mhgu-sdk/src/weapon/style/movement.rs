@@ -1,7 +1,8 @@
 //! GU hunter locomotion, terrain transitions and stamina.
 use crate::{
     combat::collision::hurt::terrain_between,
-    memory::{Field, Object, entry},
+    geometry::Angle,
+    memory::{Field, Object, entry, singleton},
     weapon::style::action,
 };
 
@@ -51,6 +52,48 @@ pub unsafe fn motion_frames(actor: u32) -> f32 {
     }
 }
 
+/// Add a forward displacement in world units before GU settles the hunter's
+/// root motion, ground and wall contact.
+///
+/// # Safety
+/// The actor must be a live local quest hunter in its ground action update.
+pub unsafe fn displace_forward(actor: u32, distance: f32) {
+    unsafe { displace_local(actor, distance, 0.) };
+}
+
+/// Add a vertical displacement in world units during a private action's windup.
+///
+/// # Safety
+/// The actor must be a live local quest hunter in its ground action update.
+pub unsafe fn displace_vertical(actor: u32, distance: f32) {
+    unsafe { displace_local(actor, 0., distance) };
+}
+
+unsafe fn displace_local(actor: u32, forward: f32, vertical: f32) {
+    const VELOCITY: Field<[f32; 3]> = Field::at(4112);
+    unsafe {
+        let hunter = Object::at(actor).unwrap();
+        let frames = hunter.get::<f32>(Field::at(28));
+        if (forward == 0. && vertical == 0.)
+            || !forward.is_finite()
+            || !vertical.is_finite()
+            || !frames.is_finite()
+            || frames <= 0.
+        {
+            return;
+        }
+        let yaw = Angle::from_units(hunter.get(Field::at(4076)));
+        let (sin, cos) = yaw.sin_cos();
+        let speed = forward / frames;
+        let velocity = hunter.get(VELOCITY);
+        // GU 539EFC adds velocity × raw frame delta without consuming velocity.
+        hunter.set(VELOCITY, [sin * speed, vertical / frames, cos * speed]);
+        let integrate: unsafe extern "C" fn(u32) = core::mem::transmute(entry(0x539efc));
+        integrate(actor);
+        hunter.set(VELOCITY, velocity);
+    }
+}
+
 pub struct AirborneStep {
     pub velocity: [f32; 3],
     pub blocked: bool,
@@ -59,12 +102,16 @@ pub struct AirborneStep {
 
 /// Advance GU's velocity integrator, probe for a wall and use GU's floor landing.
 /// Velocity and acceleration are in world units per 60 Hz frame and frame squared.
+/// The extra forward and vertical distances apply after integration. A landing
+/// tolerance enables floor checks while descending and sets their reach.
 /// # Safety
 /// The actor must be a live airborne quest hunter on the game thread.
 pub unsafe fn advance_airborne(
     actor: u32,
     velocity: [f32; 3],
     acceleration: [f32; 3],
+    [forward, vertical]: [f32; 2],
+    landing_tolerance: Option<f32>,
 ) -> AirborneStep {
     const POSITION: Field<[f32; 3]> = Field::at(64);
     const VELOCITY: Field<[f32; 3]> = Field::at(4112);
@@ -74,7 +121,15 @@ pub unsafe fn advance_airborne(
     hunter.set(Field::at(4128), acceleration);
     let integrate: unsafe extern "C" fn(u32) = unsafe { core::mem::transmute(entry(0x539f4c)) };
     unsafe { integrate(actor) };
-    let end = hunter.get(POSITION);
+    let mut end = hunter.get(POSITION);
+    if forward != 0. || vertical != 0. {
+        let yaw = Angle::from_units(hunter.get(Field::at(4076)));
+        let (sin, cos) = yaw.sin_cos();
+        end[0] += sin * forward;
+        end[1] += vertical;
+        end[2] += cos * forward;
+        hunter.set(POSITION, end);
+    }
     let [mut vx, vy, mut vz] = hunter.get(VELOCITY);
     let blocked = (start[0] != end[0] || start[2] != end[2])
         && terrain_between(
@@ -89,7 +144,14 @@ pub unsafe fn advance_airborne(
         vz = 0.;
         hunter.set(VELOCITY, [vx, vy, vz]);
     }
-    let landed = vy < 0. && unsafe { action::land(actor) };
+    let descending = if vertical == 0. {
+        vy < 0.
+    } else {
+        end[1] < start[1]
+    };
+    let landed = descending
+        && landing_tolerance
+            .is_some_and(|tolerance| unsafe { action::land_with_tolerance(actor, tolerance) });
     if landed {
         hunter.set(VELOCITY, [0.; 3]);
         hunter.set(Field::at(4128), [0f32; 3]);
@@ -108,6 +170,67 @@ pub unsafe fn advance_airborne(
 pub unsafe fn stamina(actor: u32, amount: f32, continuous: bool) {
     let offset = if continuous { 0x2a5ce4 } else { 0x2a5ebc };
     unsafe { mhgu_style_stamina(actor, amount.to_bits(), entry(offset) as u32) }
+}
+
+/// Charge a discrete stamina cost, then shorten Dash Juice and the stamina melody.
+/// Both arguments are positive, and the duration is in 60 Hz frames.
+///
+/// # Safety
+/// The actor must be a live local quest hunter on the game thread.
+pub unsafe fn spend_stamina(actor: u32, cost: f32, waiver_frames: f32) {
+    const DASH_JUICE: Field<f32> = Field::at(10500);
+    const MELODY: Field<f32> = Field::at(10768);
+
+    unsafe { stamina(actor, -cost, false) };
+    if waiver_frames <= 0. {
+        return;
+    }
+    let Some(hunter) = (unsafe { Object::at(actor) }) else {
+        return;
+    };
+    let juice = hunter.get(DASH_JUICE);
+    let melody = hunter.get(MELODY);
+    if juice <= 0. && melody <= 0. {
+        return;
+    }
+    let juice_left = (juice - waiver_frames).max(0.);
+    let melody_left = (melody - waiver_frames).max(0.);
+    if juice > 0. {
+        hunter.set(DASH_JUICE, juice_left);
+    }
+    if melody > 0. {
+        hunter.set(MELODY, melody_left);
+        if melody_left == 0. {
+            // GU clears the elapsed melody's level, extension timer and source.
+            hunter.set(Field::at(10721), 0u8);
+            hunter.set(Field::at(10884), 0f32);
+            hunter.set(Field::at(10985), 0u8);
+        }
+    }
+    if juice_left > 0. || melody_left > 0. {
+        return;
+    }
+
+    unsafe {
+        // Match the normal expiry cue in GU's hunter timer update (29DE64).
+        let Some(quest) = singleton(0x188ad90) else {
+            return;
+        };
+        let suppress: unsafe extern "C" fn(u32, u32, u32) -> u32 =
+            core::mem::transmute(entry(0x3a5ed0));
+        if suppress(quest.addr(), 5, 1) != 0 {
+            return;
+        }
+        let vtable = (actor as *const *const usize).read();
+        let alternate: unsafe extern "C" fn(u32) -> u32 =
+            core::mem::transmute(vtable.add(984 / 4).read());
+        let player_kind: unsafe extern "C" fn(u32) -> u32 = core::mem::transmute(entry(0x27b918));
+        if player_kind(actor) != 0 || alternate(actor) == 0 {
+            let cue: unsafe extern "C" fn(u32, u32, u32) =
+                core::mem::transmute(vtable.add(940 / 4).read());
+            cue(actor, 1, 36);
+        }
+    }
 }
 
 /// Check the discrete evade cost after GU's Constitution and food modifiers.
@@ -223,6 +346,31 @@ pub unsafe fn camera_direction() -> Option<[f32; 3]> {
     let view = camera_view()?;
     let length = libm::sqrtf(view.into_iter().map(|x| x * x).sum());
     (length.is_finite() && length > 0.).then(|| view.map(|x| x / length))
+}
+
+/// Project a world point to an offset from the center of GU's 1280×720 HUD.
+///
+/// # Safety
+/// The active quest camera must be accessible on the game thread.
+pub unsafe fn hud_projection(point: [f32; 3]) -> Option<[f32; 2]> {
+    let camera = unsafe { Object::at(singleton(0x2126504)?.get(Field::at(84))) }?;
+    let eye = camera.get::<[f32; 3]>(Field::at(64));
+    let fov = camera.get::<f32>(Field::at(60));
+    let forward = unsafe { camera_direction() }?;
+    let horizontal = libm::hypotf(forward[0], forward[2]);
+    if !(0. ..180.).contains(&fov) || fov == 0. || horizontal < 0.0001 {
+        return None;
+    }
+    let right = [-forward[2] / horizontal, 0., forward[0] / horizontal];
+    let up = [-right[2] * forward[1], horizontal, right[0] * forward[1]];
+    let dot = |axis: [f32; 3]| (0..3).map(|i| (point[i] - eye[i]) * axis[i]).sum::<f32>();
+    let depth = dot(forward);
+    if depth <= 0. {
+        return None;
+    }
+    let focal = 360. / libm::tanf(0.5 * fov.to_radians());
+    let offset = [focal * dot(right) / depth, -focal * dot(up) / depth];
+    offset.into_iter().all(f32::is_finite).then_some(offset)
 }
 
 /// Relative stick direction using the current camera azimuth during a held input.

@@ -113,6 +113,7 @@ mod entry {
         deflection: Some(mhfz_sdk::combat::deflection),
         ground_motion: Some(motion::finish_sheathe),
         camera_offset: Some(mhfz_sdk::camera::offset),
+        ..Rules::EMPTY
     };
 
     static EXTREME: Style = Style {
@@ -157,8 +158,9 @@ mod entry {
             forge::log::prelude::warn!("Style {}: GU rule service unavailable", STYLE_ID);
         }
         mhfz_sdk::effects::model::install();
-        let bound =
-            unsafe { mhgu_sdk::weapon::style::world_contact::bind(STYLE_ID, super::expand_world_contact) };
+        let bound = unsafe {
+            mhgu_sdk::weapon::style::world_contact::bind(STYLE_ID, super::expand_world_contact)
+        };
         super::WORLD_CONTACT.store(bound, super::Relaxed);
         if !bound {
             forge::log::prelude::warn!("Extreme LS: world contact service unavailable");

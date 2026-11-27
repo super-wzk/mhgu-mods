@@ -4,13 +4,17 @@
 extern crate alloc;
 
 mod battle;
+mod bind;
 mod combat;
+mod controls;
 mod flight;
 mod fx;
 mod magnet;
 mod motion;
+mod native_media;
 mod peer;
 mod program;
+mod shock;
 mod sound;
 
 use mhgu_sdk::weapon::{
@@ -39,6 +43,49 @@ static TRIAL_SPIKE: WeaponEquipment = WeaponEquipment {
     sound_request: 0,
 };
 
+const fn trial_level(
+    attack: i16,
+    sharpness_type: u8,
+    sharpness_level: u8,
+    slots: u8,
+) -> EquipmentLevel {
+    EquipmentLevel {
+        attack,
+        sharpness_type,
+        sharpness_level,
+        slots,
+        defense: 0,
+        affinity: 0,
+        element_values: [0; 2],
+    }
+}
+
+// Preserve existing instances at Lv.1. Subsequent rows follow GU w07's
+// raw weapon line 1, levels 5 through 11, including its sharpness and slots.
+static TRIAL_LEVELS: [EquipmentLevel; 8] = [
+    trial_level(100, 10, 0, 0),
+    trial_level(110, 17, 4, 0),
+    trial_level(140, 13, 6, 1),
+    trial_level(170, 16, 8, 1),
+    trial_level(210, 18, 8, 1),
+    trial_level(240, 68, 8, 2),
+    trial_level(290, 15, 10, 2),
+    trial_level(320, 14, 10, 3),
+];
+
+const POTION_RECIPE: Recipe = Recipe {
+    zenny: 0,
+    materials: [
+        Material {
+            item: 9,
+            quantity: 1,
+        },
+        Material::EMPTY,
+        Material::EMPTY,
+        Material::EMPTY,
+    ],
+};
+
 static STYLE: Style = Style {
     id: 16,
     weapon: MAGNET_SPIKE.style_key(),
@@ -55,8 +102,12 @@ static STYLE: Style = Style {
 
 static RULES: rules::Rules = rules::Rules {
     // FZ 81813350 reads w13's 90-degree half-angle at mhfdat[0x65c].
+    ground_motion: Some(motion::finish_sheathe),
     guard_half_angle: 0x4000,
     deflection: Some(mhfz_sdk::combat::deflection),
+    camera_offset: Some(mhfz_sdk::camera::offset),
+    camera_yaw: Some(bind::camera_yaw),
+    camera_lens: Some(bind::camera_lens),
     ..rules::Rules::EMPTY
 };
 
@@ -91,17 +142,9 @@ fn register_weapon() -> Result<(), RegisterError> {
     )?;
     registry.register_equipment(
         &TRIAL_SPIKE,
-        &[EquipmentLevel {
-            attack: 100,
-            defense: 0,
-            affinity: 0,
-            element_values: [0; 2],
-            slots: 0,
-            sharpness_type: 10,
-            sharpness_level: 0,
-        }],
+        &TRIAL_LEVELS,
         c"试制磁斩锤",
-        c"用于验证制造和购买的磁斩锤。",
+        c"使用回复药即可逐级强化，最高 Lv.8。",
         Some(EquipmentModel {
             archive: c"arc\\frontier\\magnet_spike",
             model: c"weapon\\frontier\\magnet_spike\\wk451",
@@ -112,16 +155,20 @@ fn register_weapon() -> Result<(), RegisterError> {
     }
     if !part_motion::bind(STYLE.id, &motion::PARTS)
         || !rules::bind(STYLE.id, &RULES)
+        || !mhgu_sdk::weapon::style::input::bind_filter(STYLE.id, controls::poll)
         || !unsafe { remote::bind_playback(STYLE.id, &peer::PLAYBACK) }
         || !remote::bind_position_state(STYLE.id, &peer::POSITION)
         || !remote::bind_position_events(STYLE.id, magnet::network::receive)
         || !remote::bind_target_events(STYLE.id, magnet::network::receive_target)
         || !fx::bind(STYLE.id)
+        || !shock::bind()
+        || !bind::bind()
         || !hud::bind_meter(STYLE.id, magnet::meter)
+        || !world_contact::bind_attack(STYLE.id, battle::evade_contact)
         || !world_contact::bind_hurt(STYLE.id, magnet::update)
         || !mhgu_sdk::weapon::style::action::melee::bind_strike_contact(
             STYLE.id,
-            magnet::melee_contact,
+            magnet::strike_contact,
         )
         || !manual::bind(STYLE.id, include_str!("manual.txt"))
     {
@@ -129,19 +176,9 @@ fn register_weapon() -> Result<(), RegisterError> {
     }
     mhfz_sdk::effects::model::install();
     trade::register_purchase(TRIAL_SPIKE.id, 100)?;
-    trade::register_recipe(
-        TRIAL_SPIKE.id,
-        Recipe {
-            zenny: 0,
-            materials: [
-                Material {
-                    item: 9,
-                    quantity: 1,
-                },
-                Material::EMPTY,
-                Material::EMPTY,
-                Material::EMPTY,
-            ],
-        },
-    )
+    trade::register_recipe(TRIAL_SPIKE.id, POTION_RECIPE)?;
+    for level in 0..TRIAL_LEVELS.len() - 1 {
+        trade::register_upgrade(TRIAL_SPIKE.id, level as u16, POTION_RECIPE)?;
+    }
+    Ok(())
 }

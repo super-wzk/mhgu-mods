@@ -1,5 +1,8 @@
 //! Optional world-space shape expansion for contacts owned by a registered style.
-use crate::{combat::collision::hurt::HurtScene, service};
+use crate::{
+    combat::collision::{attack::AttackScene, hurt::HurtScene},
+    service,
+};
 
 const NAME: &core::ffi::CStr = c"mhgu::StyleWorldContactV1";
 const MAGIC: u32 = u32::from_le_bytes(*b"SWC1");
@@ -78,5 +81,50 @@ pub unsafe fn publish_hurt(api: &'static HurtService) -> bool {
 pub fn bind_hurt(id: u32, pass: HurtPass) -> bool {
     service::on_game_thread()
         && unsafe { service::find::<HurtService>(HURT_NAME, HURT_MAGIC) }
+            .is_some_and(|api| (api.0)(id, pass))
+}
+
+/// Observe the whole collision pass for any local quest hunter. `active`
+/// reports whether that hunter currently uses the observer's style.
+pub type HurtObserver = extern "C" fn(&HurtScene<'_>, active: bool);
+const OBSERVER_NAME: &core::ffi::CStr = c"mhgu::StyleHurtObserverV1";
+const OBSERVER_MAGIC: u32 = u32::from_le_bytes(*b"SHO1");
+
+#[doc(hidden)]
+#[repr(transparent)]
+pub struct HurtObservers(pub extern "C" fn(u32, HurtObserver) -> bool);
+
+/// # Safety
+/// Called once by the registry during Forge initialization.
+#[doc(hidden)]
+pub unsafe fn publish_hurt_observers(api: &'static HurtObservers) -> bool {
+    unsafe { service::publish(OBSERVER_NAME, OBSERVER_MAGIC, api) }
+}
+
+pub fn observe_hurt(id: u32, observe: HurtObserver) -> bool {
+    service::on_game_thread()
+        && unsafe { service::find::<HurtObservers>(OBSERVER_NAME, OBSERVER_MAGIC) }
+            .is_some_and(|api| (api.0)(id, observe))
+}
+
+/// Observe expanded attacks before GU runs its damage and invulnerability checks.
+pub type AttackPass = extern "C" fn(&AttackScene<'_>);
+const ATTACK_NAME: &core::ffi::CStr = c"mhgu::StyleAttackPassV1";
+const ATTACK_MAGIC: u32 = u32::from_le_bytes(*b"SAP1");
+
+#[doc(hidden)]
+#[repr(C)]
+pub struct AttackService(pub extern "C" fn(u32, AttackPass) -> bool);
+
+/// # Safety
+/// Called once by the registry during Forge initialization.
+#[doc(hidden)]
+pub unsafe fn publish_attack(api: &'static AttackService) -> bool {
+    unsafe { service::publish(ATTACK_NAME, ATTACK_MAGIC, api) }
+}
+
+pub fn bind_attack(id: u32, pass: AttackPass) -> bool {
+    service::on_game_thread()
+        && unsafe { service::find::<AttackService>(ATTACK_NAME, ATTACK_MAGIC) }
             .is_some_and(|api| (api.0)(id, pass))
 }

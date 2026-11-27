@@ -102,20 +102,12 @@ fn has_offers(smith: bool, weapon: u16) -> bool {
         recipes
             .keys()
             .any(|&(equipment, action)| action == kind && matches_weapon(equipment))
-    }) || smith
-        && CHARACTER.with(|character| {
-            RECIPES.with(|recipes| {
-                character.inventory.instances.values().any(|item| {
-                    recipes.contains_key(&(item.equipment, Kind::Upgrade(item.upgrade)))
-                        && matches_weapon(item.equipment)
-                })
-            })
-        })
+    })
 }
 
 fn offers(smith: bool) -> Vec<Offer> {
     let kind = if smith { Kind::Forge } else { Kind::Purchase };
-    let mut available: Vec<_> = RECIPES.with(|recipes| {
+    RECIPES.with(|recipes| {
         recipes
             .iter()
             .filter_map(|(&(equipment, action), &recipe)| {
@@ -131,22 +123,14 @@ fn offers(smith: bool) -> Vec<Offer> {
                 })
             })
             .collect()
-    });
-    if smith {
-        for (instance, _) in inventory::inventory() {
-            let equipment = instance.equipment.get();
-            let kind = Kind::Upgrade(instance.upgrade);
-            if let Some(recipe) = RECIPES.with(|recipes| recipes.get(&(equipment, kind)).copied()) {
-                available.push(Offer {
-                    equipment,
-                    kind,
-                    instance: Some(instance.id),
-                    recipe,
-                });
-            }
-        }
-    }
-    available
+    })
+}
+
+fn upgrade_offer(item: mhgu_sdk::weapon::WeaponInstance) -> Option<Offer> {
+    let equipment = item.equipment.get();
+    let kind = Kind::Upgrade(item.upgrade);
+    let recipe = RECIPES.with(|recipes| recipes.get(&(equipment, kind)).copied())?;
+    Some(Offer { equipment, kind, instance: Some(item.id), recipe })
 }
 
 fn wallet() -> u32 {
@@ -232,9 +216,6 @@ impl Offer {
         })?;
         if self.instance.is_some() {
             inventory::notify_equipped_upgrade(id);
-        }
-        if self.recipe.zenny != 0 || materials(&self.recipe).next().is_some() {
-            crate::save::mark_trade();
         }
         Ok(id)
     }

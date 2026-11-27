@@ -159,6 +159,9 @@ unsafe fn bind(actor: u32, id: u32, origin: u32) {
 #[forge::hook(offset = 0x2ecefc)]
 unsafe fn condition(actor: u32, command: *const Command) -> u32 {
     let command = unsafe { &*command };
+    if unsafe { crate::weapon::style::ground_input::blocked(actor, command.group, command.slot) } {
+        return 0;
+    }
     if command.condition != BUFFERED_INPUT {
         return original!(actor, ptr::from_ref(command));
     }

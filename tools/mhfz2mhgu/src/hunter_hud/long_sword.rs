@@ -93,11 +93,10 @@ impl Sprites<'_> {
             );
             let flag = half(quad, 0)?;
             ensure!(
-                flag & !0x300 == 0 && half(quad, 2)? == 0,
+                flag & !0x700 == 0 && half(quad, 2)? == 0,
                 "unsupported HUD texture flags"
             );
             let angle = value(24);
-            ensure!(matches!(angle, 0 | 16384), "unsupported HUD rotation");
             let ink = u32::from_le_bytes(bytes(quad, 4)?);
             let [b, g, r, a] = ink.to_le_bytes();
             let color = [r, g, b].map(|c| (u16::from(c) * u16::from(tint) / 255) as u8);
@@ -107,11 +106,14 @@ impl Sprites<'_> {
             }
             // The sprite-local origin is its top-left corner. Quarter turns
             // on the reticle and guard rotate about that origin.
-            let (xmin, xmax, ymin, ymax) = if angle == 0 {
-                (0., w, 0., h)
-            } else {
-                (-h, 0., 0., w)
+            let (sin, cos) = match angle {
+                0 => (0., 1.),
+                16384 => (1., 0.),
+                _ => (f32::from(angle) * std::f32::consts::TAU / 65536.).sin_cos(),
             };
+            let (wx, wy, hx, hy) = (w * cos, w * sin, -h * sin, h * cos);
+            let (xmin, xmax) = (wx.min(0.) + hx.min(0.), wx.max(0.) + hx.max(0.));
+            let (ymin, ymax) = (wy.min(0.) + hy.min(0.), wy.max(0.) + hy.max(0.));
             let x = pose.x + dx as f32 * pose.sx;
             let y = pose.y + dy as f32 * pose.sy;
             for py in ((y + ymin * pose.sy).floor().max(0.) as usize)
@@ -124,11 +126,8 @@ impl Sprites<'_> {
                         (px as f32 + 0.5 - x) / pose.sx,
                         (py as f32 + 0.5 - y) / pose.sy,
                     );
-                    let (mut tx, mut ty) = if angle == 0 {
-                        (lx / w, ly / h)
-                    } else {
-                        (ly / w, -lx / h)
-                    };
+                    let mut tx = (lx * cos + ly * sin) / w;
+                    let mut ty = (-lx * sin + ly * cos) / h;
                     if !(0. ..1.).contains(&tx) || !(0. ..1.).contains(&ty) {
                         continue;
                     }
@@ -156,10 +155,10 @@ impl Sprites<'_> {
     }
 
     fn sequence(&self, tile: &mut [u8], seq: usize, frame: usize) -> Result<()> {
-        self.sequence_at(tile,seq,frame,40.,15.)
+        self.sequence_at(tile, seq, frame, 40., 15.)
     }
 
-    fn sequence_at(&self,tile:&mut [u8],seq:usize,frame:usize,x:f32,y:f32)->Result<()> {
+    fn sequence_at(&self, tile: &mut [u8], seq: usize, frame: usize, x: f32, y: f32) -> Result<()> {
         let s = section(self.layout, 2)?;
         let start = half(s, word(s, 8)? + seq * 2)?;
         let nodes = word(s, 16)? + start * 20;
@@ -181,6 +180,10 @@ impl Sprites<'_> {
             let keys = word(s, 12)? + 36 * half(s, n + 8)?;
             let num = half(s, n + 10)?;
             ensure!(num > 0, "empty HUD track");
+            if (0x3e..=0x47).contains(&seq) && (frame < word(s, keys)? || frame > half(s, n + 12)?)
+            {
+                continue;
+            }
             let mut left = keys;
             while left + 36 < keys + 36 * num && word(s, left + 36)? <= frame {
                 left += 36;
@@ -273,25 +276,31 @@ pub fn convert(dat: &Path) -> Result<Vec<u8>> {
 
 // The w12 extreme branch of 8121C0AC draws sequence 55 for slash energy,
 // then 40/42 for the locked/ready light gauge or 41 while the stance is active.
-pub fn switch_axe(dat:&Path)->Result<Vec<u8>>{
-    let data=pac::decode(crate::read(&dat.join("mhf.bin"))?)?;
-    let layout=pac::member(&data,20)?;
-    let sprites=Sprites {layout:&layout,texture:image::decode(&pac::member(&data,4)?)?};
-    let mut atlas=vec![0;W*COLS*ATLAS_H*4];
+pub fn switch_axe(dat: &Path) -> Result<Vec<u8>> {
+    let data = pac::decode(crate::read(&dat.join("mhf.bin"))?)?;
+    let layout = pac::member(&data, 20)?;
+    let sprites = Sprites {
+        layout: &layout,
+        texture: image::decode(&pac::member(&data, 4)?)?,
+    };
+    let mut atlas = vec![0; W * COLS * ATLAS_H * 4];
     // Each gauge has 101 independent percentage samples; the two HUD sprites
     // choose their frames separately, including during an interrupted change.
-    for (group,(seq,end)) in [(55,120),(40,360),(42,360),(41,360)].into_iter().enumerate(){
+    for (group, (seq, end)) in [(55, 120), (40, 360), (42, 360), (41, 360)]
+        .into_iter()
+        .enumerate()
+    {
         for percent in 0..=100 {
-            let mut tile=vec![0;W*H*4];
-            sprites.sequence_at(&mut tile,seq,percent*end/100,2.,3.)?;
-            let index=group*101+percent;
-            for (y,row) in tile.chunks_exact(W*4).enumerate(){
-                let dst=((index/COLS*H+y)*W*COLS+index%COLS*W)*4;
-                atlas[dst..dst+row.len()].copy_from_slice(row);
+            let mut tile = vec![0; W * H * 4];
+            sprites.sequence_at(&mut tile, seq, percent * end / 100, 2., 3.)?;
+            let index = group * 101 + percent;
+            for (y, row) in tile.chunks_exact(W * 4).enumerate() {
+                let dst = ((index / COLS * H + y) * W * COLS + index % COLS * W) * 4;
+                atlas[dst..dst + row.len()].copy_from_slice(row);
             }
         }
     }
-    mhgu_resource::tex::rgba8_unmipped((COLS*W) as u32,ATLAS_H as u32,&atlas)
+    mhgu_resource::tex::rgba8_unmipped((COLS * W) as u32, ATLAS_H as u32, &atlas)
 }
 
 pub fn magnet_spike(dat: &Path) -> Result<Vec<u8>> {
@@ -321,4 +330,144 @@ pub fn magnet_spike(dat: &Path) -> Result<Vec<u8>> {
         }
     }
     mhgu_resource::tex::rgba8_unmipped(ATLAS_W as u32, ATLAS_H as u32, &atlas)
+}
+
+/// W13's base plate, completed cells, proximity indicators and both form icons.
+/// Each frame is sampled from the same group-4 data used by FZ 8122670E.
+pub fn magnet_panel(dat: &Path) -> Result<Vec<u8>> {
+    const COLUMNS: usize = 18;
+    let data = pac::decode(crate::read(&dat.join("mhf.bin"))?)?;
+    let layout = pac::member(&data, 20)?;
+    let sprites = Sprites {
+        layout: &layout,
+        texture: image::decode(&pac::member(&data, 4)?)?,
+    };
+    let mut atlas = vec![0; COLUMNS * W * ATLAS_H * 4];
+    let mut tile = vec![0; W * H * 4];
+    let mut full_cell = [[0u8; 4]; 17 * 10];
+    for index in 0..=548 {
+        tile.fill(0);
+        match index {
+            0..=302 => {
+                let percent = index % 101;
+                sprites.sequence_at(&mut tile, 0x40, (30 * percent + 50) / 100, 0., 0.)?;
+                let signal = index / 101;
+                if signal != 0 {
+                    sprites.paint(
+                        &mut tile,
+                        0xb1,
+                        Some(signal),
+                        Pose {
+                            x: 0.,
+                            y: 0.,
+                            sx: SCALE,
+                            sy: SCALE,
+                            alpha: 1.,
+                        },
+                        255,
+                    )?;
+                }
+                for cell in 0..percent / 20 {
+                    sprites.sequence_at(
+                        &mut tile,
+                        0x45,
+                        0,
+                        (27 + cell * 24) as f32 * SCALE,
+                        15. * SCALE,
+                    )?;
+                }
+                if index == 100 {
+                    for (i, pixel) in full_cell.iter_mut().enumerate() {
+                        let at = ((11 + i / 17) * W + 22 + i % 17) * 4;
+                        pixel.copy_from_slice(&tile[at..at + 4]);
+                    }
+                }
+            }
+            303..=506 => {
+                // Per form: 38 charging/cooldown frames and 13 active frames,
+                // with the inactive form at the source's 0x80 tint.
+                let n = (index - 303) % 51;
+                let slash = (index - 303) / 51 % 2 == 0;
+                let (seq, frame) = if n < 38 {
+                    (if slash { 0x47 } else { 0x46 }, n)
+                } else {
+                    (if slash { 0x3f } else { 0x3e }, n - 38)
+                };
+                sprites.sequence_at(&mut tile, seq, frame, 4., 4.)?;
+                if index >= 405 {
+                    for rgba in tile.chunks_exact_mut(4) {
+                        for channel in &mut rgba[..3] {
+                            *channel = (u16::from(*channel) * 128 / 255) as u8;
+                        }
+                    }
+                }
+            }
+            507 | 547 | 548 => {
+                // 8122652C draws group 4 sprite B6: near, far, unmarked.
+                let part = match index {
+                    547 => 0,
+                    548 => 1,
+                    _ => 2,
+                };
+                sprites.paint(
+                    &mut tile,
+                    0xb6,
+                    Some(part),
+                    Pose {
+                        x: 16.,
+                        y: 16.,
+                        sx: 2. / 3.,
+                        sy: 2. / 3.,
+                        alpha: 1.,
+                    },
+                    255,
+                )?;
+            }
+            508 => sprites.paint(
+                &mut tile,
+                181,
+                None,
+                Pose {
+                    x: 0.,
+                    y: 0.,
+                    sx: SCALE,
+                    sy: SCALE,
+                    alpha: 1.,
+                },
+                255,
+            )?,
+            509..=530 => {
+                let seq = if index < 520 { 0x43 } else { 0x44 };
+                sprites.sequence_at(&mut tile, seq, (index - 509) % 11, 8., 10.)?;
+            }
+            _ => {
+                // FZ 812268E8 scrolls page 2019 across a 21×12 cell.
+                let t = index - 531;
+                let u = (222 * (15 - t) + 165 * t) / 15;
+                for y in 0..(12. * SCALE).round() as usize {
+                    for x in 0..(21. * SCALE).round() as usize {
+                        let src = ((223 + ((y as f32 + 0.5) / SCALE) as usize)
+                            * sprites.texture.width as usize
+                            + u
+                            + ((x as f32 + 0.5) / SCALE) as usize)
+                            * 4;
+                        // The FZ pass uses additive blending (812268FA).
+                        // GU composites this atlas normally. Bake against the lit
+                        // cell; the nearly black neutral texels contribute no ink.
+                        let ink = &sprites.texture.rgba[src..src + 4];
+                        if ink[3] != 0 && ink[..3].iter().any(|&c| c > 1) {
+                            let dst = &mut tile[(y * W + x) * 4..][..4];
+                            dst.copy_from_slice(&full_cell[y * 17 + x]);
+                            composite(dst, ink, [255; 4], 1., true);
+                        }
+                    }
+                }
+            }
+        }
+        for (y, row) in tile.chunks_exact(W * 4).enumerate() {
+            let dst = ((index / COLUMNS * H + y) * COLUMNS * W + index % COLUMNS * W) * 4;
+            atlas[dst..dst + row.len()].copy_from_slice(row);
+        }
+    }
+    mhgu_resource::tex::rgba8_unmipped((COLUMNS * W) as u32, ATLAS_H as u32, &atlas)
 }

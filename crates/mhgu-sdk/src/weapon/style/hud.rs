@@ -7,8 +7,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use crate::memory::entry;
 use core::ffi::CStr;
 
-const METER_SERVICE: &CStr = c"mhgu::WeaponMeterV3";
-const METER_MAGIC: u32 = u32::from_le_bytes(*b"WMH3");
+const METER_SERVICE: &CStr = c"mhgu::WeaponMeter";
+const METER_MAGIC: u32 = u32::from_le_bytes(*b"WMTR");
 
 pub const MAX_METER_SEGMENTS: usize = 8;
 
@@ -22,10 +22,33 @@ pub enum Signal {
 
 /// Optional progress track below the main meter. A zero color hides it.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct MeterTrack {
     pub percent: u8,
     pub color: u32,
+}
+
+/// Static UTF-8 text for the native task HUD.
+pub struct MeterLabel(&'static CStr);
+
+impl MeterLabel {
+    pub const fn new(text: &'static CStr) -> Self {
+        Self(text)
+    }
+
+    #[doc(hidden)]
+    pub fn text(&self) -> &'static CStr {
+        self.0
+    }
+}
+
+/// Optional centered task prompt with up to two progress tracks.
+/// A missing label hides the entire panel. A zero color hides a track.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct MeterPanel {
+    pub label: Option<&'static MeterLabel>,
+    pub tracks: [MeterTrack; 2],
 }
 
 /// Optional atlas frames over the first segment and individual filled segments.
@@ -38,6 +61,19 @@ pub struct MeterOverlay {
     pub refill: [u8; MAX_METER_SEGMENTS],
 }
 
+/// An authored sprite on the quest HUD, relative to sharpness or the screen center.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct MeterSprite {
+    pub atlas: Option<&'static GaugePlate>,
+    pub frame: u16,
+    pub centered: bool,
+    pub offset: [f32; 2],
+    pub scale: [f32; 2],
+}
+
+pub const METER_SPRITES: usize = 12;
+
 /// Snapshot of the active hunter's weapon meter. The HUD clamps charge to
 /// the capacity implied by the number and size of the segments.
 #[repr(C)]
@@ -49,6 +85,8 @@ pub struct Meter {
     pub signal: Signal,
     pub tracks: [MeterTrack; 2],
     pub overlay: MeterOverlay,
+    pub panel: MeterPanel,
+    pub sprites: [MeterSprite; METER_SPRITES],
 }
 
 pub type SampleMeter = extern "C" fn(actor: u32) -> Meter;
@@ -186,7 +224,7 @@ impl GaugePlate {
     /// # Safety
     /// The sprite must be a live GU texture object owned by the meter on the GUI thread.
     #[doc(hidden)]
-    pub unsafe fn paint_meter_sprite(&self, sprite: u32, frame: u8) -> Option<[f32; 2]> {
+    pub unsafe fn paint_meter_sprite(&self, sprite: u32, frame: u16) -> Option<[f32; 2]> {
         if u32::from(frame) >= 32 * self.columns {
             return None;
         }

@@ -1,15 +1,16 @@
-"""Replay the native chat triggers with and without the SDK runtime."""
+"""Replay GU's controller shortcuts with and without the SDK runtime."""
 
 import sys
 from pathlib import Path
 
 PLUGINS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PLUGINS / "great-sword-extreme/tests"))
-from verify_style import CHAT_UPDATE, SHARED_MENU, TOUCH_MENU, boot, hunters
+from verify_style import CHAT_UPDATE, SHARED_MENU, TARGET_CAMERA, TOUCH_MENU, boot, hunters
 
 UI_PRESSED, UI_HELD = 27556, 27548
 PAD_GLOBAL, SETTINGS_GLOBAL = 0x188C670, 0x1897F78
 AUXILIARY = 0x65FA04
+L3, R3, ZL, A = 0x4000000, 0x8000000, 0x200, 0x100
 
 
 def replay(elf, registry_enabled):
@@ -39,6 +40,8 @@ def replay(elf, registry_enabled):
     constant(0x65EB0C, touch)
     constant(0x5CD09C, 1)  # Native chat is currently available.
     constant(0x65CB3C, g.alloc(256))
+    zooms = []
+    stub(0x666970, lambda *_: zooms.append(True) or 1)
     for addr in (0x54F260, 0x55EFE8, 0x56DFAC, 0x65EFC8, 0x5584F4,
                  0x790EFC, 0x62C078, 0x66F868):
         constant(addr, 0)
@@ -80,7 +83,41 @@ def replay(elf, registry_enabled):
     # manual chat request enters through the original menu/touch event.
     check(CHAT_UPDATE, 1, 0, 0, None, 1 | 0x800, 1)
     check(CHAT_UPDATE, 0, 0, 0, 3, 0x800, 1)
-    print(f"registry={registry_enabled}: native chat routes, manual chat and auxiliary input passed")
+    for control in range(4):
+        for stick_camera in (0, 1):
+            g.cpu.mem_write(settings + 17403, bytes([stick_camera]))
+            for buttons in (L3, R3, L3 | R3):
+                zooms.clear()
+                check(CHAT_UPDATE, control, 0, 0, None, buttons, 0)
+                assert bool(zooms) == (bool(buttons & L3) and control != 3 and not stick_camera)
+
+    # Confirm the physical input mapping before replaying the target entry.
+    for physical, game in ((2, L3), (4, R3), (0x400, ZL)):
+        assert g.run(0x3DE4B0, 0, physical) == game
+    if registry_enabled:
+        sampled = []
+        stub(g.originals[TARGET_CAMERA],
+             lambda *_: sampled.append((g.get(pad + UI_PRESSED), g.get(pad + UI_HELD))))
+        for control, swapped, camera_pad, stick_camera, target in (
+            (0, 0, 0, 0, ZL),
+            (0, 1, 0, 0, 0x400),
+            (1, 0, 0, 0, 2),
+            (1, 0, 1, 0, 0x200000),
+            (2, 0, 0, 0, R3),
+            (3, 0, 0, 1, R3),
+            (3, 0, 0, 0, L3),
+        ):
+            g.cpu.mem_write(settings + 17516, bytes([control, 0, swapped, camera_pad]))
+            g.cpu.mem_write(settings + 17403, bytes([stick_camera]))
+            for pressed in (0, L3, R3, target, L3 | R3, target | R3):
+                buttons = pressed | A
+                expected = (buttons & ~target) | (target if pressed & R3 else 0)
+                g.put(pad + UI_PRESSED, buttons)
+                g.put(pad + UI_HELD, buttons)
+                g.run(TARGET_CAMERA, menu)
+                assert sampled[-1] == (expected, buttons), (control, stick_camera, buttons)
+                assert g.get(pad + UI_PRESSED) == buttons
+    print(f"registry={registry_enabled}: chat, map zoom and target input passed")
 
 
 if __name__ == "__main__":

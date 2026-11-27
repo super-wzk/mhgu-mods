@@ -54,7 +54,7 @@ def verify_magnet_effects(resources, ordered):
     pel = resources[key]
     assert pel[:8] == b"PEL\0\x0f\0\0\0"
     group, count = struct.unpack_from("<2I", pel, 8)
-    assert group == 0 and count == 180
+    assert group == 0 and count == 1347
     at = 16
     for i in range(count):
         name = pel[at + 1:at + 1 + pel[at]].decode()
@@ -99,7 +99,9 @@ def verify_payloads(release, *, include_magnet_spike=False):
         refs = material_refs(resources[model, KINDS[".mrl"]])
         assert len(refs) == 2 and all((ref, KINDS[".tex"]) in resources for ref in refs)
         ordered = list(resources)
-        for bank, required in (("blade", {8, 9, 12, 13, 15}), ("common", {74, 241})):
+        for bank, required in (("blade", {8, 9, 12, 13, 15, 18, 19}), ("common", {74, 241}),
+                               ("weapon", {2, 3, 4, 8, 11}),
+                               ("voice_m", {35, 36}), ("voice_f", {35, 36})):
             name = rf"sound\se\pl\frontier_ms\{bank}"
             bank_key, request_key = (name, KINDS[".sbkr"]), (name, KINDS[".srqr"])
             bank_index = ordered.index(bank_key)
@@ -139,8 +141,8 @@ def verify_payloads(release, *, include_magnet_spike=False):
             assert all(8 + 4 * slot_count <= at < len(lmt) - 56 for at in offsets if at)
             if live is not None:
                 assert sum(bool(at) for at in offsets) == live, name
-        for name, frames in ((r"player\mot\frontier_ms\4", 89),
-                             (r"weapon\frontier\magnet_spike\mot\4", 91)):
+        for name, frames in ((r"player\mot\frontier_ms\4", 91),
+                             (r"weapon\frontier\magnet_spike\mot\4", 93)):
             lmt = resources[name, KINDS[".lmt"]]
             clip = struct.unpack_from("<I", lmt, 8 + 4 * 35)[0]
             assert clip and struct.unpack_from("<II", lmt, clip + 8) == (frames, 52)

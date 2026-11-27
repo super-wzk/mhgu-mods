@@ -166,13 +166,21 @@ pub fn long_sword(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
 }
 
 pub fn magnet_spike(dat: &Path) -> Result<(Vec<Asset>, Vec<u8>)> {
-    let (timeline, [blade, common, _]) = gs::timeline(dat, 13)?;
+    let (timeline, [blade, common, model]) = gs::timeline(dat, 13)?;
+    // 81845A28 maps the trial mesh 6451 through mhfdat+724 to sound model 6416.
+    let archive = std::fs::read(dat.join("extend/wk000snd.abn"))?;
+    let file = mhf_resource::pac::mha_member(&archive, "wk416.snd")?;
+    let effects = Bank::player_bytes(file, model.iter().copied().filter(|&cue| cue < 32))?;
+    let voice = |name: &str| Bank::model_voice(&dat.join("sound").join(name), file,
+        model.iter().copied().filter(|&cue| cue >= 32));
     let mut assets = Vec::new();
-    for (name, file, cues) in [
-        ("blade", "we13.snd", blade),
-        ("common", "common01.snd", common),
+    for (name, bank) in [
+        ("blade", Bank::player(&dat.join("sound/we13.snd"), blade)?),
+        ("common", Bank::player(&dat.join("sound/common01.snd"), common)?),
+        ("weapon", effects),
+        ("voice_m", voice("vom00.snd")?),
+        ("voice_f", voice("vof00.snd")?),
     ] {
-        let bank = Bank::player(&dat.join("sound").join(file), cues)?;
         let path = format!(r"sound\se\pl\frontier_ms\{name}");
         assets.extend(bank_assets(
             &bank,

@@ -1,6 +1,6 @@
 //! GU blade contacts and the style registry's deflection service.
 use crate::{
-    combat::collision::HitShape,
+    combat::collision::{HitShape, hurt::MonsterSpawn},
     memory::{Field, Object},
     service,
 };
@@ -35,6 +35,16 @@ impl StrikePower {
     }
 }
 
+/// Optional reaction requested during GU's monster damage settlement.
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum MonsterReaction {
+    #[default]
+    Native,
+    /// Topple a living ground monster when its stronger native reactions permit.
+    Topple,
+}
+
 /// A melee strike authored for an independent weapon.
 #[repr(C)]
 pub struct Strike {
@@ -46,6 +56,7 @@ pub struct Strike {
     pub hitstop: u8,
     /// Let the registered style's deflection rule classify the first contact.
     pub deflectable: bool,
+    pub reaction: MonsterReaction,
 }
 
 impl Strike {
@@ -56,21 +67,67 @@ impl Strike {
             && unsafe { service::find::<StrikeService>(STRIKE, STRIKE_MAGIC) }
                 .is_some_and(|api| unsafe { (api.submit)(actor, self, shape.as_raw()) != 0 })
     }
+
+    /// Basic GU HDP row shared by the blade and independent world constructors.
+    #[doc(hidden)]
+    pub fn hdp(&self) -> [u32; 14] {
+        let mut row = [0; 14];
+        row[0] = 1 << 16;
+        row[1] = u32::from(self.power.adjusted(1.));
+        row[2] = 1 | (30 << 16);
+        row[3] = self.damage as u32;
+        row[4] = 2;
+        row[8] = (255 << 24) | (u32::from(self.stun.min(127)) << 16);
+        row[9] = 255 | (u32::from(self.hitstop) << 8);
+        row[10] = 1f32.to_bits();
+        row[11] = 1f32.to_bits();
+        row[12] = row[1];
+        row
+    }
 }
 
-const STRIKE: &core::ffi::CStr = c"mhgu::IndependentMeleeV5";
-const STRIKE_MAGIC: u32 = u32::from_le_bytes(*b"IML5");
+const STRIKE: &core::ffi::CStr = c"mhgu::IndependentMelee";
+const STRIKE_MAGIC: u32 = u32::from_le_bytes(*b"IMEL");
 
 /// Called for a local registered strike during native monster damage calculation.
 /// `power` contains the authored motion power and its per-strike bonus.
 /// `affinity` is GU's resolved damage multiplier (1.0 for a noncritical hit).
-pub type StrikeContact = extern "C" fn(actor: u32, power: StrikePower, affinity: f32);
+/// `target` identifies a living monster in this hunter's area when available.
+pub type StrikeContact =
+    extern "C" fn(actor: u32, power: StrikePower, affinity: f32, target: Option<&MonsterSpawn>);
+
+/// Authored contact with a restrained monster during its caster's finisher.
+#[repr(C)]
+pub enum RestrainedContact {
+    Reject,
+    AnyPart,
+    Row(u8),
+}
+
+/// Observe both local and peer contacts on this monster's simulation owner.
+/// The style must belong to the attacker. The local hunter may use any weapon.
+#[repr(C)]
+pub struct MonsterStrikes {
+    pub restrained_contact: extern "C" fn(u32, &MonsterSpawn) -> RestrainedContact,
+    /// Called when GU initializes the local quest hunter, before combat.
+    pub begin_hunt: extern "C" fn(),
+    /// Called in native damage calculation for a living, locally owned monster.
+    pub contact: extern "C" fn(actor: u32, target: &MonsterSpawn, power: StrikePower, affinity: f32),
+}
+
+/// Look up a live world contact in the style's own stable contact storage.
+/// The contact address is an identity. Copy its authored power to `power`
+/// only if the contact belongs to this hunter and is still active.
+pub type WorldStrikePower =
+    extern "C" fn(actor: u32, contact: u32, power: &mut StrikePower) -> bool;
 
 #[doc(hidden)]
 #[repr(C)]
 pub struct StrikeService {
     pub submit: unsafe extern "C" fn(u32, *const Strike, u32) -> u32,
     pub bind: extern "C" fn(u32, StrikeContact) -> bool,
+    pub bind_world: extern "C" fn(u32, WorldStrikePower) -> bool,
+    pub bind_monster: extern "C" fn(u32, &'static MonsterStrikes) -> bool,
 }
 
 /// Observe monster contacts from this style's independent strikes.
@@ -78,6 +135,20 @@ pub fn bind_strike_contact(id: u32, callback: StrikeContact) -> bool {
     service::on_game_thread()
         && unsafe { service::find::<StrikeService>(STRIKE, STRIKE_MAGIC) }
             .is_some_and(|api| (api.bind)(id, callback))
+}
+
+/// Observe an independently registered weapon's hits on GU-owned monsters.
+pub fn bind_monster_strikes(id: u32, observer: &'static MonsterStrikes) -> bool {
+    service::on_game_thread()
+        && unsafe { service::find::<StrikeService>(STRIKE, STRIKE_MAGIC) }
+            .is_some_and(|api| (api.bind_monster)(id, observer))
+}
+
+/// Include independently timed world hits in this style's local strike notifications.
+pub fn bind_world_strike_power(id: u32, lookup: WorldStrikePower) -> bool {
+    service::on_game_thread()
+        && unsafe { service::find::<StrikeService>(STRIKE, STRIKE_MAGIC) }
+            .is_some_and(|api| (api.bind_world)(id, lookup))
 }
 
 /// # Safety

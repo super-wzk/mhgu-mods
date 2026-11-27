@@ -12,10 +12,10 @@ mod stats;
 pub(super) mod style;
 mod trade;
 
-unsafe fn read<T: Copy>(p: u32, offset: u32) -> T {
+pub(super) unsafe fn read<T: Copy>(p: u32, offset: u32) -> T {
     unsafe { ((p + offset) as *const T).read_unaligned() }
 }
-unsafe fn set<T>(p: u32, offset: u32, value: T) {
+pub(super) unsafe fn set<T>(p: u32, offset: u32, value: T) {
     unsafe { ((p + offset) as *mut T).write_unaligned(value) }
 }
 // The GU calls below take ARM words and use the normal game calling convention.
@@ -28,7 +28,7 @@ macro_rules! gu {
     (@word $arg:expr) => {u32};
 }
 
-use gu;
+pub(super) use gu;
 
 unsafe fn local_hunter() -> u32 {
     unsafe { mhgu_sdk::weapon::style::hunter::local() }.unwrap_or(0)

@@ -3,8 +3,8 @@
 use crate::service;
 use core::ffi::CStr;
 
-const NAME: &CStr = c"mhgu::WeaponPartMotionV1";
-const MAGIC: u32 = u32::from_le_bytes(*b"WPM1");
+const NAME: &CStr = c"mhgu::WeaponPartMotion";
+const MAGIC: u32 = u32::from_le_bytes(*b"WPMT");
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -30,14 +30,42 @@ impl Clip {
     };
 }
 
+/// Local transform of the primary weapon relative to a hunter joint.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Socket {
+    pub joint: u32,
+    pub offset: [f32; 3],
+    pub rotation: [f32; 4],
+    pub scale: f32,
+    /// Whether the part clip inherits the hunter's incoming motion blend.
+    pub blend_motion: bool,
+}
+
 pub struct Motions {
+    /// Select the parent for the displayed part frame and the hunter blend
+    /// remaining. Adjacent keys attached to different joints cannot be
+    /// interpolated in local space.
+    pub socket: Option<extern "C" fn(Pose, f32, f32) -> Socket>,
     pub banks: &'static [&'static CStr],
     pub select: extern "C" fn(Pose) -> Clip,
 }
 
 #[doc(hidden)]
 #[repr(C)]
-pub struct Service(pub unsafe extern "C" fn(u32, *const Motions) -> bool);
+pub struct Service(
+    pub unsafe extern "C" fn(u32, *const Motions) -> bool,
+    pub unsafe extern "C" fn(u32, u16, f32),
+);
+
+/// Restart the linked part and hold the incoming hunter pose during a Frontier blend.
+/// # Safety
+/// Call just after starting `packed` on a live game-thread hunter.
+pub unsafe fn begin_motion(actor: u32, packed: u16, blend: f32) {
+    if let Some(api) = unsafe { service::find::<Service>(NAME, MAGIC) } {
+        unsafe { (api.1)(actor, packed, blend) };
+    }
+}
 
 /// # Safety
 /// Publish once from the registry during Forge initialization.

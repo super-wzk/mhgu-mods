@@ -1,8 +1,11 @@
 //! Bind style handlers for contacts with non-bone-relative shapes.
 use core::sync::atomic::Ordering;
 use mhgu_sdk::{
-    combat::collision::hurt::HurtScene,
-    weapon::style::world_contact::{self, Expand, HurtPass},
+    combat::collision::{attack::AttackScene, hurt::HurtScene},
+    weapon::style::{
+        hunter,
+        world_contact::{self, AttackPass, Expand, HurtObserver, HurtPass},
+    },
 };
 
 static SERVICE: world_contact::Service = world_contact::Service(bind);
@@ -53,11 +56,31 @@ extern "C" fn bind_hurt(id: u32, pass: HurtPass) -> bool {
     true
 }
 
+extern "C" fn observe_hurt(id: u32, observe: HurtObserver) -> bool {
+    let Some(entry) = super::registered_entry(id) else {
+        return false;
+    };
+    entry
+        .hurt_observer
+        .store(observe as *mut (), Ordering::Release);
+    true
+}
+
+extern "C" fn bind_attack(id: u32, pass: AttackPass) -> bool {
+    let Some(entry) = super::registered_entry(id) else {
+        return false;
+    };
+    entry.attack_pass.store(pass as *mut (), Ordering::Release);
+    true
+}
+
 #[forge::hook(offset = 0x16abac)]
 unsafe fn collision_pass(manager: u32) -> u32 {
-    let mut has_hurt_pass = false;
+    let mut observes_contacts = false;
     for entry in crate::weapon::style::registered_entries() {
-        has_hurt_pass |= !entry.hurt_pass.load(Ordering::Acquire).is_null();
+        observes_contacts |= !entry.attack_pass.load(Ordering::Acquire).is_null()
+            || !entry.hurt_pass.load(Ordering::Acquire).is_null()
+            || !entry.hurt_observer.load(Ordering::Acquire).is_null();
         let callback = entry.collision_pass.load(Ordering::Acquire);
         if !callback.is_null() {
             let pass: world_contact::CollisionPass = unsafe { core::mem::transmute(callback) };
@@ -65,17 +88,39 @@ unsafe fn collision_pass(manager: u32) -> u32 {
         }
     }
     let result = original!(manager);
-    if !has_hurt_pass {
+    if !observes_contacts {
         return result;
     }
     let owner = unsafe { crate::weapon::local_hunter() };
-    if let Some(entry) = unsafe { crate::weapon::style::local_entry(owner) } {
-        let callback = entry.hurt_pass.load(Ordering::Acquire);
+    if owner == 0 || !unsafe { hunter::is_quest(owner) } {
+        return result;
+    }
+    let active = unsafe { crate::weapon::style::local_entry(owner) };
+    let Some(hurt_scene) = (unsafe { HurtScene::from_raw(owner) }) else {
+        return result;
+    };
+    if let Some(entry) = active {
+        let callback = entry.attack_pass.load(Ordering::Acquire);
         if !callback.is_null()
-            && let Some(scene) = unsafe { HurtScene::from_raw(owner) }
+            && let Some(scene) = unsafe { AttackScene::from_raw(manager, owner) }
         {
-            let pass: HurtPass = unsafe { core::mem::transmute(callback) };
+            let pass: AttackPass = unsafe { core::mem::transmute(callback) };
             pass(&scene);
+        }
+        let callback = entry.hurt_pass.load(Ordering::Acquire);
+        if !callback.is_null() {
+            let pass: HurtPass = unsafe { core::mem::transmute(callback) };
+            pass(&hurt_scene);
+        }
+    }
+    for entry in crate::weapon::style::registered_entries() {
+        let callback = entry.hurt_observer.load(Ordering::Acquire);
+        if !callback.is_null() {
+            let observe: HurtObserver = unsafe { core::mem::transmute(callback) };
+            observe(
+                &hurt_scene,
+                active.is_some_and(|active| core::ptr::eq(active, entry)),
+            );
         }
     }
     result
@@ -84,9 +129,13 @@ unsafe fn collision_pass(manager: u32) -> u32 {
 pub(super) fn install(base: u32) {
     static PASS: world_contact::PassService = world_contact::PassService(bind_pass);
     static HURT: world_contact::HurtService = world_contact::HurtService(bind_hurt);
+    static OBSERVERS: world_contact::HurtObservers = world_contact::HurtObservers(observe_hurt);
+    static ATTACK: world_contact::AttackService = world_contact::AttackService(bind_attack);
     if unsafe { world_contact::publish_pass(&PASS) } {
         forge::install_hook!(base, collision_pass);
         unsafe { world_contact::publish_hurt(&HURT) };
+        unsafe { world_contact::publish_hurt_observers(&OBSERVERS) };
+        unsafe { world_contact::publish_attack(&ATTACK) };
     }
     unsafe { world_contact::publish(&SERVICE) };
 }

@@ -340,6 +340,11 @@ fn main() -> Result<()> {
                 kind: mhgu_resource::arc::TEXTURE,
                 data: hunter_hud::magnet_spike(&dat)?,
             });
+            assets.push(mhgu_resource::arc::Asset {
+                name: r"GUI\frontier_magnet_spike\panel".into(),
+                kind: mhgu_resource::arc::TEXTURE,
+                data: hunter_hud::magnet_panel(&dat)?,
+            });
             if let Some(gu_weapon) = gu_weapon {
                 assets.extend(hunter_fx::magnet_spike(&dat, &output.join("effects"), &gu_weapon)?);
             }

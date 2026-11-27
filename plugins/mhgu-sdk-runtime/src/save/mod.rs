@@ -132,25 +132,24 @@ pub(crate) static CHARACTER: mhgu_sdk::sync::Shared<CharacterData> =
 struct Save {
     version: u32,
     slot: u8,
-    generation: u32,
     data: CharacterData,
 }
 
 impl Save {
-    fn decode(bytes: &[u8], slot: u8, parity: u32) -> Option<Self> {
+    fn decode(bytes: &[u8], slot: u8) -> Option<Self> {
         let file: Self = serde_json::from_slice(bytes).ok()?;
-        (file.generation % 2 == parity && file.valid(slot)).then_some(file)
+        file.valid(slot).then_some(file)
     }
 
     fn valid(&self, slot: u8) -> bool {
-        self.version == VERSION && self.slot == slot && self.generation != 0 && self.data.valid()
+        self.version == VERSION && self.slot == slot && self.data.valid()
     }
 }
 
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 mod native;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
-pub(super) use native::{character_loaded, install, mark_trade};
+pub(super) use native::{character_loaded, install};
 
 #[cfg(test)]
 mod tests {
@@ -161,7 +160,6 @@ mod tests {
         let mut save = Save {
             version: VERSION,
             slot: 1,
-            generation: 3,
             data: CharacterData::default(),
         };
         save.data.weapons[0] = custom_id(10);
@@ -189,15 +187,14 @@ mod tests {
             },
         );
         let bytes = serde_json::to_vec(&save).unwrap();
-        assert_eq!(Save::decode(&bytes, 1, 1).unwrap().data, save.data);
-        assert!(Save::decode(&bytes[..bytes.len() - 1], 1, 1).is_none());
-        assert!(Save::decode(&bytes, 0, 1).is_none());
-        assert!(Save::decode(&bytes, 1, 0).is_none());
+        assert_eq!(Save::decode(&bytes, 1).unwrap().data, save.data);
+        assert!(Save::decode(&bytes[..bytes.len() - 1], 1).is_none());
+        assert!(Save::decode(&bytes, 0).is_none());
         save.data.inventory.equipped = Some(2);
-        assert!(Save::decode(&serde_json::to_vec(&save).unwrap(), 1, 1).is_none());
+        assert!(Save::decode(&serde_json::to_vec(&save).unwrap(), 1).is_none());
         save.data.inventory.equipped = Some(1);
         save.data.weapons[0] = Some(6);
-        assert!(Save::decode(&serde_json::to_vec(&save).unwrap(), 1, 1).is_none());
+        assert!(Save::decode(&serde_json::to_vec(&save).unwrap(), 1).is_none());
         assert_eq!(custom_id(65536), None);
     }
 }

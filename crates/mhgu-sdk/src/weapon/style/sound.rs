@@ -68,3 +68,32 @@ pub unsafe fn random_u32() -> u32 {
         unsafe { core::mem::transmute(crate::memory::entry(0x27c8f8)) };
     unsafe { draw() }
 }
+
+
+/// GU SND commands 0x67 (surface) and 0x68 (equipment), dispatched with the
+/// hunter's live floor material, equipped armour sound type, and area filters.
+#[derive(Clone, Copy)]
+pub enum ContactSound {
+    Footstep(u8),
+    Armour,
+    WaistArmour,
+}
+
+/// # Safety
+/// The hunter must be a live game-thread actor.
+pub unsafe fn contact(actor: u32, sound: ContactSound) {
+    let (group, variant) = match sound {
+        ContactSound::Footstep(cue) => (9, u32::from(cue)),
+        ContactSound::Armour => (5, 0),
+        // 4F0BE8 type 5 selector 2 reads the waist sound at hunter+9364.
+        ContactSound::WaistArmour => (5, 2),
+    };
+    unsafe {
+        let engine = (crate::memory::entry(0x1896f5c) as *const u32).read();
+        if engine != 0 {
+            let play: unsafe extern "C" fn(u32, u32, u32, u32, u32, u32, u32) =
+                core::mem::transmute(crate::memory::entry(0x4f0be8));
+            play(engine, actor, 0, 0, 0, group, variant);
+        }
+    }
+}

@@ -40,7 +40,7 @@
 - 固定的输入窗口优先用 `Style::commands` 绑定到 GU 命令表，分别声明接收起点、可执行帧和停止接收帧。GU 正等待 `X+A` 时，`WeaponAfterCombo` 可暂缓单键，`AttackChord` 可接收 GU 的肩键加 `X+A` 组合。发现原版命令抢占时，查清表号及冲突的目标槽，只调整冲突行并保留需透传的地形或狩技行。动态派生由风格选定后交给 GU，一个输入由对应的命令表或风格分支消费一次。见[命令表接口](../crates/mhgu-sdk/src/weapon/style/action/command.rs)。
 - 扩展武器在本地角色装备记录上生效时，GU `282DA8` 派发其注册风格，`2E9B7C` 的绑定钩子过滤回退武器的专属行，`2AB670` 的切招钩子只放行已注册的私有动作及 GU 公共动作和狩技。用 [扩展武器控制回放](../plugins/great-sword-extreme/tests/verify_menu.py) 核对输入派发、命令表和斗技场固定配装。
 - 转向通过 GU 的方向判定和 `movement::set_facing`、`movement::turn` 更新当前与目标朝向。需要长按摇杆时按实时相机方向取角度，可以像斩斧一样使用 `live_relative_stick_yaw`，沿用 GU 的死区和按住锁，只修正相机方位。若派生有输入缓冲，按该招的源规则保存方向或到执行帧再取方向。见[移动接口](../crates/mhgu-sdk/src/weapon/style/movement.rs)。
-- 公共移动、收刀、落地、受击、骑乘和狩技继续走 GU。`art_slots` 配置装备页槽位数，允许出招的窗口提交 `Transition::HUNTER_ART`。武器专属狩技要从本武器原版派发表确认起手、后续动作、槽更新和收尾。通过 `guard::Policy` 交付防御结果，使用 `guard::take` 取得已发生的格挡。风格通过 `StyleRulesV1` 声明格挡半角及其他可选规则。注册器处理 GU 来袭角、防御强化与伤害结算，具体防御窗口、接招和资源收益由风格决定。见[防御接入](../plugins/mhgu-sdk-runtime/src/weapon/style/guard.rs)。
+- 公共移动、收刀、落地、受击、骑乘和狩技继续走 GU。`art_slots` 配置装备页槽位数，允许出招的窗口提交 `Transition::HUNTER_ART`。武器专属狩技要从本武器原版派发表确认起手、后续动作、槽更新和收尾。通过 `guard::Policy` 交付防御结果，使用 `guard::take` 取得已发生的格挡。风格通过 `StyleRulesV2` 声明格挡半角及其他可选规则。注册器处理 GU 来袭角、防御强化与伤害结算，具体防御窗口、接招和资源收益由风格决定。见[防御接入](../plugins/mhgu-sdk-runtime/src/weapon/style/guard.rs)。
 
 共享派发在读取任务专用字段前先确认角色类型。注册风格后从 `lib.rs` 用 `remote::bind_playback` 登记常驻的 `Playback`。`tick` 回放 GU 接受的私有动作，`observe` 可在公共动作期间推进或清理队友状态，`action_state` 可为原生 `netPlAction` 提供额外状态的编码和解码。注册器检查武器是否有可用位，并按当前 GU 名册、任务猎人类型和远端装备武器定位回放。离场、换武器或复用名册槽时回收该槽的旧状态。见[远端接口](../crates/mhgu-sdk/src/weapon/style/remote.rs)和[收发与派发入口](../plugins/mhgu-sdk-runtime/src/weapon/style/multiplayer.rs)。
 
@@ -53,7 +53,7 @@
 | 独立弹波或光波 | 按原版生成帧对齐特效和独立判定。两者采用同一位置及朝向，分清扫过挂点的判定、取样后固定在世界坐标的判定，以及每波的命中编号和斩味处理。 |
 | 粒子 | 转换到 GU 原生 EFL/PEL 及配套 MOD/MRL/TEX。统一使用 `effect/frontier_<tag>/` 下的模型路径，`tag` 使用小写字母和数字，共用渲染器自动匹配该目录。FZ 粒子模型的局部旋转按 X、Y、Z 依次应用。以世界坐标发射时，使用 `world_pose_angles` 将取样姿势分解为 GU 发射器的旋转角。随刀移动和旋转的挂点效果在 PEL 中启用关节旋转，左右手使用各自的关节和局部角。风格在动作退出、收刀、换区或远端槽回收时停止仍由该动作负责的持续效果。注册器统一转接 GU 绘制及释放回调。 |
 | 音效 | 挥刀随当前动作时间线触发，蓄力、格挡等事件按动作程序触发。命中和弹刀用 GU 的碰撞结果播公共音效。逐个核对发射方向、阶段及同时和逐发模式的请求次数。沿成品 SRQR、SBKR 解码 ADPCM 验证有效信号，并检查循环重复触发和动作打断后的清理。 |
-| HUD | 原版狩技继续使用 GU 的槽位和结算。扩展武器可用 [`hud::bind_meter`](../crates/mhgu-sdk/src/weapon/style/hud.rs) 为 GU 任务 HUD 提供分段槽和距离提示。复用武器专用 HUD 时，新资源放在独立路径，从当前猎人的风格状态取得进度。可参考[双剑 HUD](../plugins/dual-blades-extreme/src/hud.rs)的火焰槽与刃打层数。 |
+| HUD | 原版狩技继续使用 GU 的槽位和结算。扩展武器可用 [`hud::bind_meter`](../crates/mhgu-sdk/src/weapon/style/hud.rs) 为 GU 任务 HUD 提供分段槽和距离提示。原作有专属图稿时，使用 `MeterSprite` 提供图集帧、锚点和缩放。复用武器专用 HUD 时，新资源放在独立路径，从当前猎人的风格状态取得进度。可参考[双剑 HUD](../plugins/dual-blades-extreme/src/hud.rs)的火焰槽与刃打层数。 |
 
 在注册后通过 `style::preload::bind` 登记预加载回调。GU `29B7D4` 完成任务猎人初始化后，注册器为本地当前风格调用回调。各极型武器可用 `MotionBanks::preload_for_hunt` 预加载男女模型共用的移动、地形和攻击动作库，首次播放时再绑定 GU 的运行时槽。各插件按需在同一回调准备音库、粒子、私有 HTS 和 HUD。私有 HTS 可使用 `CachedHitShape` 持有缓存引用，攻击时取得独立引用，未预加载时仍可按路径加载。见[预加载接口](../crates/mhgu-sdk/src/weapon/style/preload.rs)和[形状缓存](../crates/mhgu-sdk/src/combat/collision/shapes.rs)。
 

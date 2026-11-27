@@ -1,5 +1,6 @@
 """Buy and forge the actual packaged Magnet Spike through the GU facility hooks."""
 
+import hashlib
 import json
 import struct
 import sys
@@ -11,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parents[1]
 sys.path.insert(0, str(REPO / "plugins/great-sword-extreme/tests"))
 from verify_style import MANAGER, PROVIDER, SAVE, api_for, boot, character_save, select_character
-from verify_trade import A, Facility, setup_items
+from verify_trade import A, B, DOWN, LEFT, Facility, setup_items, verify_save
 
 PLUGIN = ROOT / "dist/magnet-spike/romfs/nativeNX/plugins/magnet_spike.nro"
 ICON = 255
@@ -51,22 +52,42 @@ def verify_manual(g):
     g.put(pressed, 0x2000)
     g.run(g.hooks[0x5CB780], panel)
     assert len(guide) == 1 and guide[0].startswith("极之型磁斩锤")
-    assert "沿镜头方向发射磁力弹" in guide[0]
-    assert "突进追向距离合适的标记" in guide[0] and "派生空中攻击或回避" in guide[0]
-    assert "面向近距离标记反弹后撤" in guide[0]
+    for move in ("磁界瞄准", "磁界弹", "磁界接近", "磁界脱离", "垂直下落斩",
+                 "垂直下落挥击", "紧急着地"):
+        assert move in guide[0], move
     g.stub(0x56E808, lambda _, group, part, body: guide.append(g.string(body)))
     g.put(pressed, 0x20)
     g.run(g.hooks[0x5CB780], panel)
-    assert len(guide) == 2 and "以打击形态拔刀并精准格挡" in guide[1]
-    assert "斩击格挡反击" in guide[1] and "接格挡突击" in guide[1]
+    assert len(guide) == 2 and "以打击形态拔刀并精准防御" in guide[1]
+    for move in ("防御反击", "防御强袭", "磁力二连斩", "磁力二连挥击", "后撤斩", "磁冲击", "磁力强袭"):
+        assert move in guide[1], move
+    rows = guide[1].splitlines()
+    assert any("<ICON PAD_A>" in row and "向右使出磁力回避" in row for row in rows)
+    assert any("<ICON PAD_Y>" in row and "向左使出磁力回避" in row for row in rows)
+    assert any("<ICON PAD_X>" in row and "<ICON PAD_A>" in row
+               and "回避成功时武器闪光并强化，产生追加打击" in row for row in rows)
     g.run(g.hooks[0x5CB780], panel)
     assert len(guide) == 3 and "显示剩余磁力" in guide[2]
+    assert "缩短强走药与强走旋律的剩余时间" in guide[2]
     assert "会心和蓄力技能影响单次回充量" in guide[2]
-    assert "标记在磁力反弹的距离内" in guide[2] and "标记在磁力突进的距离内" in guide[2]
+    assert "标记在磁界脱离的距离内" in guide[2] and "标记在磁界接近的距离内" in guide[2]
     assert "首次接触硬部位时按当前形态弹刀" in guide[2]
+    assert "右摇杆（R3）" in guide[2] and "切换原版锁定目标" in guide[2]
     g.run(g.hooks[0x5CB780], panel)
     assert len(guide) == 4 and "左侧是斩击磁气，右侧是打击磁气" in guide[3]
     assert "当前形态动作值提高 10%" in guide[3]
+    g.run(g.hooks[0x5CB780], panel)
+    assert len(guide) == 5 and "消耗一格磁力，派生空中起手" in guide[4]
+    assert "<ICON PAD_X>" in guide[4] and "<ICON PAD_A>" in guide[4]
+    assert "可麻痹的怪物" in guide[4] and "每次磁缚都需积蓄1800" in guide[4]
+    assert "碰到可束缚的怪物时触发磁缚" in guide[4]
+    assert "游标随束缚计时移动，达标后变色" in guide[4]
+    assert "延长束缚，积累终结资格" in guide[4] and "使出磁缚终结" in guide[4]
+    assert "使自己束缚的地面目标倒下" in guide[4]
+    g.run(g.hooks[0x5CB780], panel)
+    assert len(guide) == 6 and all(word in guide[5] for word in ("拔刀冲刺", "强化砸击", "落地", "受身"))
+    g.run(g.hooks[0x5CB780], panel)
+    assert len(guide) == 7 and "回复药×1" in guide[6] and "Lv.8" in guide[6]
     g.stub(0x64C600, lambda *_: 0)
     g.put(pressed, 0x4000)
     g.run(g.hooks[0x5CB780], panel)
@@ -85,7 +106,13 @@ def verify(sdk_last):
     api = api_for(g, b"mhgu::WeaponRegistryV7", b"WPN7")
     base, level, model = (g.get(api + at) for at in (24, 28, 32))
     assert g.half(g.run(base, 0x1001) + 2) == 16
-    assert g.half(g.run(level, 0x1001, 0)) == 100 and not g.run(level, 0x1001, 1)
+    progression = [(100, 0, 10, 0), (110, 0, 17, 4), (140, 1, 13, 6), (170, 1, 16, 8),
+                   (210, 1, 18, 8), (240, 2, 68, 8), (290, 2, 15, 10), (320, 3, 14, 10)]
+    for i, (attack, slots, curve, sharpness) in enumerate(progression):
+        record = g.run(level, 0x1001, i)
+        assert struct.unpack("<3hBb3Bx", g.cpu.mem_read(record, 12)) == (
+            attack, 0, 0, 0, 0, slots, curve, sharpness)
+    assert not g.run(level, 0x1001, len(progression))
     assert g.string(g.run(model, 0x1001, 1)) == r"arc\frontier\magnet_spike"
     assert g.string(g.run(model, 0x1001, 0)) == r"weapon\frontier\magnet_spike\wk451"
     rarity_color = 0xffaabbcc
@@ -150,7 +177,7 @@ def verify(sdk_last):
     smith.press()
     assert g.get(smith_viewer + 88) == 1
     assert set(preview_calls) == {0x6ED600, 0x6FC2C8}
-    assert NAME in smith.rows[0] and g.get(smith.header+24)==0
+    assert smith.rows == {0: NAME} and g.get(smith.header+24)==0
     assert g.get(smith.header + 16) == rarity_color and g.half(smith.header + 20) == ICON
     smith.press(A)
     assert g.string(g.get(smith.owner+11828))=="回复药"
@@ -166,6 +193,70 @@ def verify(sdk_last):
     for ident in (1, 2):
         assert g.run(instance, ident, out)
         assert bytes(g.cpu.mem_read(out, 8)) == struct.pack("<IHH", ident, 0x1001, 0)
+
+    # Open the smithy home page at exactly the four stock rows in the game.
+    smith.press(B)
+    smith.press(B)
+    assert g.cpu.mem_read(smith.owner + 4, 1) == b"\1"
+    title = "扩展装备强化"
+    def open_upgrades():
+        rows = smith.render_category()
+        assert set(rows) == set(range(5)) and rows[3] == title, rows
+        g.run(0x557D90, smith.cursor, 2)
+        smith.press(DOWN)
+        assert smith.render_category()[3] == title and smith.highlights[3] == 4
+        smith.press(A)
+        assert g.cpu.mem_read(smith.owner + 4, 2) == bytes((7, 1))
+        assert g.half(smith.owner + 8388) == 2
+    open_upgrades()
+    smith.press(B)
+    assert g.cpu.mem_read(smith.owner + 4, 1) == bytes([1])
+    assert smith.render_category()[3] == title and smith.highlights[3] == 4
+    open_upgrades()
+    g.put(pouch + 26, (1 << 16) | POTION)
+    smith.press(A)
+    assert g.cpu.mem_read(smith.owner + 4, 3) == bytes((7, 25, 0))
+    for target in range(2, 9):
+        assert g.half(smith.owner + 10464) == 1
+        assert g.string(g.get(smith.owner + 11828)) == "回复药"
+        assert g.half(smith.owner + 11820) == 1
+        smith.press(A)
+        assert g.cpu.mem_read(smith.owner + 6, 1) == bytes([5])
+        if target == 2:
+            smith.press(B)  # GU first moves Yes/No to No.
+            smith.press(A)
+            assert g.run(instance, 1, out) and g.half(out + 6) == 0
+            smith.press(A)
+        smith.press(A)
+        smith.press()
+        assert g.run(instance, 1, out) and g.half(out + 6) == target - 1, (target, g.half(out + 6), bytes(g.cpu.mem_read(smith.owner + 4, 4)), g.half(smith.owner + 10452), g.half(pouch + 28))
+        if target == 2:
+            assert g.cpu.mem_read(smith.owner + 6, 1) == bytes([10])
+            smith.press(LEFT)
+            smith.press(A)
+            assert g.run(instance, 0, out) and g.get(out) == 1
+        assert (1, 118) in smith.sounds
+        assert g.get(wallet + 36) == 100 and g.half(pouch + 28) == 0
+        assert g.run(instance, 2, out) and g.half(out + 6) == 0
+        g.put(pouch + 26, (1 << 16) | POTION)
+        smith.press()
+    assert g.cpu.mem_read(smith.owner + 4, 2) == bytes((7, 1))
+    smith.press(A)
+    assert g.cpu.mem_read(smith.owner + 5, 1) == bytes([1])
+    smith.press(B)
+    smith.press(DOWN)
+    assert smith.render_category()[3] == title and smith.highlights[4] == 4
+    smith.press(A)
+    assert g.cpu.mem_read(smith.owner + 4, 1) == b"\2" and g.cpu.mem_read(smith.owner + 76, 1) == b"\3"
+
+    # Exercise saving and reloading a real upgraded instance, then restore the
+    # fixture's files for the independent equipment-stat scenarios below.
+    if sdk_last:
+        files_before_save = g.files.copy()
+        verify_save(g, instance, out, expected_upgrade=7, last_instance=2)
+        assert g.run(instance, 2, out) and g.half(out + 6) == 0
+        g.files.clear()
+        g.files.update(files_before_save)
 
     g.cpu.hook_del(g.traps.pop(0x276278))
     verify_equipment(g, api)
@@ -285,6 +376,9 @@ def verify_equipment(g, api):
     g.cpu.mem_write(entries + 204, struct.pack("<7H", 20, 40, 90, 150, 240, 320, 450))
     assert [g.run(g.hooks[0x29CDFC], actor, n) for n in (20, 21, 150, 151)] == [0, 1, 3, 4]
 
+    equip(0x1001, 7)  # Load a saved Lv.8 trial instance through the equipment hook.
+    g.run(g.hooks[0xDEE34], eq + 4)
+    assert struct.unpack("<8h", g.cpu.mem_read(eq + 336, 16)) == (320, 0, 10, 0, 0, 0, 0, 0)
     equip(0x1001)
     resources, requests = {}, []
     def load(_, kind, path, flags):
@@ -380,7 +474,65 @@ def verify_equipment(g, api):
 
 
 
+def verify_action_tables():
+    # Digests of the original PC w13 descriptor counts/payloads at mhfdat
+    # +0x614 and the executable motion FX rows at +0x618, in source order.
+    assets = ROOT / "target/assets"
+    blob = (assets / "magnet_spike.fmsa").read_bytes()
+    digest = hashlib.sha256()
+    counts = [0, 0, 0]
+    commands, conditions = set(), set()
+    for state in range(165):
+        for field, width in enumerate((12, 40, 12)):
+            count, offset = struct.unpack_from("<II", blob, 16 + state * 24 + field * 8)
+            digest.update(struct.pack("<I", count))
+            digest.update(blob[offset:offset + count * width])
+            counts[field] += count
+            if field == 1:
+                for pos in range(offset, offset + 40 * count, 40):
+                    condition, command = struct.unpack_from("<HH", blob, pos + 2)
+                    commands.add(command)
+                    conditions.add(condition)
+    assert counts == [244, 1784, 598]
+    assert commands == {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 15, 17, 19, 20, 23, 24}
+    assert conditions == {0, 1, 6, 8, 10, 11, 12}
+    assert digest.hexdigest() == "fbd22c2071a3891d8b7a0f107210ae3ccea694b8f387e18acf811d7fc2b4a3c5"
+    rows = (assets / "frontier_ms_motion_fx.bin").read_bytes()
+    assert hashlib.sha256(rows).hexdigest() == "4f588b8bc6b926d2fe8ed3286dca86675bff98ac9e8aa30e353bd50e9e455a44"
+    routes = list(struct.iter_unpack("<HH", (assets / "frontier_ms_routes.bin").read_bytes()))
+    keys = {(bank, selector): route for bank, selector, route in
+            struct.iter_unpack("<HHH", (assets / "frontier_ms_selectors.bin").read_bytes())}
+    seen = set()
+    for clip, _, kind, bank, selector, *_ in struct.iter_unpack("<5H2B3h", rows):
+        seen.add(clip)
+        if kind == 1:
+            assert all(routes[i][1] for i in (46, 47, 48))
+        else:
+            assert routes[keys[bank, selector]][1]
+            if kind == 5:
+                assert routes[keys[bank + 1, selector]][1]
+    assert len(rows) == 962 * 18 and len(seen) == 167
+    plugin = PLUGIN.read_bytes()
+    assert rows in plugin and blob in plugin
+
+
+def verify_turn_table():
+    data = (ROOT / "target/assets/magnet_spike.fmsa").read_bytes()
+    assert data[:8] == struct.pack("<4sHH", b"FMSA", 7, 165)
+    assert b"MSBR" not in data
+    end = data.index(b"MSTR")
+    caps = struct.unpack_from("<165h", data, end + 4)
+    assert {i for i, cap in enumerate(caps) if not cap} == {98, 99, 106, 107, 108, 116, 117, 158}
+    assert {i: cap for i, cap in enumerate(caps) if cap > 0} == {
+        95: 10920, 96: 10920, 110: 5460, 111: 5460, 114: 5460, 115: 5460,
+        159: 10920, 160: 10920, 161: 10920, 162: 10920,
+    }
+    assert data[end + 334:end + 338] == b"MSCT"
+
+
 if __name__ == "__main__":
+    verify_action_tables()
+    verify_turn_table()
     verify(sdk_last=False)
     verify(sdk_last=True)
     print("Magnet Spike NRO: icons, native trade, stats, skills, pause manual and model binding passed")

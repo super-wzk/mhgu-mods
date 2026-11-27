@@ -17,7 +17,7 @@
 ## 文档同步
 
 1. 开工时读本页和受影响的插件 README。涉及玩家操作时同时检查对应的 `src/manual.txt`，涉及 SDK 或转换器时查看对应组件的 README。
-2. 改动落实后，按影响范围同步说明。键位、派生和槽规则写在武器 README，玩家需要的操作同步到游戏内手册。共用接入和验收规则更新到[移植流程](weapon-style-porting.md)，跨武器行为及相关回放更新到[实现与回归](weapon-style-implementation.md)。构建、安装和选用验证的命令集中在本页。新出现或复发的故障在[常见故障与排查](weapon-style-troubleshooting.md)记录触发条件、检查点、证据和对应回放，修正已有的旧结论。
+2. 改动落实后，按影响范围同步说明。更新日志按交付顺序追加到文件末尾。键位、派生和槽规则写在武器 README，玩家需要的操作同步到游戏内手册。共用接入和验收规则更新到[移植流程](weapon-style-porting.md)，跨武器行为及相关回放更新到[实现与回归](weapon-style-implementation.md)。构建、安装和选用验证的命令集中在本页。新出现或复发的故障在[常见故障与排查](weapon-style-troubleshooting.md)记录触发条件、检查点、证据和对应回放，修正已有的旧结论。
 3. 交付前在同一改动中核对文档与最终实现。检查相关命令的参数、测试入口、相对链接和旧说法。手册改动按[注册器说明](../plugins/mhgu-sdk-runtime/README.md)检查格式，并用打包后的 NRO 走共用武器验收。提交或交付说明注明同步的文档、已验证的范围和待实机确认的事项。现有说明仍适用时，说明检查了哪些入口。
 
 ## 本地输入和构建
@@ -68,7 +68,7 @@ python3 tools/package_weapon_styles.py
 
 新增 SDK 接口优先接收值类型或经 SDK 验证的借用句柄，并在 SDK 内完成原生指针读写与调用。碰撞展开等时机敏感的接口可接收模组返回的形状参数，由 SDK 在原生回调内校验并提交。直接挂接原生回调时，原始地址到借用句柄的转换仍须确认对象、线程和生命周期。
 
-运行时通过版本化函数表向内容 NRO 提供服务。模组在 Cargo 中依赖 `crates/mhgu-sdk`，可在各自的 Forge 入口用 `weapon::style::registry::when_ready` 登记风格初始化函数，自定义武器用 `weapon::registry::when_ready`。修改共用接口后，一起重建并安装运行时和使用该接口的插件。
+运行时通过版本化函数表向内容 NRO 提供服务。模组在 Cargo 中依赖 `crates/mhgu-sdk`，可在各自的 Forge 入口用 `weapon::style::registry::when_ready` 登记风格初始化函数，自定义武器用 `weapon::registry::when_ready`。未发布的内部服务在同一开发周期沿用固定标识。已发布接口出现不兼容的函数签名或布局变更时，再为新接口分配一个版本。修改共用接口后，一起重建并安装运行时和使用该接口的插件。
 
 ## 安装和确认
 
@@ -76,20 +76,21 @@ python3 tools/package_weapon_styles.py
 
 完整极之型合包包含 SDK 和当前六个武器模组目录。验证磁斩锤时，先用 `python3 plugins/magnet-spike/package.py "$MHFZ_DAT" "$MHGU_ROMFS"` 构建，再用 `python3 tools/package_weapon_styles.py --include-magnet-spike` 组装含磁斩锤 NRO、模型 ARC 和专用图标 TEX 的整合包（17 个文件）。打包回归 `tools/tests/verify_packed_release.py` 同样传入 `--include-magnet-spike`。归档前核对每个目录的 NRO 和配套资源。已有合包的命名格式为 `mhgu边境风格-YYYYMMDDHHMM.7z`。
 
-重启游戏后，在原版装备箱按当前武器选风格。风格和装备组合随 GU 角色存档写入 [SDK 的 A/B JSON](../plugins/mhgu-sdk-runtime/README.md#角色存档)。升级后可在装备箱重新选择并保存游戏。查错误时依次确认 **安装包的 NRO 和资源、Forge 初始化和钩子日志、装备箱选择、任务内执行路径**。看到模组被列出或 NRO 被加载，只能确认到了加载阶段。
+重启游戏后，在原版装备箱按当前武器选风格。风格和装备组合随 GU 角色存档写入 [每个角色的 SDK JSON](../plugins/mhgu-sdk-runtime/README.md#角色存档)。升级后可在装备箱重新选择并保存游戏。查错误时依次确认 **安装包的 NRO 和资源、Forge 初始化和钩子日志、装备箱选择、任务内执行路径**。看到模组被列出或 NRO 被加载，只能确认到了加载阶段。
 
 ## 验证范围
 
 | 修改内容 | 优先检查 |
 | --- | --- |
 | 单个速度、距离或计时参数 | 构建受影响的插件。需要安装时对照安装文件与本次产物。手感由任务内观察确认。 |
-| 装备箱选择、肩键与 GU 命令优先级 | [装备箱与保存](../plugins/great-sword-extreme/tests/verify_menu.py)、[聊天快捷键与肩键交换](../plugins/mhgu-sdk-runtime/tests/verify_chat_shortcut.py)、[大剑输入及动作生命周期](../plugins/great-sword-extreme/tests/verify_style.py)。 |
+| 装备箱选择、快捷键与 GU 命令优先级 | [装备箱与保存](../plugins/great-sword-extreme/tests/verify_menu.py)、[聊天、目标切换与地图缩放](../plugins/mhgu-sdk-runtime/tests/verify_chat_shortcut.py)、[大剑输入及动作生命周期](../plugins/great-sword-extreme/tests/verify_style.py)。 |
 | 个人和队友状态、装备组合风格名称、自定义武器 | [状态与装备资料回放](../plugins/great-sword-extreme/tests/verify_menu.py)覆盖 GU 状态页面、装备资料收发、队友槽位复用、扩展装备箱原版控制器的打开、翻页、排序确认、换装、原版装备数据完整性、组合应用、存档重载和缺少武器插件时的回退。实机用同版本 SDK 的两台客户端在集会所和任务中互查状态，切回原版后再检查一次。 |
-| 扩展武器购买、制造和强化 | [交易与存档回放](../plugins/great-sword-extreme/tests/verify_trade.py)覆盖原版工房与商店入口、翻页、原版成功音效和立即装备分支、配方、余额、道具袋和道具箱扣除、实例强化、库存满与存档中断恢复。实机用已登记交易的内容插件检查原版工房与商店的列表布局、确认、取消和重进角色。 |
+| 扩展武器购买、制造和强化 | [交易与存档回放](../plugins/great-sword-extreme/tests/verify_trade.py)覆盖原版工房与商店入口、翻页、原版成功音效和立即装备分支、配方、余额、道具袋和道具箱扣除、实例强化、库存满、GU 保存失败和强化等级重载。实机用已登记交易的内容插件检查原版工房与商店的列表布局、确认、取消和重进角色。 |
 | 冲刺收刀和击飞受身 | [公共动作回放](../plugins/mhgu-sdk-runtime/tests/verify_ground_recovery.py)核对冲刺、刹停和普通收刀选片、GU 的收刀退出，以及双剑、斩斧和铳枪的前后受身。[收刀联机回放](../plugins/mhgu-sdk-runtime/tests/verify_sheathe_multiplayer.py)使用 `MHGU_ROMFS` 验证队友跳过冲刺或刹停时的选片。 |
 | 攻击、防御、狩技和武器专属派生 | [大剑精防、蓄力与派生](../plugins/great-sword-extreme/tests/verify_style.py)、[大剑与双剑弹刀、刃打和双手刀光](../plugins/mhgu-sdk-runtime/tests/verify_deflection.py)、[专属狩技](../plugins/mhgu-sdk-runtime/tests/verify_weapon_arts.py)、[太刀](../plugins/long-sword-extreme/tests/verify_port.py)、[斩斧](../plugins/switch-axe-extreme/tests/verify_port.py)、[单手剑](../plugins/sword-shield-extreme/tests/verify_port.py)及[铳枪](../plugins/gunlance-extreme/tests/verify_port.py)的动作回放。 |
-| 磁斩锤的本地动作、输入隔离、近战与磁力 | [磁斩锤战斗回放](../plugins/magnet-spike/tests/verify_battle.py)检查私有动作派发、跨片段预输入、形态切换、公共翻滚、回退武器命令与专用 HUD 隔离、部件采样、近战扣血、两种形态弹刀、磁力弹、部位标记、磁力槽和标记亮点，以及突进与反弹的门槛、位移、回避时间和派生。 |
-| 动作、音效、特效与材质 | 对照输出槽位、事件帧、挂点或材质字段。参考[资源检查](../plugins/great-sword-extreme/tests/verify_assets.py)、[原生粒子](../plugins/great-sword-extreme/tests/verify_native_fx.py)和[材质绘制](../plugins/great-sword-extreme/tests/verify_native_material.py)。 |
+| 磁斩锤的本地动作、输入隔离、近战与磁力 | [磁斩锤战斗回放](../plugins/magnet-spike/tests/verify_battle.py)检查 Vita 自然回充曲线、R 组合键、跨区标记、私有动作派发、跨片段预输入、形态切换、公共翻滚、回退武器命令与专用 HUD 隔离、部件采样、近战扣血、两种形态弹刀、磁界弹、部位标记、磁力槽和标记亮点，以及磁界接近与脱离的门槛、位移、回避时间和派生。磁缚覆盖起手、着地、落空收招、阈值、耐性、单机延长输入、FZ 原版磁缚槽游标、计时与达标提示、终结窗口、终结判定与倒地、怪物出生校验及原版麻痹优先级。联机回放检查本地使用原版武器时合并两名队友的贡献，并排除非控制端和过期命中编号。由怪物控制端着地触发磁缚后，再经原版动作包核对接收端的计时、释放、原版麻痹和对旧控制端或出生序号的计时过滤。怪物资料及特效回放另检查同区原版武器观察者、积蓄和耐性乱序过滤及控制权交接，并经 GU 原生数据包回放队友着地申请、确认与受制动作乱序、超时、中断、远端终结的 164／184 帧判定、去重及倒地。磁缚特效回放核对队友起手、动作混合、挂点、终结冲击帧与重复采样，也检查受缚粒子的周期、同时存在的粒子和解除清理。出招端回放同时检查确认闪光、音效、脉冲对怪物关节的实时朝向及观察者隔离。镜头回放使用原版 `255CC` 检查转向的动作门槛、手动横向输入、剧情镜头和控制权交接，经 `26E64` 核对半径和视野的进出时序、终结帧、暂停及 GU 接管地形遮挡。强化磁冲击还检查四段场景判定、音效、粒子、暂停和队友伤害归属。 |
+| 磁斩锤挥动轨迹与判定生效帧 | [逐帧姿势对照](../tools/mhfz2mhgu/tests/magnet_trajectory.rs)比较原始 MOT 与男女猎人、武器的成品关节和判定端点。[动作时钟回放](../plugins/magnet-spike/tests/verify_swing_frames.py)对照 Vita 的挂点与事件分发，战斗回放另经两作的原生时钟检查混合、循环和接触寿命。命令见[磁斩锤构建与验证](../plugins/magnet-spike/README.md#构建与验证)。 |
+| 动作、音效、特效与材质 | 对照输出槽位、事件帧、挂点或材质字段。参考[资源检查](../plugins/great-sword-extreme/tests/verify_assets.py)、[原生粒子](../plugins/great-sword-extreme/tests/verify_native_fx.py)、[磁斩锤粒子绘制](../plugins/magnet-spike/tests/verify_fx.py)和[材质绘制](../plugins/great-sword-extreme/tests/verify_native_material.py)。 |
 | 注册顺序、手册、预加载和角色交接 | [共用武器验收](../plugins/mhgu-sdk-runtime/tests/verify_weapon_styles.py)覆盖六种武器、注册器最后启动、两个手册入口、任务预读和成品粒子路径。[斩斧集会所回放](../plugins/switch-axe-extreme/tests/verify_lobby.py)核对任务角色与集会所角色交接。 |
 | 联机动作与伤害归属 | [大剑与双剑](../plugins/mhgu-sdk-runtime/tests/verify_gs_db_multiplayer.py)、[太刀](../plugins/long-sword-extreme/tests/verify_multiplayer.py)、[片手与铳枪](../plugins/mhgu-sdk-runtime/tests/verify_sns_gl_multiplayer.py)、[斩斧](../plugins/switch-axe-extreme/tests/verify_port.py)和[磁斩锤](../plugins/magnet-spike/tests/verify_battle.py)覆盖 GU 原生动作包和队员命中。实机另查双方的动作、特效和结算。 |
 

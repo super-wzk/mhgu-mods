@@ -1,6 +1,7 @@
 //! GU collision contacts, shape submission and storage, independent of the owner type.
 
 use crate::memory::{Field, Object, entry, singleton};
+use crate::weapon::style::action::{Attack, melee::Strike};
 use alloc::boxed::Box;
 use core::cell::UnsafeCell;
 
@@ -8,13 +9,26 @@ const CONTACT_ENABLED: Field<u8> = Field::at(5);
 const CONTACT_OWNER: Field<u32> = Field::at(12);
 const CONTACT_DELAY: Field<f32> = Field::at(92);
 const CONTACT_DURATION: Field<f32> = Field::at(96);
+const CONTACT_HITSTOP: Field<u8> = Field::at(108);
 const CONTACT_SHAPES: Field<u32> = Field::at(132);
 const CONTACT_GROUP: Field<u32> = Field::at(136);
 const CONTACT_FLAGS: Field<u32> = Field::at(48);
 
 mod shapes;
 pub use shapes::{CachedHitShape, HitShape, ShapeGroup, ShapeGroups};
+pub mod attack;
 pub mod hurt;
+
+/// Sample the unscaled GU scene clock used by independent contacts on the game thread.
+pub fn scene_frames() -> f32 {
+    let frames =
+        unsafe { singleton(0x2126764) }.map_or(0., |clock| clock.get::<f32>(Field::at(104)));
+    if frames.is_finite() {
+        frames.max(0.)
+    } else {
+        0.
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct Contact<'a>(pub(crate) Object<'a>);
@@ -68,14 +82,9 @@ impl<'a> Contact<'a> {
     /// # Safety
     /// Run on the game thread with a live quest hunter, an HDP row, and a loaded HTS.
     pub unsafe fn prepare_world_attack(self, actor: u32, row: &[u32; 14], shape: u32) {
+        let mut flags = 0x0a00_0428;
+        let mut modifiers = Attack::WEAPON_MODIFIERS;
         unsafe {
-            let init: unsafe extern "C" fn(u32, u32, u32, *const u32, u32, u32, u32, u32) =
-                core::mem::transmute(entry(0x168960));
-            let adjust: unsafe extern "C" fn(u32, u32, *const u32, u32) =
-                core::mem::transmute(entry(0x2b76cc));
-            init(self.as_raw(), 0, actor, row.as_ptr(), shape, 0, 15, 1);
-            let mut flags = 0x0a00_0428;
-            let mut modifiers = crate::weapon::style::action::Attack::WEAPON_MODIFIERS;
             if crate::weapon::style::hunter::equipped_weapon(actor) == Some(1) {
                 // Match the SnS weapon bit from 2B72D4 and the draw check in 2B7ED8.
                 flags |= 0x800;
@@ -83,6 +92,44 @@ impl<'a> Contact<'a> {
                     modifiers |= 0x10;
                 }
             }
+            self.init_world_attack(actor, row, shape, flags, modifiers);
+        }
+    }
+
+    /// Prepare a style strike that keeps its own lifetime after the hunter changes action.
+    /// The world shape is supplied during the registered expansion callback.
+    ///
+    /// # Safety
+    /// The hunter and the retained HTS must be live on the game thread.
+    pub unsafe fn prepare_world_strike(self, actor: u32, strike: &Strike, shape: &HitShape) {
+        unsafe {
+            self.init_world_attack(
+                actor,
+                &strike.hdp(),
+                shape.as_raw(),
+                0x0a00_0428,
+                Attack::WEAPON_MODIFIERS & !1,
+            );
+        }
+        // The raw 168960 constructor interprets factor 1 as a stock default.
+        self.0.set(CONTACT_HITSTOP, strike.hitstop);
+        self.set_window(strike.delay, strike.duration);
+    }
+
+    unsafe fn init_world_attack(
+        self,
+        actor: u32,
+        row: &[u32; 14],
+        shape: u32,
+        flags: u32,
+        modifiers: u32,
+    ) {
+        unsafe {
+            let init: unsafe extern "C" fn(u32, u32, u32, *const u32, u32, u32, u32, u32) =
+                core::mem::transmute(entry(0x168960));
+            let adjust: unsafe extern "C" fn(u32, u32, *const u32, u32) =
+                core::mem::transmute(entry(0x2b76cc));
+            init(self.as_raw(), 0, actor, row.as_ptr(), shape, 0, 15, 1);
             self.0.set(CONTACT_FLAGS, flags);
             adjust(actor, self.as_raw(), row.as_ptr(), modifiers);
         }

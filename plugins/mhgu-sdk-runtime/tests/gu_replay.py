@@ -15,11 +15,12 @@ QUEST, PLAYER, MANAGER = 0x7010000, 0x7020000, 0x7030000
 
 class Game:
     # Tests may add GU entries whose first ARM instruction is PC-independent.
-    inline_hooks = {0x50B64, 0x152960, 0x4A858, 0x3D7E90, 0x3A75C8, 0x3A3178, 0x56EF50, 0x592FE0, 0x593514, 0x6EB9FC, 0x6EB6C0, 0x6EC2CC, 0x6ECE8C, 0x6ED128, 0x6ED200, 0x6F53E4, 0x6F8648, 0x6F9B18, 0x6FCABC, 0x6FB224, 0x6FB364, 0x6ED344, 0x6FBF4C, 0x54F260, 0x6ED600, 0x6FC2C8, 0x6F9438, 0x6E8558, 0x6F1AE8}
-    inline_hooks |= {0x714B20, 0x718084, 0x1418E0, 0x14394C, 0x143894,
+    inline_hooks = {0x27EBBC, 0x50B64, 0x152960, 0x4A858, 0x3D7E90, 0x3A75C8, 0x3A3178, 0x56EF50, 0x592FE0, 0x593514, 0x6EB9FC, 0x6EB6C0, 0x6EC2CC, 0x6ECE8C, 0x6ED128, 0x6ED200, 0x6F53E4, 0x6F8648, 0x6F9B18, 0x6FCABC, 0x6FB224, 0x6FB364, 0x6ED344, 0x6FBF4C, 0x54F260, 0x6ED600, 0x6FC2C8, 0x6F9438, 0x6FF02C, 0x6FFD40, 0x702D9C, 0x7045DC, 0x6E8558, 0x6F1AE8}
+    grid_hooks = {0x714B20, 0x718084, 0x1418E0, 0x14394C, 0x143894,
                      0x144C04, 0x1440C8, 0x144190, 0x141944, 0x144590, 0x1449B4,
                      0x144B68, 0x145B58, 0x144768, 0x14935C, 0x1424EC, 0x149E6C,
-                     0x72AA48, 0x72AB38, 0x56EA38, 0x5B973C, 0x5B6C78}
+                     0x72AA48, 0x72AB38, 0x56EA38, 0x5B973C, 0x5B91E0, 0x5B6C78}
+    inline_hooks |= grid_hooks
 
     def __init__(self, elf):
         self.cpu = c = Uc(UC_ARCH_ARM, UC_MODE_ARM)
@@ -114,12 +115,14 @@ class Game:
         self.hooks[addr] = detour
         if addr in self.inline_hooks or not saved:
             if saved:
-                # Each starts with a PC-independent instruction in GU 1.4.
-                trampoline = self.alloc(12)
+                # The Switch Forge loader copies two ARM instructions verbatim.
+                # Keep the single-instruction fixture for unrelated hook families.
+                size = 8 if addr in self.grid_hooks else 4
+                trampoline = self.alloc(size + 8)
                 self.cpu.mem_write(
                     trampoline,
-                    bytes(self.cpu.mem_read(addr, 4))
-                    + struct.pack("<II", 0xE51FF004, addr + 4),
+                    bytes(self.cpu.mem_read(addr, size))
+                    + struct.pack("<II", 0xE51FF004, addr + size),
                 )
                 self.put(saved, trampoline)
             self.cpu.hook_add(
@@ -156,6 +159,20 @@ class Game:
         self.cpu.mem_write(mgr + 112, bytes([self.write_success]))
 
     def install_file_service(self):
+        def delete(path, *_):
+            assert self.io_mount
+            return 0 if self.files.pop(self.string(path), None) is not None else 1
+
+        def rename(src, dest, *_):
+            assert self.io_mount
+            src, dest = self.string(src), self.string(dest)
+            if src not in self.files or dest in self.files:
+                return 1
+            self.files[dest] = self.files.pop(src)
+            return 0
+
+        self.stub(0x13F0424, delete)
+        self.stub(0x13F0430, rename)
         # GU MtFile type for this test only; leave the real DTI lookup intact.
         dti = self.alloc(32)
         name = self.alloc(8)

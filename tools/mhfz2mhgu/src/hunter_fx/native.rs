@@ -734,7 +734,12 @@ impl Compiler {
                     } else {
                         half(def, 16)?
                     };
-                    let life = ((f32::from(half(def, 12)?) * time_scale).ceil() as u16).max(1);
+                    let source_life = half(def, 12)?;
+                    if bank == 4037 && matches!(selector, 45 | 93) && source_life == 0 {
+                        // 81F4F9B6 expires this layer before its first draw.
+                        continue;
+                    }
+                    let life = ((f32::from(source_life) * time_scale).ceil() as u16).max(1);
                     let mut rotation = if self.namespace == "frontier_sa" && local_rotation_id != 0 {
                         let keys = vector_curve(rotation_id, [0.; 3], 1.);
                         let looping = vectors.chunks_exact(24)
@@ -792,24 +797,32 @@ impl Compiler {
                     let uv_mode = def[if wide { 108 } else { 22 }];
                     let mut uv_origin = [0.; 2];
                     let mut uv_keys = Vec::new();
-                    let uv_stepped = wide && (4..=6).contains(&uv_mode);
+                    let uv_stepped = uv_mode == 4 || wide && (5..=6).contains(&uv_mode);
                     let scroll_axes = match uv_mode {
                         0 => [false, false],
                         1 => [true, true],
                         2 => [true, false],
                         3 => [false, true],
-                        4..=6 if wide => {
+                        4..=6 if uv_stepped => {
                             // HD 113D1CF0 / 113D1DC0 / 113D1E45 step a tiled
-                            // texture over the authored, time-scaled period.
-                            let tiles = u32::from(half(def, 112)?);
-                            ensure!(tiles > 0, "empty wide UV atlas");
-                            let span = ((f32::from(half(def, 114)?) * time_scale) as u32).max(1);
+                            // texture over the authored, time-scaled period. Vita
+                            // 81F4BAA4 mode 4 reads the short definition at +24/+28.
+                            let (tiles, period) = if wide {
+                                (half(def, 112)?, f32::from(half(def, 114)?))
+                            } else {
+                                (half(def, 24)?, word(def, 28) as i32 as f32)
+                            };
+                            let tiles = u32::from(tiles);
+                            ensure!(tiles > 0, "empty UV atlas");
+                            let span = ((period * time_scale) as u32).max(1);
                             let dwell = span / tiles;
-                            ensure!(dwell > 0, "zero wide UV atlas tile duration");
+                            ensure!(dwell > 0, "zero UV atlas tile duration");
                             let side = if uv_mode == 4 { tiles.isqrt() } else { tiles };
                             for frame in (0..=u32::from(life)).step_by(2) {
-                                let tile = (frame / dwell) % tiles;
+                                let index = frame / dwell;
+                                let tile = index % tiles;
                                 let [x, y] = match uv_mode {
+                                    4 if !wide => [index % side, tile / side],
                                     4 => [tile % side, tile / side],
                                     5 => [tile, 0],
                                     _ => [0, tile],
@@ -1294,20 +1307,23 @@ impl Compiler {
         self.route(first);
         // 81F9A86C uses common mesh 74. Normal contacts create one
         // particle, while type 7 (a full-body slide) creates five.
-        for slide in [false, true] {
-            let first = self.count;
-            let mut dust = Layer::legacy(74, 16);
-            dust.count = if slide { 5 } else { 1 };
-            dust.blend = Blend::Alpha;
-            dust.spread = if slide { [30., 0., 30.] } else { [0.; 3] };
-            dust.facing = Facing::Camera;
-            dust.soft_particle = soft_particle;
-            dust.scale = vec![(0, [0.55; 3]), (16, [1.5; 3])];
-            dust.color = vec![(0, [255, 255, 255, 130]), (16, [255, 255, 255, 0])];
-            dust.movement.push((16, [0., 32., 0.]));
-            self.layer(dust, None)?;
-            self.route(first);
-        }
+        self.contact_dust(1, soft_particle)?;
+        self.contact_dust(5, soft_particle)
+    }
+
+    pub fn contact_dust(&mut self, count: u16, soft_particle: f32) -> Result<()> {
+        let first = self.count;
+        let mut dust = Layer::legacy(74, 16);
+        dust.count = count;
+        dust.blend = Blend::Alpha;
+        dust.spread = if count > 1 { [30., 0., 30.] } else { [0.; 3] };
+        dust.facing = Facing::Camera;
+        dust.soft_particle = soft_particle;
+        dust.scale = vec![(0, [0.55; 3]), (16, [1.5; 3])];
+        dust.color = vec![(0, [255, 255, 255, 130]), (16, [255, 255, 255, 0])];
+        dust.movement.push((16, [0., 32., 0.]));
+        self.layer(dust, None)?;
+        self.route(first);
         Ok(())
     }
 

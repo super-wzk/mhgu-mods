@@ -1,6 +1,6 @@
 //! Playback of a peer's accepted private weapon action on the game thread.
 use super::hunter;
-use crate::combat::collision::hurt::Target;
+use crate::combat::collision::hurt::{MonsterSpawn, Target};
 use crate::service;
 use core::{
     cell::UnsafeCell,
@@ -30,6 +30,10 @@ impl Roster {
                 local,
             })
         }
+    }
+
+    pub fn local(&self) -> u32 {
+        self.local
     }
 
     pub fn peer(&self, index: usize) -> Option<u32> {
@@ -212,8 +216,8 @@ pub unsafe fn bind_playback(id: u32, playback: &'static Playback) -> bool {
             .is_some_and(|api| unsafe { (api.0)(id, playback) })
 }
 
-const POSITION_NAME: &core::ffi::CStr = c"mhgu::StylePositionStateV2";
-const POSITION_MAGIC: u32 = u32::from_le_bytes(*b"SPS2");
+const POSITION_NAME: &core::ffi::CStr = c"mhgu::StylePositionState";
+const POSITION_MAGIC: u32 = u32::from_le_bytes(*b"SPOS");
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -339,4 +343,89 @@ pub fn bind_target_events(style: u32, receive: ReceiveTargetEvent) -> bool {
 /// data procedure. Returns whether GU's sender was called for an active room.
 pub fn send_target_event(style: u32, actor: u32, serial: u8, target: &Target) -> bool {
     target_events().is_some_and(|api| (api.send)(style, actor, serial, target))
+}
+
+const MONSTER_STATE_NAME: &core::ffi::CStr = c"mhgu::StyleMonsterState";
+const MONSTER_STATE_MAGIC: u32 = u32::from_le_bytes(*b"SMST");
+
+/// State published by the network controller of a live monster.
+#[repr(C)]
+pub struct MonsterState {
+    /// Live hunter occupying the controller's room slot on this console.
+    pub actor: u32,
+    pub spawn: MonsterSpawn,
+    pub controller: u8,
+    pub serial: u16,
+    pub value: u32,
+    pub detail: [u32; 2],
+}
+
+pub type ReceiveMonsterState = extern "C" fn(&MonsterState);
+
+/// An exchange between an expanded weapon's hunter and a monster controller.
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[repr(u8)]
+pub enum MonsterCommand {
+    Request = 1,
+    Confirm = 2,
+    End = 3,
+}
+
+#[repr(C)]
+pub struct MonsterExchange {
+    pub spawn: MonsterSpawn,
+    pub serial: u16,
+    pub member: u8,
+    pub command: MonsterCommand,
+    pub area: u8,
+    pub center: [f32; 3],
+}
+
+pub type ReceiveMonsterExchange = extern "C" fn(actor: u32, exchange: &MonsterExchange);
+
+#[doc(hidden)]
+#[repr(C)]
+pub struct MonsterStateEvents {
+    pub bind: extern "C" fn(u32, ReceiveMonsterState) -> bool,
+    pub send: extern "C" fn(u32, &MonsterSpawn, u16, u32, &[u32; 2]) -> bool,
+    pub bind_exchange: extern "C" fn(u32, ReceiveMonsterExchange) -> bool,
+    pub send_exchange: extern "C" fn(u32, &MonsterExchange) -> bool,
+}
+
+/// # Safety
+/// Publish a resident service during Forge initialization.
+#[doc(hidden)]
+pub unsafe fn publish_monster_state(api: &'static MonsterStateEvents) -> bool {
+    unsafe { service::publish(MONSTER_STATE_NAME, MONSTER_STATE_MAGIC, api) }
+}
+
+fn monster_states() -> Option<&'static MonsterStateEvents> {
+    service::on_game_thread()
+        .then(|| unsafe { service::find(MONSTER_STATE_NAME, MONSTER_STATE_MAGIC) })?
+}
+
+/// Subscribe to same-area monster snapshots for this registered weapon.
+pub fn bind_monster_state(style: u32, receive: ReceiveMonsterState) -> bool {
+    monster_states().is_some_and(|api| (api.bind)(style, receive))
+}
+
+/// Broadcast a style's state for a same-area monster controlled by this console.
+pub fn send_monster_state(
+    style: u32,
+    spawn: &MonsterSpawn,
+    serial: u16,
+    value: u32,
+    detail: &[u32; 2],
+) -> bool {
+    monster_states().is_some_and(|api| (api.send)(style, spawn, serial, value, detail))
+}
+
+pub fn bind_monster_exchange(style: u32, receive: ReceiveMonsterExchange) -> bool {
+    monster_states().is_some_and(|api| (api.bind_exchange)(style, receive))
+}
+
+/// Address an exchange to a GU room member. A request or end must come from
+/// the style's hunter. A confirmation must come from the monster controller.
+pub fn send_monster_exchange(style: u32, exchange: &MonsterExchange) -> bool {
+    monster_states().is_some_and(|api| (api.send_exchange)(style, exchange))
 }

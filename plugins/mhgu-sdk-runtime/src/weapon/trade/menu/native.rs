@@ -1,4 +1,5 @@
 //! Supply expansion rows to GU's weapon shop and smithy controllers.
+use super::upgrade;
 use super::{ACCEPT, Catalogue, Place, global, inventory, put, read};
 use crate::{save::CHARACTER, weapon::model};
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -26,7 +27,7 @@ fn with_catalogue<T>(catalogue: &Catalogue, invoke: impl FnOnce() -> T) -> T {
     result
 }
 
-fn preview_pose() -> (u16, u16) {
+pub(super) fn preview_pose() -> (u16, u16) {
     let equipment = unsafe { inventory::current_equipment() };
     if equipment == 0 {
         return (0, 0);
@@ -320,6 +321,7 @@ unsafe fn smith_rows(owner: u32) -> u32 {
 
 #[forge::hook(offset = 0x6f9b18)]
 unsafe fn smith_details(owner: u32, mode: u32) -> u32 {
+    if upgrade::active(owner) { return unsafe { upgrade::details(owner) }; }
     let Some(catalogue) = active(owner, Place::Smith) else {
         return original!(owner, mode);
     };
@@ -332,7 +334,7 @@ unsafe fn smith_details(owner: u32, mode: u32) -> u32 {
 
 #[forge::hook(offset = 0x6fcabc)]
 unsafe fn smith_delivery(owner: u32, kind: u32, item: u32) -> u32 {
-    if active(owner, Place::Smith).is_some() {
+    if upgrade::active(owner) || active(owner, Place::Smith).is_some() {
         // 70B6EC returns bit 0 for a compatible weapon.
         1
     } else {
@@ -432,6 +434,9 @@ unsafe fn shop_preview(owner: u32, buttons: u32) -> u32 {
 
 #[forge::hook(offset = 0x6fc2c8)]
 unsafe fn smith_preview(owner: u32) -> u32 {
+    if upgrade::active(owner) {
+        return unsafe { upgrade::preview(owner) };
+    }
     if let Some(catalogue) = active(owner, Place::Smith) {
         unsafe { with_preview_pose(catalogue, || original!(owner)) }
     } else {

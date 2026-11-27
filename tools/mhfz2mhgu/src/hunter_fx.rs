@@ -306,9 +306,74 @@ fn convert_assets(
             playback.bank(&bank, 4037, &[1, 77, 78])?;
             // 8102CDDC requests 13/14 emit the activation flash and the
             // distinct periodic effects for each form.
-            playback.bank(&load_bank(4038)?, 4038, &[16])?;
+            let bank_4038 = load_bank(4038)?;
+            playback.bank(&bank_4038, 4038, &[16])?;
             playback.bank(&bank, 4037, &[85, 86, 87, 88])?;
-            None
+            // 8116783E requests this flash on the first successful contact.
+            playback.bank(&bank_4038, 4038, &[34])?;
+            // 8102CDDC request 15, including the local-only upper flash.
+            playback.bank(&bank_4038, 4038, &[45, 46, 47, 48])?;
+            playback.bank(&bank, 4037, &[84])?;
+            // Request 16 is the ordinary impact's separate visual sequence.
+            playback.bank(&bank_4038, 4038, &[50, 51, 52])?;
+            playback.bank(&bank, 4037, &[83])?;
+            // Magnet Bind readiness, 8102CDDC request 7.
+            playback.bank(&bank, 4037, &[54])?;
+            // Authored bind drop and finisher effects, selected by motion_fx.
+            playback.bank(&bank, 4037, &[3, 4, 20, 27, 28, 36, 38, 63, 65, 90, 93])?;
+            playback.bank(&bank_4038, 4038, &[36])?;
+            // Monster-side restraint and release, 81142966 / 811425BC.
+            playback.bank(&bank, 4037, &[45, 46, 48])?;
+            // Caster-only confirmation/release and the aimed pulse.
+            playback.bank(&bank, 4037, &[42, 44])?;
+            playback.bank(&bank_4038, 4038, &[30])?;
+            // Index the ordinary (unmodified) bank routes already compiled above.
+            let mut routes: BTreeMap<(u16, u16), u16> = BTreeMap::new();
+            for (bank, start, selectors) in [
+                (4037, 0, &[11, 14, 70, 71, 22][..]), (4035, 5, &[2]), (4036, 6, &[2]),
+                (4037, 9, &[1, 77, 78]), (4038, 12, &[16]), (4037, 13, &[85, 86, 87, 88]),
+                (4038, 17, &[34, 45, 46, 47, 48]), (4037, 22, &[84]),
+                (4038, 23, &[50, 51, 52]), (4037, 26, &[83, 54, 3, 4, 20, 27, 28, 36, 38, 63, 65, 90, 93]),
+                (4038, 39, &[36]), (4037, 40, &[45, 46, 48, 42, 44]), (4038, 45, &[30]),
+            ] {
+                for (i, &selector) in selectors.iter().enumerate() {
+                    routes.insert((bank, selector), start + i as u16);
+                }
+            }
+            playback.footfalls(0.)?;
+            let mut next = 49;
+            let motion = motion_fx(&mhfdat, 13)?;
+            let mut keys = std::collections::BTreeSet::from([(4038, 17), (4038, 14)]);
+            for row in motion.chunks_exact(18) {
+                let kind = half(row, 4)?;
+                if kind != 1 {
+                    let bank = half(row, 6)?;
+                    let selector = half(row, 8)?;
+                    keys.insert((bank, selector));
+                    if kind == 5 { keys.insert((bank + 1, selector)); }
+                }
+            }
+            // 81221D50 clip switch, 81226156 charge entry, and delayed
+            // attraction/impact requests in 8102CDDC. Preserve earlier route IDs.
+            let native = [0, 1, 2, 3, 5, 7, 20, 21, 26, 28, 34, 40, 48, 55, 56, 57,
+                58, 59, 61, 62, 64, 69, 79, 93, 94].map(|n| (4037, n));
+            for key @ (bank, selector) in keys.into_iter().chain(native).chain([(4038, 18), (4037, 74), (4037, 73)]) {
+                if let Entry::Vacant(slot) = routes.entry(key) {
+                    playback.bank(&load_bank(bank)?, bank, &[selector])
+                        .with_context(|| format!("w13 effect {bank}:{selector}"))?;
+                    slot.insert(next);
+                    next += 1;
+                }
+            }
+            playback.contact_dust(3, 0.)?;
+            let mut index = Vec::new();
+            for ((bank, selector), route) in routes {
+                index.extend(bank.to_le_bytes());
+                index.extend(selector.to_le_bytes());
+                index.extend(route.to_le_bytes());
+            }
+            save(&out.join("selectors.bin"), index)?;
+            Some(13)
         }
     };
     if let Some(weapon_id) = motion_weapon {
@@ -489,6 +554,8 @@ fn motion_fx(data: &[u8], weapon_id: usize) -> Result<Vec<u8>> {
                 (6, 1444..=1447, 0 | 3 | 5 | 7) | (6, 1448, 2 | 5) | (6, 1450, 0) => true,
                 (4 | 9, _, 1 | 3..=7) => true,
                 (12, _, 1 | 5..=7) => true,
+                (13, _, 1 | 5..=7) => true,
+                (13, _, _) => anyhow::bail!("unsupported w13 motion FX row {clip}: {row:?}"),
                 (7, _, _) => match (kind, bank, selector, row[8], row[9]) {
                     (0, 5, _, 0, 0)
                     | (1, 0 | 3 | 4 | 7 | 10 | 20, 100, 0 | 5 | 8 | 10, 0)

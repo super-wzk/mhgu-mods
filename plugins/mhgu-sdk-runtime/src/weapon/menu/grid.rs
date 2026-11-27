@@ -18,6 +18,7 @@ struct Grid {
     owner: u32,
     panel: u32,
     rows: Vec<Row>,
+    smith: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -25,6 +26,7 @@ enum Phase {
     Opening,
     Input,
     Draw,
+    Smith,
 }
 
 #[derive(Clone, Copy)]
@@ -72,7 +74,7 @@ fn with_scope<T>(owner: u32, phase: Phase, native: impl FnOnce() -> T) -> T {
     result
 }
 
-pub(super) fn close() {
+pub(in crate::weapon) fn close() {
     GRID.with(|grid| *grid = None);
 }
 
@@ -86,6 +88,15 @@ fn row<T>(slot: u32, f: impl FnOnce(&Row) -> T) -> Option<T> {
 
 pub(super) unsafe fn open(owner: u32, native: impl FnOnce() -> u32) -> u32 {
     let panel = unsafe { gu!(0x65cb3c, owner, 2) };
+    populate(owner, panel, false);
+    let result = with_scope(owner, Phase::Opening, native);
+    if unsafe { read::<u32>(owner, 64) } != 3 {
+        close();
+    }
+    result
+}
+
+fn populate(owner: u32, panel: u32, smith: bool) {
     let rows = inventory::inventory()
         .into_iter()
         .filter_map(|(instance, entry)| {
@@ -102,12 +113,36 @@ pub(super) unsafe fn open(owner: u32, native: impl FnOnce() -> u32) -> u32 {
             })
         })
         .collect();
-    GRID.with(|grid| *grid = Some(Grid { owner, panel, rows }));
-    let result = with_scope(owner, Phase::Opening, native);
-    if unsafe { read::<u32>(owner, 64) } != 3 {
-        close();
-    }
-    result
+    GRID.with(|grid| *grid = Some(Grid { owner, panel, rows, smith }));
+}
+
+pub(in crate::weapon) unsafe fn open_smith(owner: u32) {
+    populate(owner, unsafe { gu!(0x65cb3c, owner, 8) }, true);
+}
+
+pub(in crate::weapon) fn smith_open(owner: u32) -> bool {
+    GRID.with(|g| g.as_ref().is_some_and(|g| g.owner == owner && g.smith))
+}
+
+pub(in crate::weapon) fn smith_active(owner: u32) -> bool {
+    scope().is_some_and(|s| s.owner == owner && matches!(s.phase, Phase::Smith))
+}
+
+pub(in crate::weapon) fn with_smith<T>(owner: u32, f: impl FnOnce() -> T) -> T {
+    with_scope(owner, Phase::Smith, f)
+}
+
+pub(in crate::weapon) fn smith_instance(slot: u32) -> Option<WeaponInstance> {
+    let id = row(slot, |r| r.instance.id)?;
+    inventory::owned_equipment(id).map(|(item, _)| item)
+}
+
+pub(in crate::weapon) fn upgraded(item: WeaponInstance) {
+    GRID.with(|grid| {
+        if let Some(row) = grid.as_mut().and_then(|g| g.rows.iter_mut().find(|r| r.instance.id == item.id)) {
+            row.instance = item;
+        }
+    });
 }
 
 // The extension occupies a separate home row and enters the same equipment
@@ -156,12 +191,21 @@ unsafe fn update_child(owner: u32) -> u32 {
     result
 }
 
-#[forge::hook(offset = 0x1418e0)]
-unsafe fn box_size(save: u32, kind: u32) -> u32 {
+unsafe extern "C" fn box_size(save: u32, kind: u32) -> u32 {
     if kind == 0 && for_save(save).is_some() {
         return GRID.with(|grid| grid.as_ref().map_or(0, |grid| grid.rows.len() as u32));
     }
-    original!(save, kind)
+    // 1418E4 loads the player pointer through a PC-relative literal.
+    let (base_slots, slots_per_unlock) = match kind {
+        0 => (1000, 200),
+        1 => (300, 100),
+        _ => return 0,
+    };
+    unsafe {
+        let player = read::<u32>(forge::mem::text_addr(), 0x1897f78);
+        let flags = read::<u32>(player, 2392);
+        base_slots + (flags & (3 << 21)).count_ones() * 200 + gu!(0x525878, player) * slots_per_unlock
+    }
 }
 
 #[forge::hook(offset = 0x14394c)]
@@ -219,13 +263,17 @@ unsafe fn equipment_type(save: u32, kind: u32, slot: u32) -> u32 {
     original!(save, kind, slot)
 }
 
-#[forge::hook(offset = 0x144590)]
-unsafe fn equipped(save: u32, slot: u32) -> u32 {
+unsafe extern "C" fn equipped(save: u32, slot: u32) -> u32 {
     if for_save(save).is_some() {
         let equipped = inventory::selected().map(|(item, _)| item.id);
         return u32::from(row(slot, |r| Some(r.instance.id) == equipped) == Some(true));
     }
-    original!(save, slot)
+    // 144594 uses the same literal-load pattern to reach the hunter manager.
+    unsafe {
+        let manager = read::<u32>(forge::mem::text_addr(), 0x1885b58);
+        let equipment = gu!(0x277454, manager);
+        u32::from(equipment != 0 && (0..7).any(|part| gu!(0xe100c, equipment + 4, part) == slot))
+    }
 }
 
 #[forge::hook(offset = 0x1449b4)]
@@ -273,12 +321,18 @@ pub(in crate::weapon) fn equip(save: u32, slot: u32) -> Option<u32> {
 }
 
 // GU prepares and applies its stock sort through these save entry points.
-#[forge::hook(offset = 0x14935c)]
-unsafe fn build_sort(save: u32, kind: u32) -> u32 {
+unsafe extern "C" fn build_sort(save: u32, kind: u32) -> u32 {
     if kind == 0 && for_save(save).is_some() {
         return 0;
     }
-    original!(save, kind)
+    // 149360 branches relative to the entry. Call each original sort directly.
+    unsafe {
+        match kind {
+            0 => gu!(0x142268, save, kind),
+            1 => gu!(0x149374, save, kind),
+            _ => save,
+        }
+    }
 }
 
 #[forge::hook(offset = 0x1424ec)]
@@ -404,7 +458,9 @@ unsafe fn draw(panel: u32) -> u32 {
     };
     with_scope(owner, Phase::Draw, || unsafe {
         let result = original!(panel);
-        gu!(0x56ea08, panel, 4, 1, EXTENSION_TITLE.as_ptr() as u32);
+        if !smith_open(owner) {
+            gu!(0x56ea08, panel, 4, 1, EXTENSION_TITLE.as_ptr() as u32);
+        }
         result
     })
 }
@@ -421,18 +477,26 @@ unsafe fn draw_sort(panel: u32, kind: u32) -> u32 {
 pub(super) fn install(base: u32) {
     forge::install_hook!(base, open_child);
     forge::install_hook!(base, update_child);
-    forge::install_hook!(base, box_size);
+    for (offset, replacement) in [
+        (0x1418e0, box_size as unsafe extern "C" fn(u32, u32) -> u32),
+        (0x144590, equipped),
+        (0x14935c, build_sort),
+    ] {
+        unsafe {
+            forge::sys::hook::forge_hook_create(
+                (base + offset) as *const _, replacement as *const _, core::ptr::null_mut(),
+            );
+        }
+    }
     forge::install_hook!(base, cell);
     forge::install_hook!(base, selection);
     forge::install_hook!(base, can_equip);
     forge::install_hook!(base, category);
     forge::install_hook!(base, occupied);
     forge::install_hook!(base, equipment_type);
-    forge::install_hook!(base, equipped);
     forge::install_hook!(base, compatible);
     forge::install_hook!(base, can_remove);
     forge::install_hook!(base, weapon_class);
-    forge::install_hook!(base, build_sort);
     forge::install_hook!(base, apply_sort);
     forge::install_hook!(base, stock_box_view);
     forge::install_hook!(base, skill_cursor);

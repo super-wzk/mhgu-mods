@@ -317,7 +317,7 @@ def verify_guild(g):
     verify_guild_usage_chart(g, view, card)
 
     save_character(g)
-    saved = json.loads(g.files["savedata:/mhgu-sdk-0-0.json"])["data"]["guild_card"]
+    saved = json.loads(g.files[SAVE])["data"]["guild_card"]
     assert saved["equipment"]["weapon"] == {"equipment": 16, "upgrade": 2}
     assert saved["usage"] == {"16": [100, 0, 0]}
     assert list(saved["diary"].values()) == [{"equipment": 16, "milestone": 100}]
@@ -494,7 +494,7 @@ def verify_set_styles(g):
     g.stub(0x65CC0C, lambda *_: 0)
     g.stub(0x72D0F8, lambda *_: 0)
     save_character(g)
-    assert json.loads(g.files["savedata:/mhgu-sdk-0-0.json"])["data"]["equipment_sets"]["0"]["id"] == 10
+    assert json.loads(g.files[SAVE])["data"]["equipment_sets"]["0"]["id"] == 10
     select_character(g, 1)
     assert g.run(selected, 0) == 0
     select_character(g, 0)
@@ -543,10 +543,8 @@ def verify_set_styles(g):
     g.run(g.hooks[0x146560], save, 1)
     assert g.run(selected, 0) == 0
     save_character(g)
-    assert json.loads(g.files[SAVE])["generation"] == 3
-    g.files[SAVE] = g.files[SAVE][:-1]  # Interrupted write; generation 2 survives.
     select_character(g, 0)
-    assert g.run(selected, 0) == 10
+    assert g.run(selected, 0) == 0 and set(g.files) == {SAVE}
     g.stub(g.originals[0x3DFAFC], lambda mgr, *rest: (
         g.put(mgr + 60, 9), g.cpu.mem_write(mgr + 108, b"\x01")
     ) and 1)
@@ -557,7 +555,7 @@ def verify_set_styles(g):
     assert all(json.loads(data)["data"]["equipment_sets"] == {} for data in g.files.values())
 
     # Custom weapon registration survives My Set independently of the stock style.
-    data = json.loads(character_save({}, generation=5))
+    data = json.loads(character_save({}))
     data["data"]["inventory"] = {"instances": {"1": {"equipment": 16, "upgrade": 2}}, "equipped": 1, "sets": {}}
     g.files[SAVE] = json.dumps(data).encode()
     select_character(g, 0)
@@ -574,8 +572,32 @@ def verify_set_styles(g):
     assert g.run(equipped) == 0x10010
 
 
+def verify_stock_grid(g):
+    # Retail callbacks also run outside the extension controller's scoped reads.
+    player = g.get(0x1897F78)
+    manager, save = g.alloc(40032), g.alloc(64)
+    g.put(0x1885B58, manager)
+    for village, guild in ((0, 0), (1, 2), (3, 7)):
+        g.put(player + 2392, village << 21)
+        g.put(player + 13844, guild)
+        bonus = bin(village).count("1") * 200
+        pages = bin(guild).count("1")
+        assert g.run(0x1418E0, save, 0) == 1000 + bonus + pages * 200
+        assert g.run(0x1418E0, save, 1) == 300 + bonus + pages * 100
+        assert g.run(0x1418E0, save, 2) == 0
+    g.cpu.mem_write(manager + 132, struct.pack("<7H", *range(40, 47)))
+    for slot in (0, *range(40, 48)):
+        assert g.run(0x144590, save, slot) == int(40 <= slot <= 46)
+    for kind, entry in enumerate((0x142268, 0x149374)):
+        calls = []
+        g.stub(entry, lambda arg, *_: calls.append(arg) or 13)
+        assert g.run(0x14935C, save, kind) == 13 and calls == [save]
+    assert g.run(0x14935C, save, 2) == save
+
+
 def verify():
     elf = (REPO / "mhgu/main.elf").read_bytes()
+    verify_stock_grid(boot(elf, character_save({})))
     config = character_save({11: 11})
     g = boot(elf, config)
     actor, eq, _ = hunters(g)
@@ -685,8 +707,9 @@ def verify():
     press(0x10)  # up from Guild wraps to the custom row
     assert row() == 6 and press(0x2000) == 2 and press(0x2000) == 5
     save_character(g)
-    saved = json.loads(g.files["savedata:/mhgu-sdk-0-0.json"])
+    saved = json.loads(g.files[SAVE])
     assert saved["data"]["weapons"][0] == 10
+    last_saved = g.files[SAVE]
     restarted = boot(elf, character_save({0: 10, 11: 11}))
     assert restarted.run(service(restarted)[1], 0) == 10
     verify_status(restarted)
@@ -698,7 +721,7 @@ def verify():
     g.cpu.mem_write(network + 0x1625A, b"\0")
     assert row() == 0 and press(0x2000) == 5
     assert g.cpu.mem_read(network + 0x1625A, 1) == b"\x01"
-    assert g.run(selected, 0) == 0 and g.files[SAVE] == config
+    assert g.run(selected, 0) == 0 and g.files[SAVE] == last_saved
     # More than two extra styles: the next native page uses the same eight widgets.
     for id_ in (40, 41):
         assert g.run(register, style_descriptor(g, id_, 0), 0, 0) == 0
@@ -1059,14 +1082,14 @@ def verify():
     api = api_for(without_mod, b"mhgu::WeaponRegistryV7", b"WPN7")
     assert without_mod.run(without_mod.get(api + 4)) == 0
 
-    old = json.loads(character_save({0: 10}, generation=5))
+    old = json.loads(character_save({0: 10}))
     old["data"]["custom_weapons"] = [16]
     g.files[SAVE] = json.dumps(old).encode()
     select_character(g, 0)
     assert g.run(equipped) == 1 and g.run(instance, first, out) == 0
 
     print(
-        "GU equipment-box entry, native style panel, expansion inventory, My Set, status and A/B reload passed"
+        "GU equipment-box entry, native style panel, expansion inventory, My Set, status and single-file reload passed"
     )
 
 
