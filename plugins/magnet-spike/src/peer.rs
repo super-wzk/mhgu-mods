@@ -6,9 +6,12 @@ use crate::{
     sound,
 };
 use mhfz_sdk::{action::Cursor, sound::Clock};
-use mhgu_sdk::weapon::style::{
-    action, hunter,
-    remote::{self, PeerStates, Roster},
+use mhgu_sdk::{
+    combat::collision::hurt::HurtScene,
+    weapon::style::{
+        action, hunter,
+        remote::{self, PeerStates, Roster},
+    },
 };
 
 pub(super) static PLAYBACK: remote::Playback = remote::Playback {
@@ -20,7 +23,7 @@ pub(super) static PLAYBACK: remote::Playback = remote::Playback {
     }),
 };
 
-pub(super) static POSITION: remote::ActionState = remote::ActionState {
+pub(super) static POSITION: remote::PositionState = remote::PositionState {
     encode: encode_position,
     decode: decode_position,
 };
@@ -28,7 +31,13 @@ pub(super) static POSITION: remote::ActionState = remote::ActionState {
 static PEERS: PeerStates<Replay> = PeerStates::new();
 // Pose selection can run from inside the native motion call. Keep the
 // published mode outside the exclusively borrowed replay cursor.
-static POSES: PeerStates<WeaponPose> = PeerStates::new();
+static POSES: PeerStates<PeerPose> = PeerStates::new();
+
+#[derive(Default)]
+struct PeerPose {
+    pose: WeaponPose,
+    boost_effects: fx::BoostEffects,
+}
 
 fn index_of(actor: u32) -> Option<usize> {
     unsafe { Roster::current()?.peer_index(actor) }
@@ -37,7 +46,9 @@ fn index_of(actor: u32) -> Option<usize> {
 pub(super) unsafe fn pose(actor: u32) -> Option<WeaponPose> {
     let index = index_of(actor)?;
     let mut result = None;
-    POSES.update(index, actor, |pose, _| result = *pose);
+    POSES.update(index, actor, |saved, _| {
+        result = saved.as_ref().map(|saved| saved.pose)
+    });
     result
 }
 
@@ -46,54 +57,49 @@ unsafe extern "C" fn encode_mode(actor: u32) -> u8 {
     let previous = motion::local_pose(actor).unwrap_or_default().mode;
     // GU can build the packet during the action transition, before our
     // controller has published the new mode.
-    let mode = action::custom_id(group, slot)
+    action::custom_id(group, slot)
         .filter(|&state| program::ACTIONS.contains(state))
-        .map_or(previous, |state| previous.for_state(state));
-    let mut boosts = magnet::boosts(actor);
-    if let Some(mode) = action::custom_id(group, slot).and_then(program::boost_mode)
-        && magnet::boost_ready(actor, mode)
-    {
-        boosts |= 1 << mode as u8;
-    }
-    mode as u8 | boosts << 1
+        .map_or(previous, |state| previous.for_state(state)) as u8
 }
 
 unsafe extern "C" fn decode_mode(actor: u32, value: u8) {
     let Some(index) = index_of(actor) else { return };
-    let mode = if value & 1 == 0 {
-        Mode::Slash
-    } else {
-        Mode::Impact
+    let mode = match value {
+        0 => Mode::Slash,
+        1 => Mode::Impact,
+        _ => return,
     };
     POSES.update(index, actor, |saved, _| {
-        *saved = Some(WeaponPose {
-            mode,
-            coast: None,
-            boosts: value >> 1,
-        });
+        let saved = saved.get_or_insert_with(PeerPose::default);
+        saved.pose.mode = mode;
+        saved.pose.coast = None;
     });
 }
 
-unsafe extern "C" fn encode_position(actor: u32) -> u8 {
+unsafe extern "C" fn encode_position(actor: u32) -> remote::PositionSample {
     let (group, slot) = unsafe { action::current(actor) };
-    let Some(id) = action::custom_id(group, slot) else {
-        return u8::MAX;
-    };
-    let coast = motion::local_pose(actor).is_some_and(|pose| pose.coast == Some(id));
-    u8::from(coast) | magnet::boosts(actor) << 1
+    let action = action::custom_id(group, slot)
+        .filter(|&id| program::is_attraction(id))
+        .map_or(u8::MAX, |id| {
+            u8::from(motion::local_pose(actor).is_some_and(|pose| pose.coast == Some(id)))
+        });
+    remote::PositionSample {
+        action,
+        weapon: magnet::boosts(actor),
+    }
 }
 
-unsafe extern "C" fn decode_position(actor: u32, value: u8) {
-    let (group, slot) = unsafe { action::current(actor) };
-    let Some(id) = action::custom_id(group, slot) else {
-        return;
-    };
+unsafe extern "C" fn decode_position(actor: u32, sample: remote::PositionSample) {
     if let Some(index) = index_of(actor) {
         POSES.update(index, actor, |saved, _| {
-            let pose = saved.get_or_insert_with(WeaponPose::default);
-            pose.boosts = value >> 1;
-            if value & 1 != 0 && program::is_attraction(id) {
-                pose.coast = Some(id);
+            let saved = saved.get_or_insert_with(PeerPose::default);
+            if sample.weapon <= 3 {
+                saved.pose.boosts = sample.weapon;
+            }
+            if sample.action == 1 {
+                let (group, slot) = unsafe { action::current(actor) };
+                saved.pose.coast =
+                    action::custom_id(group, slot).filter(|&id| program::is_attraction(id));
             }
         });
     }
@@ -138,7 +144,7 @@ impl Replay {
                 .is_none_or(|cursor| cursor.state != state)
         {
             POSES.update(index, actor, |saved, _| {
-                let pose = saved.get_or_insert_with(WeaponPose::default);
+                let pose = &mut saved.get_or_insert_with(PeerPose::default).pose;
                 pose.mode = pose.mode.for_state(state);
             });
             self.airborne =
@@ -227,10 +233,31 @@ unsafe extern "C" fn tick(actor: u32, state: u8) {
 unsafe extern "C" fn observe(local: u32) {
     unsafe { magnet::network::observe(local) };
     let roster = unsafe { Roster::current() };
-    let area = roster.as_ref().map(|_| unsafe { hunter::area(local) });
+    let scene = roster
+        .as_ref()
+        .and_then(|_| unsafe { HurtScene::from_raw(local) });
+    let area = scene.as_ref().map(HurtScene::area);
+    let frames = scene.as_ref().map_or(0., HurtScene::frames);
     for index in 0..remote::PLAYER_COUNT {
-        let actor = roster.as_ref().and_then(|r| r.peer(index)).unwrap_or(0);
-        POSES.update(index, actor, |_, _| {});
+        let actor = roster
+            .as_ref()
+            .and_then(|r| r.peer(index))
+            .filter(|&actor| remote::is_position_event_peer(crate::STYLE.id, actor))
+            .unwrap_or(0);
+        POSES.update(index, actor, |saved, _| {
+            if let (Some(saved), Some(area)) = (saved, area) {
+                unsafe {
+                    saved.boost_effects.advance(
+                        actor,
+                        area,
+                        frames,
+                        saved.pose.mode,
+                        saved.pose.boosts,
+                        false,
+                    )
+                };
+            }
+        });
         let replaying = actor != 0
             && unsafe {
                 hunter::is_quest(actor) && Some(hunter::area(actor)) == area && {

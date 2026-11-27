@@ -25,3 +25,7 @@ cargo test --workspace --manifest-path tools/mhfz2mhgu/Cargo.toml
 给 `magnet-spike-battle` 传入 `--gu-weapon "$MHGU_ROMFS/nativeNX/arc/player/quest/w00.arc"` 时，从 `effect.bin` 的 4037 号特效组转换第 11、14 项，分别供磁力弹和部位标记使用。原始网格和贴图以及 GU 的 EFL、PEL 随动作 ARC 打包，`effects/routes.bin` 随动作表编入 NRO。旋转曲线保持原版每 540 帧一圈，供长期显示的部位标记使用。
 
 同一转换还输出 4037 组第 21、22、70、71 项及 4035／4036 组第 2 项。两种格挡的火花使用第 21 项，按 FZ `8102CDDC` 中的局部坐标及原生出生延迟写入 GU 粒子定义。
+
+磁力反弹需要 4037 组第 1、77、78 项。转换器分别输出武器闪光、定点闪光和脉冲的粒子定义，插件按请求 11／12 的时序提供挂点与世界坐标。
+
+磁缠强化的粒子定义来自 4038 组第 16 项和 4037 组第 85–88 项，按启动闪光、形态脉冲和形态火花分别写入选择器表。

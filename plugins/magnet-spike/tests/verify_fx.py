@@ -25,7 +25,7 @@ def verify():
         clock, unit, point = (g.alloc(n) for n in (128, 416, 16))
         g.put(0x2126764, clock)
         g.put(clock + 56, 0x3F800000)
-        for layer in range(105):
+        for layer in range(180):
             child = g.alloc(528)
             g.run(0x9B8DF8, child)
             name = rf"effect\frontier_ms\e{layer}"
@@ -50,7 +50,7 @@ def verify():
                 frames, = struct.unpack_from("<I", efl, life + 4)
                 joint = 48 + struct.unpack_from("<I", efl, 64)[0]
                 delay, = struct.unpack_from("<I", efl, joint + 100)
-                if layer >= 93:
+                if 93 <= layer < 105:
                     slash = layer < 99
                     index = layer - (93 if slash else 99)
                     if slash:
@@ -90,7 +90,7 @@ def verify():
                         samples[frame] = packet.basis_x
                 assert math.dist(samples[60], samples[120]) > 0.01
                 assert math.dist(samples[60], samples[600]) < 0.002
-    print("Magnet Spike: native shot, rotating mark and both guards draw with their authored timing")
+    print("Magnet Spike: native shot, rotating mark, guard, repel and boost layers draw")
 
 
 if __name__ == "__main__":

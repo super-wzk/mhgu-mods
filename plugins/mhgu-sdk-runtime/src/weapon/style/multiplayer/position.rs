@@ -19,6 +19,11 @@ const POSITION_SERIAL_SHIFT: u32 = 8;
 const ACTION_SERIAL_SHIFT: u32 = 26; // Above all netPlAction state and sheathe bits.
 const MAX_SERIAL: u8 = 63;
 const MAX_VALUE: u8 = 7;
+const WEAPON_STATE_SHIFT: u32 = 28;
+const WEAPON_PRESENT: u32 = 1 << 30;
+const MAX_WEAPON_VALUE: u8 = 3;
+// State revision uses bits 0..3 and 14..15, leaving GU's nibble intact.
+const WEAPON_SERIAL_HIGH_SHIFT: u32 = 10;
 // Ordinary position snapshots keep their existing action stamp. Explicit
 // events use bit 31 and the remaining bits outside GU's 4..7 nibble.
 const EVENT_PRESENT: u32 = 1 << 31;
@@ -31,8 +36,22 @@ struct Stamp {
     serial: u8,
 }
 
+struct WeaponSnapshot {
+    actor: u32,
+    style: u32,
+    value: u8,
+    revision: u8,
+}
+
+#[derive(Default)]
+struct Received {
+    action: Option<Stamp>,
+    weapon: Option<(u32, u8)>,
+}
+
 static SENT: Shared<Option<(u32, Stamp)>> = Shared::new(None);
-static ACCEPTED: remote::PeerStates<Stamp> = remote::PeerStates::new();
+static SENT_WEAPON: Shared<Option<WeaponSnapshot>> = Shared::new(None);
+static ACCEPTED: remote::PeerStates<Received> = remote::PeerStates::new();
 static SERVICE: remote::PositionService = remote::PositionService(bind);
 static EVENTS: remote::PositionEvents = remote::PositionEvents {
     bind: bind_event,
@@ -100,11 +119,11 @@ extern "C" fn send_event(style: u32, actor: u32, payload: u32) -> bool {
     true
 }
 
-fn codec(entry: &Entry) -> Option<&'static remote::ActionState> {
+fn codec(entry: &Entry) -> Option<&'static remote::PositionState> {
     unsafe { entry.multiplayer.position.load(Ordering::Acquire).as_ref() }
 }
 
-extern "C" fn bind(id: u32, state: &'static remote::ActionState) -> bool {
+extern "C" fn bind(id: u32, state: &'static remote::PositionState) -> bool {
     let Some(entry) = registered_entry(id)
         .filter(|entry| entry.kind.is_some() && entry.multiplayer.playback().is_some())
     else {
@@ -167,10 +186,17 @@ pub(super) unsafe fn accept_action(packet: u32, actor: u32) {
             action: id,
             serial,
         });
-    ACCEPTED.update(index, actor, |saved, _| *saved = stamp);
+    ACCEPTED.update(index, actor, |saved, _| {
+        saved.get_or_insert_with(Received::default).action = stamp;
+    });
 }
 
-pub(super) fn observe(index: usize, actor: u32) {
+pub(super) unsafe fn observe(index: usize, actor: u32) {
+    let actor = if unsafe { peer_entry(actor) }.and_then(codec).is_some() {
+        actor
+    } else {
+        0
+    };
     ACCEPTED.update(index, actor, |_, _| {});
 }
 
@@ -182,19 +208,55 @@ unsafe fn position_extension() -> Option<u32> {
     let actor = unsafe { local_hunter() };
     let entry = unsafe { local_entry(actor) }?;
     let state = codec(entry)?;
+    let sample = unsafe { (state.encode)(actor) };
+    let mut flags = 0;
+    if sample.action <= MAX_VALUE {
+        flags |= unsafe { action_extension(actor, entry, sample.action) }.unwrap_or(0);
+    }
+    if sample.weapon <= MAX_WEAPON_VALUE {
+        flags |= weapon_extension(actor, entry.style.id, sample.weapon);
+    }
+    (flags != 0).then_some(flags)
+}
+
+unsafe fn action_extension(actor: u32, entry: &Entry, value: u8) -> Option<u32> {
     let (group, slot) = unsafe { action::current(actor) };
     let id = action::custom_id(group, slot)?;
     let (owner, stamp) = SENT.with(|saved| *saved)?;
     if (owner, stamp.style, stamp.action) != (actor, entry.style.id, id) {
         return None;
     }
-    let value = unsafe { (state.encode)(actor) };
-    (value <= MAX_VALUE).then_some(
+    Some(
         POSITION_PRESENT
             | (u32::from(value) << POSITION_STATE_SHIFT)
             | (u32::from(id) << POSITION_ACTION_SHIFT)
             | (u32::from(stamp.serial) << POSITION_SERIAL_SHIFT),
     )
+}
+
+fn weapon_extension(actor: u32, style: u32, value: u8) -> u32 {
+    let revision = SENT_WEAPON.with(|saved| {
+        if let Some(previous) = saved
+            && (previous.actor, previous.style, previous.value) == (actor, style, value)
+        {
+            return previous.revision;
+        }
+        let revision = saved
+            .as_ref()
+            .map_or(0, |previous| (previous.revision + 1) & MAX_SERIAL);
+        *saved = Some(WeaponSnapshot {
+            actor,
+            style,
+            value,
+            revision,
+        });
+        revision
+    });
+    let revision = u32::from(revision);
+    WEAPON_PRESENT
+        | u32::from(value) << WEAPON_STATE_SHIFT
+        | (revision & 15)
+        | (revision & 0x30) << WEAPON_SERIAL_HIGH_SHIFT
 }
 
 #[forge::hook(offset = 0x9fc3d8)]
@@ -238,28 +300,45 @@ unsafe fn apply_extension(packet: u32, actor: u32) -> Option<()> {
         }
         return Some(());
     }
-    if flags & POSITION_PRESENT == 0 {
+    if flags & (POSITION_PRESENT | WEAPON_PRESENT) == 0 {
         return None;
     }
     let entry = unsafe { peer_entry(actor) }?;
     let state = codec(entry)?;
     let index = unsafe { remote::Roster::current() }?.peer_index(actor)?;
     let (group, slot) = unsafe { action::current(actor) };
-    let id = action::custom_id(group, slot)?;
-    if id != (flags >> POSITION_ACTION_SHIFT) as u8 {
-        return None;
-    }
-    let serial = (flags >> POSITION_SERIAL_SHIFT) as u8 & MAX_SERIAL;
-    let expected = Stamp {
-        style: entry.style.id,
-        action: id,
-        serial,
+    let id = action::custom_id(group, slot);
+    let mut sample = remote::PositionSample {
+        action: u8::MAX,
+        weapon: u8::MAX,
     };
-    let mut accepted = false;
-    ACCEPTED.update(index, actor, |saved, _| accepted = *saved == Some(expected));
-    if accepted {
-        let value = (flags >> POSITION_STATE_SHIFT) as u8 & MAX_VALUE;
-        unsafe { (state.decode)(actor, value) };
+    ACCEPTED.update(index, actor, |saved, _| {
+        let received = saved.get_or_insert_with(Received::default);
+        if flags & POSITION_PRESENT != 0
+            && let Some(id) = id.filter(|&id| id == (flags >> POSITION_ACTION_SHIFT) as u8)
+            && received.action
+                == Some(Stamp {
+                    style: entry.style.id,
+                    action: id,
+                    serial: (flags >> POSITION_SERIAL_SHIFT) as u8 & MAX_SERIAL,
+                })
+        {
+            sample.action = (flags >> POSITION_STATE_SHIFT) as u8 & MAX_VALUE;
+        }
+        if flags & WEAPON_PRESENT != 0 {
+            let revision = ((flags & 15) | ((flags >> WEAPON_SERIAL_HIGH_SHIFT) & 0x30)) as u8;
+            let newer = received.weapon.is_none_or(|(style, previous)| {
+                style != entry.style.id
+                    || matches!(revision.wrapping_sub(previous) & MAX_SERIAL, 1..=31)
+            });
+            if newer {
+                received.weapon = Some((entry.style.id, revision));
+                sample.weapon = (flags >> WEAPON_STATE_SHIFT) as u8 & MAX_WEAPON_VALUE;
+            }
+        }
+    });
+    if sample.action != u8::MAX || sample.weapon != u8::MAX {
+        unsafe { (state.decode)(actor, sample) };
     }
     Some(())
 }

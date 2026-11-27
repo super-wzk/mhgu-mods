@@ -301,6 +301,13 @@ fn convert_assets(
             playback.staggered_bank(&bank, 4037, 21, &[
                 (0, [0., 0., 40.]), (12, [0., 0., 100.]), (24, [0., 0., 170.]),
             ])?;
+            // 8102CDDC requests 11/12 share the joint flash, endpoint flash,
+            // and direction-dependent pulse.
+            playback.bank(&bank, 4037, &[1, 77, 78])?;
+            // 8102CDDC requests 13/14 emit the activation flash and the
+            // distinct periodic effects for each form.
+            playback.bank(&load_bank(4038)?, 4038, &[16])?;
+            playback.bank(&bank, 4037, &[85, 86, 87, 88])?;
             None
         }
     };

@@ -623,10 +623,22 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     g.stub(0x3288C4, lambda size, *_: g.alloc(size))
     g.stub(0x328900, lambda *_: 0)
     layers = {}
+    repel_effects = []
+    get_parent = g.alloc(4)
+    g.put(g.get(actor) + 304, get_parent)
+    g.stub(get_parent, lambda owner, *_: owner + 600)
 
     def spawn(_, unit, handle_id, group):
         assert handle_id == group == 1
         selector = g.get(g.cpu.reg_read(UC_ARM_REG_SP))
+        if selector >= 105:
+            parent = g.get(unit + 320)
+            if parent:
+                assert g.half(unit + 194) == 8
+            repel_effects.append(
+                (selector, parent, position(unit + (144 if parent else 304)), position(unit + 176))
+            )
+            return 1
         child = g.alloc(80)
         g.put(unit + 336, child)
         put_vec(child + 64, *position(unit + 304))
@@ -913,6 +925,41 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     assert configure[-1] == 0
     assert g.get(actor + 11072) == struct.unpack("<I", struct.pack("<f", 28.))[0]
 
+    def check_repel_effect(weapon_offset, pulse_offset, scale):
+        point = visuals()[0][1]
+        root = position(actor + 64)
+        assert not repel_effects
+        put_vec(clock, 2.)
+        update()
+        put_vec(clock, 0.)
+        update()
+        assert not repel_effects
+        put_vec(clock, 2.)
+        update()
+        pulse = repel_effects[:4]
+        assert [selector for selector, _, _, _ in pulse] == list(range(142, 146))
+        assert all(parent == 0 and math.isclose(size[0], scale, abs_tol=1e-5)
+                   and size == (size[0],) * 3 for _, parent, _, size in pulse), (point, pulse)
+        pulse_at = pulse[0][2]
+        distance = math.dist(pulse_at, point)
+        assert math.isclose(distance, pulse_offset, abs_tol=0.01) and pulse_at[1] < point[1]
+        assert all(at == pulse_at for _, _, at, _ in pulse)
+        assert [effect[:3] for effect in repel_effects[4:]] == (
+            [(i, actor + 600, weapon_offset) for i in range(105, 126)]
+            + [(i, 0, point) for i in range(126, 142)]
+        )
+        update()
+        yaw = g.half(actor + 4076) * math.tau / 65536.
+        rear = (root[0] - 100. * math.sin(yaw), root[1] + 100., root[2] - 100. * math.cos(yaw))
+        assert [i for i, _, _, _ in repel_effects[41:]] == list(range(126, 142))
+        assert all(parent == 0 and math.dist(at, rear) < 0.02
+                   for _, parent, at, _ in repel_effects[41:])
+        update()
+        assert len(repel_effects) == 57
+        repel_effects.clear()
+
+    check_repel_effect((60., 0., 60.), 200., 1.)
+
     # Native root displacement is what moves the mark from near to far. A
     # follow-up queued after frame 10 executes at the source's frame 60.
     apply_repel_root(g, actor, 1429, 0, 45)
@@ -934,7 +981,7 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     set_action(1, 0)
     tick(SPECIAL, native_pad=True)
     tick(frame=99., ended=True)
-    mark_at(500., 12.)
+    mark_at(420., 12.)
     g.cpu.hook_del(g.traps.pop(0x2864C4))
     g.stub(0x2864C4, lambda _, skill, *__: int(skill == 163))
     g.cpu.hook_del(g.traps.pop(0x65FA04))
@@ -947,6 +994,7 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     g.cpu.hook_del(g.traps.pop(0x65FA04))
     g.stub(0x65FA04, lambda *_: held)
     assert g.get(actor + 11072) == struct.unpack("<I", struct.pack("<f", 48.))[0]
+    check_repel_effect((0., 0., 170.), 100., 0.8)
     apply_repel_root(g, actor, 1444, 0, 40)
     assert position(actor + 64)[2] < -1500.
     put_vec(actor + 11072, 23.)
@@ -1455,6 +1503,36 @@ def verify_magnetic_boost(g, actor, monster, collision, set_action, tick, meter)
     slash, impact, active, cooling = 0xfff26752, 0xff71b6ef, 0xffffc76b, 0xff8d8d8d
     assert tracks() == [(0., slash), (0., impact)]
 
+    effects, live, rotations = [], {}, {}
+    part = g.get(actor + 9120)
+    joint = g.get(part + 1172) + 16
+    initial_pose = bytes(g.cpu.mem_read(joint, 64))
+
+    def xyz(address):
+        return struct.unpack("<3f", g.cpu.mem_read(address, 12))
+
+    def emit(_, unit, handle, group):
+        assert handle == group == 1
+        selector = g.get(g.cpu.reg_read(UC_ARM_REG_SP))
+        assert 146 <= selector < 180 and g.get(unit + 320) == 0
+        child = g.alloc(96)
+        g.put(unit + 336, child)
+        effects.append((selector, xyz(unit + 304)))
+        live[unit] = child
+        return 1
+
+    def rotate(child, radians, *_):
+        rotations[child] = xyz(radians)
+
+    def stop(unit, immediate, *_):
+        assert immediate == 1
+        live.pop(unit)
+
+    for address, callback in ((0x3267D0, emit), (0x8A7DC4, rotate), (0x32A400, stop)):
+        if address in g.traps:
+            g.cpu.hook_del(g.traps.pop(address))
+        g.stub(address, callback)
+
     def hit(buttons, expected, *, contact=True):
         for slot in (12320, 12504):
             g.run(0x1687A8, actor + slot)
@@ -1481,7 +1559,11 @@ def verify_magnetic_boost(g, actor, monster, collision, set_action, tick, meter)
             assert g.half(actor + 1204) == clip
             tick(frame=170., ended=True)
 
+    time = 0.
+
     def elapsed(frames):
+        nonlocal time
+        time += frames
         clock = g.get(0x2126764) + 104
         g.cpu.mem_write(clock, struct.pack("<f", frames))
         g.run(g.hooks[0x16_ABAC], collision)
@@ -1496,12 +1578,41 @@ def verify_magnetic_boost(g, actor, monster, collision, set_action, tick, meter)
     hit(X, 43)
     assert tracks() == [(16., slash), (0., impact)]
     boost(0x8000 + 163, 1451, staggered=True)
+    slash_end = time + 4800.
     assert tracks() == [(16., active), (0., impact)]
+    elapsed(35.)
+    elapsed(0.)
+    assert not effects
+    elapsed(1.)
+    assert effects == [(i, (-20., 90., 160.)) for i in range(146, 164)]
+    flash, first_child = next(iter(live.items()))
+    # Yaw and roll the moving weapon together. GU uses the full matrix for
+    # the local offset, but receives only pitch and yaw for emission.
+    g.cpu.mem_write(joint, struct.pack("<16f", 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0,
+                                     300., 200., 100., 1.))
+    elapsed(4.)
+    assert xyz(first_child + 64) == xyz(flash + 304) == (340., 120., 100.)
+    pitch, yaw, roll = rotations[first_child]
+    assert pitch == roll == 0. and math.isclose(yaw, math.pi / 2, abs_tol=0.0001)
+    del live[flash]
+    rotations.clear()
+    g.run(g.hooks[0x32A104], flash)
+    g.cpu.mem_write(joint, initial_pose)
+    elapsed(2.)
+    assert first_child not in rotations
+    assert effects[18:] == ([(i, (105., 90., 140.)) for i in range(168, 174)]
+                           + [(i, (-20., 90., 160.)) for i in range(164, 166)])
+    g.cpu.mem_write(actor + 10057, b"\0")
+    elapsed(20.)
+    assert len(effects) == 26
+    g.cpu.mem_write(actor + 10057, b"\1")
+    elapsed(20.)
+    assert effects[26:] == [(i, (15., 90., 140.)) for i in range(168, 174)]
     set_action(1, 0)
     tick(X, held=0x800, native_pad=True)
     assert g.half(actor + 9482) == 0x8000 + 12
     slot = hit(X, 47, contact=False)
-    boosted_slash = capture_action(g, actor)
+    boosted_slash = capture_action(g, actor), capture_position(g, actor)
     before = sum(meter()[0])
     g.cpu.mem_write(slot + 144, struct.pack("<hH", 100, 0))
     g.run(0x16C0C0, collision, slot, monster)
@@ -1511,24 +1622,47 @@ def verify_magnetic_boost(g, actor, monster, collision, set_action, tick, meter)
 
     for _ in range(29):
         hit(X | A, 44)
-    assert tracks() == [(16., active), (16., impact)]
+    assert 15. < tracks()[0][0] < 16. and tracks()[0][1] == active
+    assert tracks()[1] == (16., impact)
     elapsed(2.)
     boost(0x8000 + 164, 1452)
+    impact_end = time + 4800.
+    start = len(effects)
+    elapsed(33.)
+    assert len(effects) == start
+    elapsed(1.)
+    assert effects[start:] == [(i, (80., 90., 200.)) for i in range(146, 164)]
+    elapsed(8.)
+    assert effects[start + 18:] == ([(i, (60., 90., 260.)) for i in range(174, 180)]
+                                   + [(i, (80., 90., 200.)) for i in range(166, 168)])
     hit(X | A, 48)
-    boosted_impact = capture_action(g, actor)
-    elapsed(4798.)
+    boosted_impact = capture_action(g, actor), capture_position(g, actor)
+    set_action(1, 0)
+    idle_boost = capture_action(g, actor), capture_position(g, actor)
+    elapsed(slash_end - time)
     assert tracks()[0] == (16., cooling) and tracks()[1][1] == active
-    elapsed(2.)
+    expired_slash = capture_position(g, actor)
+    elapsed(impact_end - time)
     expired_impact = capture_position(g, actor)
     assert [color for _, color in tracks()] == [cooling, cooling]
+    flags = [struct.unpack_from("<I", packet, 44)[0]
+             for packet in (idle_boost[1], expired_slash, expired_impact)]
+    assert [flag >> 24 for flag in flags] == [0x70, 0x60, 0x40]
+    revisions = [(flag & 15) | (flag >> 10 & 0x30) for flag in flags]
+    assert [((b - a) & 63) for a, b in zip(revisions, revisions[1:])] == [1, 1]
+    stopped_at = len(effects)
     hit(X, 43)
     boost(0)
-    elapsed(5998.)
+    elapsed(slash_end + 6000. - time)
     assert tracks()[0] == (0., slash) and tracks()[1][1] == cooling
     hit(X, 43)
     assert tracks()[0][0] > 0.
-    elapsed(2.)
+    elapsed(impact_end + 6000. - time)
     assert tracks()[1] == (0., impact)
+    assert len(effects) == stopped_at
+    for unit in list(live):
+        g.run(g.hooks[0x32A104], unit)
+    g.cpu.hook_del(g.traps.pop(0x8A7DC4))
 
     # Passive recharge flashes only the cell whose threshold was crossed.
     set_action(1, 0)
@@ -1546,7 +1680,7 @@ def verify_magnetic_boost(g, actor, monster, collision, set_action, tick, meter)
     assert meter(flashes=True) == [(4, 52)]
     elapsed(2.)
     assert meter(flashes=True) == []
-    return boosted_slash, boosted_impact, expired_impact
+    return boosted_slash, boosted_impact, idle_boost, expired_slash, expired_impact
 
 
 if __name__ == "__main__":

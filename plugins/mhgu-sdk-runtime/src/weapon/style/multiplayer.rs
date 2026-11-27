@@ -14,7 +14,7 @@ mod position;
 pub(super) struct Bindings {
     playback: AtomicPtr<remote::Playback>,
     sheathe: AtomicPtr<Sheathe>,
-    position: AtomicPtr<remote::ActionState>,
+    position: AtomicPtr<remote::PositionState>,
     position_event: AtomicPtr<()>,
 }
 
@@ -246,7 +246,7 @@ pub(super) unsafe fn observe_peers(actor: u32) {
         let roster = unsafe { remote::Roster::current() };
         for index in 0..remote::PLAYER_COUNT {
             let peer = roster.as_ref().and_then(|r| r.peer(index)).unwrap_or(0);
-            position::observe(index, peer);
+            unsafe { position::observe(index, peer) };
             PEER_SHEATHE.update(index, peer, |saved, _| {
                 if saved.is_some()
                     && (!unsafe { hunter::is_quest(peer) }

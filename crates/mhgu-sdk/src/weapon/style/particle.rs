@@ -101,6 +101,21 @@ pub unsafe fn move_world_unit(unit: u32, position: [f32; 3]) {
     }
 }
 
+/// Update a world-anchored unit's position and orientation without restarting emission.
+/// # Safety
+/// The unit must meet the game-thread and live-handle requirements of `move_world_unit`.
+pub unsafe fn pose_world_unit(unit: u32, position: [f32; 3], angles: [u16; 3]) {
+    unsafe {
+        let Some(unit) = Object::at(unit) else { return };
+        move_world_unit(unit.addr(), position);
+        let degrees = angles.map(|angle| f32::from(angle) * 360. / 65536.);
+        unit.embedded(128).set(Field::at(32), degrees);
+        let rotate: unsafe extern "C" fn(u32, *const f32, u32) =
+            core::mem::transmute(entry(0x32a4c4));
+        rotate(unit.addr(), degrees.as_ptr(), 0);
+    }
+}
+
 /// Tracks particle units owned by one action, including units waiting to emit.
 pub struct TrackedUnits<const N: usize> {
     units: [AtomicU32; N],
@@ -481,6 +496,21 @@ pub unsafe fn joint_matrix(actor: u32, joint: u32) -> Option<u32> {
 pub unsafe fn joint_position(actor: u32, joint: u32) -> Option<[f32; 3]> {
     let matrix = unsafe { Object::at(joint_matrix(actor, joint)?) }?;
     Some(matrix.get(Field::at(48)))
+}
+
+/// Sample a joint on the live main weapon part using GU's model joint table.
+/// # Safety
+/// Call with a live quest hunter on the game thread.
+pub unsafe fn weapon_joint_pose(actor: u32, joint: u8) -> Option<[f32; 16]> {
+    unsafe {
+        let owner = Object::at(actor)?;
+        let part = Object::at(owner.get(Field::at(9120)))?;
+        if part.get::<u32>(Field::at(48)) != actor || part.get::<u32>(Field::at(240)) == 0 {
+            return None;
+        }
+        let matrix = Object::at(joint_matrix(part.addr(), u32::from(joint))?)?;
+        Some(matrix.get(Field::at(0)))
+    }
 }
 
 /// Query the floor and highest special surface at the supplied world position.

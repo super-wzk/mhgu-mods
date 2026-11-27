@@ -76,7 +76,7 @@ GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提�
 
 独立武器可用 [melee::bind_strike_contact](src/weapon/style/action/melee.rs) 监听本地近战命中。运行时在 GU 结算会心后按猎人、碰撞槽和原生命中编号匹配，回调提供原始动作值、出招时的加成及该次命中的实际会心倍率。
 
-[rules](src/weapon/style/rules.rs) 为已注册的风格提供可选的格挡半角、公共动作结束条件、弹刀和镜头回调。[particle](src/weapon/style/particle.rs) 提供模型粒子绘制与释放回调的登记接口。
+[rules](src/weapon/style/rules.rs) 为已注册的风格提供可选的格挡半角、公共动作结束条件、弹刀和镜头回调。[particle](src/weapon/style/particle.rs) 提供模型粒子绘制与释放回调的登记接口。`weapon_joint_pose` 从已绑定的主武器部件复制关节矩阵。`pose_world_unit` 通过 GU 原生入口更新仍在播放的世界粒子坐标和朝向。
 
 需要跟随独立场景对象的特效可使用世界坐标发射。持有单位句柄时，通过 `on_release` 在原生释放前移除记录，在游戏线程用 `move_world_unit` 更新已提交单位的位置，保留其播放进度。对象结束时，先移除记录再调用 `stop_unit`。[磁力弹与部位标记示例](../../plugins/magnet-spike/src/fx.rs)
 
@@ -86,6 +86,6 @@ GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提�
 
 扩展武器可调用 [`remote::bind_position_events`](src/weapon/style/remote.rs) 登记任务位置事件。发送时沿用 GU 的任务位置包，在保留位携带 27 位武器数据。SDK 验证发射者装备，并把发射者的原生坐标一起交给接收回调。内容插件负责载荷格式、重复事件和效果清理。[磁力弹回放](../../plugins/magnet-spike/src/magnet/network.rs)
 
-`remote::bind_position_state` 可在同一个私有动作内随 GU 周期位置包更新一个 0–7 的值。SDK 按队友、武器风格、动作 ID 与动作序号核对，位置与朝向由 GU 接收。磁斩锤用它同步突进转入滑落的时机。[位置包实现](../../plugins/mhgu-sdk-runtime/src/weapon/style/multiplayer/position.rs)
+`remote::bind_position_state` 通过 `PositionState` 登记 GU 周期位置包的编解码回调。`PositionSample::action` 可携带同一私有动作内的 0–7 值，按动作 ID 与动作序号核对。`PositionSample::weapon` 可携带跨动作的 0–3 值，按该武器状态的更新序号核对，待机时也能使用。两个字段都用 `u8::MAX` 表示本次未提供。位置与朝向由 GU 接收。[位置包实现](../../plugins/mhgu-sdk-runtime/src/weapon/style/multiplayer/position.rs)
 
 `Style::commands` 可在 GU 装载命令表时追加一组有序的武器派生，由 GU 缓冲先接收的输入并在指定帧切换动作。`action::enter` 走 GU 的公共动作切换。已判定的单条派生可通过 `action::transition` 提交，狩技使用 `Transition::HUNTER_ART`。`action::play_motion` 使用猎人的原生动作编码。`Attack::submit` 把动作值和形状交给 GU 的攻击构造器及武器修正。注册器在大剑的首个有效攻击事件处理兽魂附身。`guard::Policy` 提供一次格挡结果，注册器负责把结果交给 GU 的受击、斩味和回正流程，内容插件可以用 `guard::take` 进入后续招式。

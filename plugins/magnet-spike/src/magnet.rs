@@ -1,6 +1,6 @@
 //! Magnetic shot and attached mark, updated on the GU scene clock.
 use crate::{
-    fx::{Effect, Route},
+    fx::{BoostEffects, Effect, RepelEffect, Route},
     motion,
     program::{self, Mode},
 };
@@ -217,9 +217,11 @@ struct Magnet {
     owner: u32,
     shots: Vec<Projectile>,
     mark: Option<Mark>,
+    repel: Option<RepelEffect>,
     gauge: Gauge,
     range: Option<MarkRange>,
     boosts: [Boost; 2],
+    boost_effects: BoostEffects,
 }
 
 impl Magnet {
@@ -228,9 +230,11 @@ impl Magnet {
             owner: 0,
             shots: Vec::new(),
             mark: None,
+            repel: None,
             gauge: Gauge::new(),
             range: None,
             boosts: [Boost::Charging(0); 2],
+            boost_effects: BoostEffects::new(),
         }
     }
 
@@ -238,11 +242,20 @@ impl Magnet {
         if self.owner != owner || owner == 0 {
             self.shots.clear();
             self.mark = None;
+            self.repel = None;
             self.gauge = Gauge::new();
             self.range = None;
             self.boosts = [Boost::Charging(0); 2];
+            self.boost_effects = BoostEffects::new();
             self.owner = owner;
         }
+    }
+
+    fn active_boosts(&self) -> u8 {
+        let [slash, impact] = self
+            .boosts
+            .map(|boost| u8::from(matches!(boost, Boost::Active(_))));
+        slash | impact << 1
     }
 }
 
@@ -250,6 +263,14 @@ static LOCAL: Shared<Magnet> = Shared::new(Magnet::new());
 
 pub fn reset() {
     LOCAL.with(|state| state.select_owner(0));
+}
+
+pub(super) unsafe fn begin_repel(actor: u32, mode: Mode) {
+    let area = unsafe { hunter::area(actor) };
+    LOCAL.with(|state| {
+        state.select_owner(actor);
+        state.repel = Some(RepelEffect::new(area, mode));
+    });
 }
 
 pub fn boost_ready(actor: u32, mode: Mode) -> bool {
@@ -271,10 +292,7 @@ pub fn boosts(actor: u32) -> u8 {
         if state.owner != actor {
             return 0;
         }
-        let [slash, impact] = state
-            .boosts
-            .map(|boost| u8::from(matches!(boost, Boost::Active(_))));
-        slash | impact << 1
+        state.active_boosts()
     })
 }
 
@@ -431,13 +449,20 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
     LOCAL.with(|state| {
         state.select_owner(scene.owner());
         let frames = scene.frames();
+        for boost in &mut state.boosts {
+            boost.advance(frames);
+        }
+        let mode = motion::local_pose(scene.owner()).unwrap_or_default().mode;
+        let active = state.active_boosts();
+        unsafe {
+            state
+                .boost_effects
+                .advance(scene.owner(), scene.area(), frames, mode, active, true)
+        };
         if frames == 0. {
             return;
         }
         state.gauge.advance(frames);
-        for boost in &mut state.boosts {
-            boost.advance(frames);
-        }
         let mark = &mut state.mark;
         if let Some(current) = mark {
             let (group, slot) = unsafe { action::current(scene.owner()) };
@@ -498,6 +523,11 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
             *mark = None;
             None
         };
+        if let Some(repel) = &mut state.repel
+            && !unsafe { repel.advance(scene.owner(), scene.area(), frames, point) }
+        {
+            state.repel = None;
+        }
     });
     for serial in ended {
         network::stop(scene.owner(), serial);

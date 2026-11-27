@@ -211,12 +211,27 @@ pub unsafe fn bind_playback(id: u32, playback: &'static Playback) -> bool {
             .is_some_and(|api| unsafe { (api.0)(id, playback) })
 }
 
-const POSITION_NAME: &core::ffi::CStr = c"mhgu::StylePositionStateV1";
-const POSITION_MAGIC: u32 = u32::from_le_bytes(*b"SPS1");
+const POSITION_NAME: &core::ffi::CStr = c"mhgu::StylePositionStateV2";
+const POSITION_MAGIC: u32 = u32::from_le_bytes(*b"SPS2");
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct PositionSample {
+    /// 0–7 for the matching private action, or `u8::MAX` when absent.
+    pub action: u8,
+    /// 0–3 for the equipped weapon across actions, or `u8::MAX` when absent.
+    pub weapon: u8,
+}
+
+#[repr(C)]
+pub struct PositionState {
+    pub encode: unsafe extern "C" fn(u32) -> PositionSample,
+    pub decode: unsafe extern "C" fn(u32, PositionSample),
+}
 
 #[doc(hidden)]
 #[repr(C)]
-pub struct PositionService(pub extern "C" fn(u32, &'static ActionState) -> bool);
+pub struct PositionService(pub extern "C" fn(u32, &'static PositionState) -> bool);
 
 /// # Safety
 /// Publish a resident service during Forge initialization.
@@ -225,10 +240,10 @@ pub unsafe fn publish_position(api: &'static PositionService) -> bool {
     unsafe { service::publish(POSITION_NAME, POSITION_MAGIC, api) }
 }
 
-/// Carry a value on GU's periodic position updates during a private action.
-/// This binding is for expanded weapons with registered playback. Encode
-/// 0..=7 to attach a value. Decode runs only for the matching accepted action.
-pub fn bind_position_state(id: u32, codec: &'static ActionState) -> bool {
+/// Carry optional weapon and private-action state on GU's periodic position
+/// updates. For an expanded weapon with registered playback, decode receives
+/// the newest weapon value and the value for the matching accepted action.
+pub fn bind_position_state(id: u32, codec: &'static PositionState) -> bool {
     service::on_game_thread()
         && unsafe { service::find::<PositionService>(POSITION_NAME, POSITION_MAGIC) }
             .is_some_and(|api| (api.0)(id, codec))

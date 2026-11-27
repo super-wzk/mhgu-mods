@@ -53,9 +53,10 @@ def verify_magnet_effects(resources, ordered):
     key = (r"effect\frontier_ms\particles", KINDS[".pel"])
     pel = resources[key]
     assert pel[:8] == b"PEL\0\x0f\0\0\0"
-    assert struct.unpack_from("<2I", pel, 8) == (0, 105)
+    group, count = struct.unpack_from("<2I", pel, 8)
+    assert group == 0 and count == 180
     at = 16
-    for i in range(105):
+    for i in range(count):
         name = pel[at + 1:at + 1 + pel[at]].decode()
         assert name == rf"effect\frontier_ms\e{i}"
         at += 1 + pel[at]

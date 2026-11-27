@@ -151,7 +151,7 @@ pub fn cursor(state: u8) -> Cursor {
 }
 
 #[repr(u8)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum Mode {
     #[default]
     Slash,

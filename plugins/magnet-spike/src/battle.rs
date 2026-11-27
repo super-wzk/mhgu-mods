@@ -188,7 +188,9 @@ impl Battle {
             self.guard_from_idle = false;
             motion::set_mode(actor, self.mode);
             self.cursor = Some(program::cursor(id));
-            self.play_step(actor);
+            if self.play_step(actor) && matches!(id, 66 | 67) {
+                magnet::begin_repel(actor, self.mode);
+            }
         }
         true
     }

@@ -57,10 +57,10 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
         g.cpu.mem_write(actor + 5, b"\0")
         return 1
 
-    def motion(actor, layer, request, flags):
-        assert layer == flags == 0
-        motions.append((actor, request & 0xffff))
-        g.cpu.mem_write(actor + 1204, struct.pack("<H", request & 0xffff))
+    def motion(actor, layer, request, _flags):
+        if layer == 0:
+            motions.append((actor, request & 0xffff))
+        g.cpu.mem_write(actor + 1204 + 320 * layer, struct.pack("<H", request & 0xffff))
         return 1
 
     # Keep GU's packers, action requests, and both packet readers. Only the
@@ -213,9 +213,9 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
     flight_action, guided, coast = flight_packets
     serial = struct.unpack_from("<I", flight_action, 16)[0] >> 26
     assert serial and struct.unpack_from("<H", flight_action, 56)[0] == 0x8000 + 68
-    assert struct.unpack_from("<I", guided, 44)[0] >> 16 == 0x0844
+    assert struct.unpack_from("<I", guided, 44)[0] >> 16 == 0x4844
     flags = struct.unpack_from("<I", coast, 44)[0]
-    assert flags >> 16 == 0x0944 and (flags >> 8) & 63 == serial
+    assert flags >> 16 == 0x4944 and (flags >> 8) & 63 == serial
     position_packet = g.alloc(48)
     g.cpu.hook_del(g.traps.pop(0x280548))
 
@@ -248,22 +248,83 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
     assert all(owner != second for owner, clip in motions if clip == 1461)
 
     # Strengthened hits are constructed from the sender's active forms.
-    for actor, packet, state, contact, power in (
-        (first, boost_packets[0], 78, 40., 47), (second, boost_packets[1], 79, 30., 48),
+    boosted_slash, boosted_impact, idle_boost, expired_slash, expired_impact = boost_packets
+    for actor, (packet, snapshot), state, contact, power in (
+        (first, boosted_slash, 78, 40., 47), (second, boosted_impact, 79, 30., 48),
     ):
         receive(actor, packet)
         assert g.half(actor + 9482) == 0x8000 + state
+        position(actor, snapshot)
         frame(actor, 0.)
         frame(actor, 60., ended=True)
         frame(actor, contact)
         assert g.half(actor + 12320 + 56) == power
-    receive(first, boost_packets[1])
-    frame(first, 0.)
-    position(first, boost_packets[2])
-    frame(first, 60., ended=True)
-    frame(first, 30.)
-    assert g.half(first + 12320 + 56) == 44
 
+    # Receiver-side sparks use the slower FZ interval and the actor's
+    # weapon joint. The activation flash and larger pulses stay with the sender.
+    clock = g.get(0x2126764) + 104
+    stopped = []
+    stub(0x32A400, lambda unit, immediate, *_: stopped.append((unit, immediate)))
+
+    def observe(frames):
+        g.cpu.mem_write(clock, struct.pack("<f", frames))
+        g.run(DISPATCH, local)
+
+    first_effect = len(effects)
+    observe(50.)
+    assert len(effects) == first_effect
+    observe(2.)
+    assert effects[first_effect:] == (
+        [(i, 0, (105., 90., 140.)) for i in range(168, 174)]
+        + [(i, 0, (60., 90., 260.)) for i in range(174, 180)]
+    )
+    for actor in (first, second):
+        g.cpu.mem_write(actor + 4180, b"\1")
+    observe(0.)
+    assert len(stopped) == 12 and all(immediate == 1 for _, immediate in stopped)
+    for actor in (first, second):
+        g.cpu.mem_write(actor + 4180, b"\0")
+        g.cpu.mem_write(actor + 10057, b"\0")
+    observe(50.)
+    assert len(effects) == first_effect + 12
+    g.cpu.mem_write(clock, struct.pack("<f", 2.))
+
+    # The sender stays in GU idle for both expirations. Only position
+    # packets follow the idle action, including duplicates and a late one.
+    def replay_swing(packet, state, start, swing, contact, power):
+        for offset in (12320, 12504):
+            g.run(0x1687A8, first + offset)
+        receive(first, packet)
+        assert g.half(first + 9482) == 0x8000 + state
+        frame(first, 0.)
+        assert g.half(first + 1204) == start
+        frame(first, 60., ended=True)
+        assert g.half(first + 1204) == swing
+        frame(first, contact)
+        actual = g.half(first + 12320 + 56)
+        assert actual == power, (state, actual, power)
+
+    receive(first, idle_boost[0])
+    assert g.half(first + 9478) == 1 and g.half(first + 9482) == 0
+    g.cpu.mem_write(first + 10057, b"\1")
+    position(first, idle_boost[1])
+    position(first, expired_slash)
+    replay_swing(boosted_slash[0], 78, 1440, 1049, 40., 43)
+    replay_swing(boosted_impact[0], 79, 1023, 1413, 30., 48)
+    receive(first, idle_boost[0])
+    g.cpu.mem_write(first + 10057, b"\1")
+    position(first, expired_impact)
+    position(first, idle_boost[1])
+    position(first, expired_slash)
+    position(first, expired_impact)
+    assert g.half(first + 9478) == 1 and g.half(first + 9482) == 0
+    first_effect = len(effects)
+    observe(60.)
+    assert len(effects) == first_effect
+    g.cpu.mem_write(clock, struct.pack("<f", 2.))
+    replay_swing(boosted_impact[0], 79, 1023, 1413, 30., 44)
+
+    position(second, expired_impact)
     for actor, packet, state, motion, contact, power in (
         (first, guard_packets[0], 77, 1034, 32., 30),
         (second, guard_packets[1], 115, 1410, 24., 73),
@@ -277,7 +338,8 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
         for hit in (actor + 12320, actor + 12504):
             g.run(0x1687A8, hit)
         frame(actor, contact)
-        assert g.half(actor + 12320 + 56) == power
+        actual = g.half(actor + 12320 + 56)
+        assert actual == power, (state, actual, power)
         if state == 77:
             assert [cue for owner, name, cue, _ in sounds[first_sound:]
                     if owner == actor and name == "blade"] == [13, 12]
@@ -311,7 +373,6 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
     stub(0x32A400, stop_shot)
     # A native-weapon receiver still advances peer effects. Use the sender's
     # origin to compensate for the receiver's lagging position interpolation.
-    clock = g.get(0x2126764) + 104
     g.cpu.mem_write(first + 64, struct.pack("<3f", 10., 0., 0.))
     g.cpu.mem_write(second + 64, bytes(12))
     hit_origin = struct.unpack_from("<3f", shot_events[0], 16)
