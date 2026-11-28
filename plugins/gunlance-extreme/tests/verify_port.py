@@ -668,6 +668,19 @@ def verify_actions():
     set_action(1, 0)
     tick()
     assert len(stopped) == len(set(stopped)) == len(expected)
+    start(0)
+    stopped.clear()
+    visuals.clear()
+    g.put(a + 28, real(7200))
+    tick(2)
+    assert len(set(stopped)) == len(expected)
+    g.put(a + 28, real(2))
+    start(0)
+    assert attacks[-1][-1] == 0 and not set(blade_selectors(4)).intersection(v[0] for v in visuals)
+    start(28)
+    for _ in range(2):
+        tick(147, end=True)
+        tick(0)
     print("Special key, ignition audio, both flame cycles and buffed thrust playback passed")
     start(34)
     assert shots() == [0, 0, 0]  # dry charged shell
@@ -763,7 +776,7 @@ def verify_actions():
     g.put(a + 28, real(7200))  # Let the earlier ignition expire before testing the plain A routes.
     tick()
     g.put(a + 28, real(2))
-    for slot, firing, route in ((12, 0, 55), (13, 0, 55), (35, 50, 56), (36, 50, 56)):
+    for slot, firing, route in ((12, 0, 55), (13, 0, 55), (35, 50, 55), (36, 50, 55)):
         clear_shots()
         start(5)
         visuals.clear()
@@ -825,6 +838,11 @@ def verify_actions():
     g.run(0x11A9A54, a)
     assert log() == (1, 1, 5) and all(p[0] == 48 and p[2] == a for p in projectiles)
     assert sounds.count(shot_sound) == 1
+    # The sequential burst requires an active heat blade at the firing event.
+    start(28)
+    for _ in range(2):
+        tick(147, end=True)
+        tick(0)
     start(5)
     start(31)
     tick(50)

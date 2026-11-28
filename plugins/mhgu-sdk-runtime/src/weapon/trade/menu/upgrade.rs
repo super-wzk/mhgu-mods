@@ -71,7 +71,8 @@ unsafe fn show(owner: u32, panel: u32, item: Option<WeaponInstance>, next: bool)
         put(view + 180, global(colours + 4));
         let description = read::<u8>(owner + 8085) != 0;
         put(view + 248, if description { 5u32 } else { 1 });
-        display(view, entry, level);
+        let jewels = item.map_or([0; 3], |i| crate::weapon::decorations::installed(i.id));
+        display(view, entry, level, jewels);
     }
 }
 

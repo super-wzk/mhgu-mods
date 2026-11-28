@@ -4,6 +4,7 @@ use super::{Entry, active, choose_style, entries, native_menu};
 use crate::weapon::{gu, inventory, local_hunter, read, set};
 use core::ffi::CStr;
 
+static GUIDE_PAGE: mhgu_sdk::sync::Shared<Option<usize>> = mhgu_sdk::sync::Shared::new(None);
 const STOCK: usize = 6;
 const ROWS: [u32; 8] = [7, 8, 9, 10, 0x46, 0x47, 0x4e, 0x4f];
 const ACCEPT: u32 = 0x2000;
@@ -98,7 +99,7 @@ impl BoxMenu {
             }
         }
     }
-    fn draw_registered_style(&self, entry: &Entry) {
+    fn draw_registered_style(&self, entry: &'static Entry) {
         unsafe {
             let panel = self.panel();
             let list = read::<u32>(panel, 88);
@@ -113,7 +114,16 @@ impl BoxMenu {
             gu!(0x5c55b0, list, 0, entry.name.as_ptr() as u32);
             gu!(0x56e530, panel, ROWS[0], 1, 1);
         }
-        self.show_details(&entry.name, &entry.details);
+        if crate::weapon::style::manual::has_book(entry) {
+            let details = alloc::ffi::CString::new(alloc::format!(
+                "<ICON PAD_X> 操作指南\r\n{}",
+                entry.details.to_string_lossy()
+            ))
+            .unwrap();
+            self.show_details(&entry.name, &details);
+        } else {
+            self.show_details(&entry.name, &entry.details);
+        }
     }
     fn show_details(&self, name: &CStr, details: &CStr) {
         unsafe {
@@ -215,6 +225,9 @@ unsafe fn open(ui: u32, panel: u32, help: u32, mode: u32) -> u32 {
             validate_arts(actor, inventory::actor_equipment(actor));
         }
     }
+    if GUIDE_PAGE.with(Option::take).is_some() {
+        crate::weapon::Information::close();
+    }
     let out = native_menu(true, || original!(ui, panel, help, mode));
     if panel != 0 && help != 0 {
         BoxMenu(ui).configure();
@@ -236,7 +249,12 @@ unsafe fn update(ui: u32) -> u32 {
     }
     let pressed: u32 = unsafe { read(pad, 27644) };
     let repeat: u32 = unsafe { read(pad, 27700) };
-    if inventory::selected().is_some() {
+    if let Some((_, entry)) = inventory::selected() {
+        if phase == 1
+            && GUIDE_PAGE.with(|p| crate::weapon::style::manual::style_guide(entry, pressed, p))
+        {
+            return 1;
+        }
         // The displayed row is the registered style. Project the fallback
         // style row for GU's "already equipped" check on the way to Hunter Arts.
         if phase == 1 && pressed & ACCEPT != 0 {

@@ -107,7 +107,9 @@ unsafe extern "C" fn decode_position(actor: u32, sample: remote::PositionSample)
 
 unsafe fn power_bonus(actor: u32) -> u8 {
     let pose = unsafe { pose(actor) }.unwrap_or_default();
-    program::power_bonus(pose.boosts, pose.mode)
+    program::power_bonus(pose.boosts, unsafe {
+        motion::active_mode(actor, pose.mode)
+    })
 }
 
 #[derive(Default)]
@@ -137,7 +139,12 @@ impl Replay {
         };
         self.packed = unsafe {
             motion::play_step(
-                actor, cursor, step, &mut self.audio, &mut self.particles, &mut self.native,
+                actor,
+                cursor,
+                step,
+                &mut self.audio,
+                &mut self.particles,
+                &mut self.native,
             )
         };
         if self.packed.is_some() {
@@ -253,7 +260,7 @@ impl Replay {
                 state,
                 step.clip,
                 sample,
-                pose.mode,
+                pose.mode.motion_mode(state),
                 pose.boosts,
                 Some(index),
                 &mut self.motion_accent,
@@ -353,7 +360,7 @@ unsafe extern "C" fn observe(local: u32) {
                         actor,
                         area,
                         frames,
-                        saved.pose.mode,
+                        motion::active_mode(actor, saved.pose.mode),
                         saved.pose.boosts,
                         false,
                     )

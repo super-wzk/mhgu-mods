@@ -1,5 +1,5 @@
 //! Extension data for GU's card, diary and weapon-usage views.
-use super::{gu, icon, inventory, model, profile::DisplayEquipment, read, set, style};
+use super::{gu, icon, inventory, model, records::DisplayEquipment, read, set, style};
 use crate::save::{self, CHARACTER, CardWeapon, DiaryWeapon, OwnedWeapon};
 use alloc::{ffi::CString, format, vec::Vec};
 use core::ffi::CStr;
@@ -37,6 +37,35 @@ unsafe fn fingerprint(addr: u32, size: usize) -> u64 {
         })
 }
 
+// 1623B4 and 166344 copy the retail weapon fields individually. These
+// reserved bytes travel with the card, including copies kept in the album.
+unsafe fn stamped_weapon(row: u32) -> Option<OwnedWeapon> {
+    unsafe {
+        ([read::<u8>(row, 1), read(row, 5), read(row, 43)] == *b"FZW").then(|| OwnedWeapon {
+            equipment: read(row, 6),
+            upgrade: read(row, 14),
+        })
+    }
+}
+
+unsafe fn stamp_weapon(row: u32, weapon: Option<OwnedWeapon>) {
+    unsafe {
+        if let Some(weapon) = weapon {
+            for (offset, byte) in [(1, b'F'), (5, b'Z'), (43, b'W')] {
+                set(row, offset, byte);
+            }
+            set(row, 6, weapon.equipment);
+            set(row, 14, weapon.upgrade);
+        } else if stamped_weapon(row).is_some() {
+            for offset in [1, 5, 43] {
+                set(row, offset, 0u8);
+            }
+            set(row, 6, 0u16);
+            set(row, 14, 0u16);
+        }
+    }
+}
+
 // 161AC8 refreshes the card with 1623B4 only when GU allows equipment updates.
 #[forge::hook(offset = 0x1623b4)]
 unsafe fn snapshot_equipment(owner: u32, card: u32, equipment: u32) {
@@ -45,20 +74,25 @@ unsafe fn snapshot_equipment(owner: u32, card: u32, equipment: u32) {
     if guild == 0 || card != guild + 32 || !save::character_loaded() {
         return;
     }
-    let selected = unsafe { inventory::is_native_local(equipment) }
-        .then(inventory::selected)
-        .flatten();
-    let weapon = selected.map(|(item, _)| CardWeapon {
-        weapon: OwnedWeapon {
-            equipment: item.equipment.get(),
-            upgrade: item.upgrade,
-        },
+    let item = unsafe { crate::weapon::records::display(equipment) }.map(|weapon| OwnedWeapon {
+        equipment: weapon.definition.equipment.id.get(),
+        upgrade: weapon.upgrade,
+    });
+    unsafe { stamp_weapon(card + CARD_WEAPON, item) };
+    let weapon = item.map(|weapon| CardWeapon {
+        weapon,
         fingerprint: unsafe { fingerprint(card + CARD_WEAPON, 44) },
     });
     CHARACTER.with(|data| data.guild_card.equipment = weapon);
 }
 
 unsafe fn card_equipment(card: u32) -> Option<DisplayEquipment> {
+    if card == 0 {
+        return None;
+    }
+    if let Some(weapon) = unsafe { stamped_weapon(card + CARD_WEAPON) } {
+        return DisplayEquipment::registered(weapon.equipment, weapon.upgrade);
+    }
     if !unsafe { own(card) } {
         return None;
     }

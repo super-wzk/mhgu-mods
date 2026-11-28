@@ -26,6 +26,25 @@ pub(super) fn publish(actor: u32, level: u8) {
     LEVEL.store(u32::from(level), Relaxed);
     OWNER.store(actor, Relaxed);
 }
+pub(crate) unsafe fn model_charge(actor: u32) -> Option<u8> {
+    let (group, slot) = unsafe { action::current(actor) };
+    if !action::custom_id(group, slot).is_some_and(charge_state) {
+        return None;
+    }
+    if OWNER.load(Relaxed) == actor {
+        return Some(LEVEL.load(Relaxed) as u8);
+    }
+    let roster = unsafe { Roster::current() }?;
+    let index = roster.peer_index(actor)?;
+    if unsafe { PEERS.live(index, &roster, 0) } != Some(actor) {
+        return None;
+    }
+    let mut level = None;
+    PEERS.update(index, actor, |saved, _| {
+        level = saved.as_ref().map(|b| b.level)
+    });
+    level
+}
 unsafe extern "C" fn encode(actor: u32) -> u8 {
     if unsafe { guard_success_action(actor) } {
         GUARD_BODY
@@ -95,7 +114,7 @@ impl Battle {
             };
             let sample = MotionFrame::sample(p);
             let previous = self.cursor.time.frame;
-            let wrapped = self.cursor.time.observe(sample.frame, sample.blend);
+            let wrapped = self.cursor.time.observe(sample.frame, sample.blend * 0.5);
             let elapsed = read::<f32>(p, 28).max(0.);
             let delta = if wrapped {
                 elapsed

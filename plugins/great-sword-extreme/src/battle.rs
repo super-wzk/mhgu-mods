@@ -23,7 +23,7 @@ use mhgu_sdk::weapon::style::{
         command::{BufferedCommand, CommandInput, CommandSet, MAX_COMMAND_FRAME},
     },
     guard,
-    input::{attack_chord_pressed, attack_chord_with_shoulder, attack_combo_pending},
+    input::{Buttons, PadButton, attack_chord_pressed, attack_chord_with_shoulder, attack_combo_pending},
     movement,
 };
 pub(super) const DASH: u8 = 200;
@@ -180,7 +180,8 @@ pub(super) unsafe fn local(p: u32) -> bool {
 mod peer;
 pub(super) use peer::PLAYBACK;
 pub(super) use peer::{
-    edit_guard_hold as edit_peer_guard_hold, guarding_slot as guarding_peer_slot, peer_action,
+    edit_guard_hold as edit_peer_guard_hold, guarding_slot as guarding_peer_slot, model_charge,
+    peer_action,
 };
 
 struct Battle {
@@ -213,7 +214,6 @@ struct Battle {
     flick: Flick,
     resume_sprint: sprint::Resume,
     guard_dash: bool,
-    roll_yaw: Option<u16>,
     jump_finisher: Option<f32>,
     poise: f32,
     sustain_poise: bool,
@@ -284,7 +284,6 @@ impl Battle {
             flick: Default::default(),
             resume_sprint: sprint::Resume::default(),
             guard_dash: false,
-            roll_yaw: None,
             jump_finisher: None,
             poise: 0.,
             sustain_poise: false,
@@ -303,7 +302,6 @@ impl Battle {
         self.charging = false;
         self.hit = false;
         self.deflected = false;
-        self.roll_yaw = None;
         self.jump_finisher = None;
     }
     unsafe fn cancel_attack(&mut self, p: u32) {
@@ -320,10 +318,7 @@ impl Battle {
     }
     unsafe fn evade(&mut self, p: u32) -> bool {
         unsafe {
-            motion::ROLL.remember(
-                p,
-                self.roll_yaw.take().unwrap_or_else(|| motion::roll_yaw(p)),
-            );
+            motion::ROLL.remember_if_missing(p, || Some(movement::command_stick_yaw(p).unwrap_or(0)));
             self.cancel_attack(p);
             // Stock drawn roll: 2CBFCC case 6 -> 2CF8A4, including its stamina,
             // invulnerability, collision and recovery handling.
@@ -360,7 +355,7 @@ impl Battle {
                     self.motion_fx.seek(s.clip, start);
                     self.cursor.time.cycles = 0;
                     self.cursor.time.frame = start;
-                    self.cursor.time.blend = f32::from(blend / 2);
+                    self.cursor.time.blend = mhfz_sdk::action::blend_ticks(blend);
                     if s.clip == RADIANCE_CLIP {
                         self.radiance_delay = None;
                         self.radiance_pulses_left = RADIANCE_PULSES;
@@ -404,7 +399,6 @@ impl Battle {
             if !is_guard_success(state) {
                 self.peer_guard = peer::GuardBody::Off;
             }
-            self.roll_yaw = None;
             self.jump_finisher = None;
             self.hit = false;
             self.deflected = false;
@@ -529,7 +523,7 @@ impl Battle {
     }
     unsafe fn begin_finisher(&mut self, p: u32) -> bool {
         unsafe {
-            let offset = movement::live_relative_stick_yaw(p)
+            let offset = movement::attack_turn_yaw(p)
                 .map(|yaw| (yaw as i16).wrapping_neg())
                 .unwrap_or(0);
             // The side clips already turn the hunter by 45 degrees through event 4.
@@ -586,7 +580,7 @@ impl Battle {
                     return true;
                 }
                 74 => {
-                    motion::ROLL.remember(p, self.roll_yaw.unwrap_or_else(|| motion::roll_yaw(p)));
+                    motion::ROLL.remember_if_missing(p, || Some(movement::command_stick_yaw(p).unwrap_or(0)));
                     if !action::transition_to(p, 1, 6) {
                         motion::ROLL.clear_for(p);
                         return false;
@@ -669,7 +663,7 @@ impl Battle {
                     return self.begin_at(p, 13, Some(frame.min(36.) as u16));
                 }
             }
-            let wrapped = self.cursor.time.observe(frame, sample.blend);
+            let wrapped = self.cursor.time.observe(frame, sample.blend * 0.5);
             let elapsed = read::<f32>(p, 28).max(0.);
             let delta = if wrapped {
                 elapsed
@@ -791,11 +785,10 @@ impl Battle {
                     single_x && (x_held || x_pressed)
                 };
                 let side = if (x_held || a_held) && native!(0x27e608, p, 0) > 0 {
-                    // GU measures sectors relative to the camera and the actor,
-                    // including the alternate controller setup.
-                    if native!(0x27e638, p, 0, 0x2000, 0x6000, 1) != 0 {
+                    // Let GU choose the configured command frame.
+                    if native!(0x27e638, p, 0, 0x2000, 0x6000, 0) != 0 {
                         1
-                    } else if native!(0x27e638, p, 0, 0xa000, 0xe000, 1) != 0 {
+                    } else if native!(0x27e638, p, 0, 0xa000, 0xe000, 0) != 0 {
                         2
                     } else {
                         0
@@ -862,9 +855,9 @@ impl Battle {
                     _ => false,
                 });
                 if self.cursor.pending_action() == Some(74) {
-                    self.roll_yaw.get_or_insert_with(|| motion::roll_yaw(p));
+                    motion::ROLL.remember_if_missing(p, || movement::command_stick_yaw(p));
                 } else {
-                    self.roll_yaw = None;
+                    motion::ROLL.clear_for(p);
                 }
                 if let Some(branch) = branch
                     && self.begin_branch(p, branch)
@@ -939,7 +932,7 @@ impl Battle {
                 group == action::GROUP && matches!(act, SHEATHED_JUMP_SLASH | DRAWN_JUMP_SLASH);
             // With the stick held, GU's drawn climb exits directly to walk 2:30.
             let ground_movement = movement::ground_idle(current);
-            if current != (1, 6) {
+            if current != (1, 6) && !input.command(3) && self.cursor.pending_action() != Some(74) {
                 motion::ROLL.clear_for(p);
             }
             let phase: u8 = read(p, 5);
@@ -1056,20 +1049,16 @@ impl Battle {
             if read::<u8>(p, 9493) & 4 != 0 {
                 return false;
             }
-            // FZ 817E9CB4 / 817EAA30: recover forwards or backwards from a
-            // launch. Wait for GU's own landing test (2BB164), never replace
-            // a lethal hit, an airborne trajectory or a different reaction.
             if group == 64
-                && matches!(act, 6 | 7)
-                && phase == 2
-                && input.command(3)
-                && read::<u8>(p, 11988) != 0
-                && native!(0x2a2444, p) != 0
-                && read::<i16>(p, 5078) > 0
-                && read::<f32>(p, 5088) >= 150.
-                && native!(0x53a058, p) == 1015
+                && let Some(state) = mhfz_sdk::combat::knockback_recovery(
+                    p,
+                    current,
+                    native!(0x2a2444, p) != 0,
+                    input,
+                    [63, 62],
+                )
             {
-                return self.begin(p, if act == 6 { 63 } else { 62 });
+                return self.begin(p, state);
             }
             let has_stamina = read::<f32>(p, 5088) > 0.;
             let terrain_dash_ready = ground_movement
@@ -1146,6 +1135,23 @@ pub(super) fn radiance_origin(owner: u32, shapes: u32) -> Option<[f32; 3]> {
         .map(|(origin, _)| origin);
     CONTROL.0.store(false, Ordering::Release);
     origin
+}
+
+// A stock ground command can enter the roll before the style controller runs.
+// Capture the pre-transition heading without consuming GU's B press.
+pub(super) unsafe extern "C" fn sample_roll(p: u32, buttons: &mut Buttons) {
+    unsafe {
+        let current = action::current(p);
+        if buttons.pressed & PadButton::B as u16 != 0 && action::weapon_drawn(p)
+            && (movement::ground_idle(current) || current.0 == GUARD_GROUP || action::custom(current.0, current.1))
+        {
+            if let Some(yaw) = movement::command_stick_yaw(p) {
+                motion::ROLL.remember(p, yaw);
+            } else {
+                motion::ROLL.clear_for(p);
+            }
+        }
+    }
 }
 
 pub(super) unsafe extern "C" fn request(p: u32, raw: *const ActionRequest) -> u32 {

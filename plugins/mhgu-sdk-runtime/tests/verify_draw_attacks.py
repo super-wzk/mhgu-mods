@@ -148,6 +148,42 @@ def ground_draws():
             assert tuple(hitstop) == factors[weapon, state], (name, state, hitstop)
 
 
+def dual_blade_openings():
+    scene = DrawScene(11, "dual-blades", 0x174F2B4)
+    g, actor = scene.g, scene.actor
+    rows = []
+    def start(_, layer, request, flags):
+        blend = g.cpu.reg_read(arm.UC_ARM_REG_S0)
+        start = g.cpu.reg_read(arm.UC_ARM_REG_S1)
+        rows.append((request & 65535, blend, start))
+        g.put(actor + 1204, (request & 65535) | 0x01020000)
+        g.put(actor + 1212, 4)
+        g.cpu.mem_write(actor + 1264, struct.pack("<8I", blend, blend, float_bits(1),
+                                                  start, start, float_bits(160), 0, float_bits(1)))
+        return 1
+    scene.stub(0x53A06C, start)
+    # These are w06 action-table openings, in GU 60 Hz frame units.
+    for mode, button, state, clip, blend in (
+        (0, 0, 0, 1401, 4), (0, 1, 4, 1411, 6),
+        (1, 0, 0, 1401, 4), (1, 1, 8, 1411, 6),
+        (2, 0, 0, 1401, 4), (2, 1, 8, 1411, 6),
+        (3, 0, 0, 1401, 4), (3, 1, 72, 1444, 4),
+    ):
+        scene.idle(True)
+        g.put(scene.inputs + 16, 1 << button)
+        g.put(scene.field("PHASE"), mode)
+        g.put(actor + 28, float_bits(2))
+        rows.clear()
+        scene.tick()
+        assert scene.active() == 0x8000 + state
+        assert rows == [(clip, float_bits(blend), 0)], rows
+        for remaining in range(blend - 2, -1, -2):
+            g.run(g.hooks[0x951A80], actor)
+            assert g.get(actor + 1268) == float_bits(remaining)
+            assert g.get(actor + 1276) == float_bits(0 if remaining else 2)
+    print("Dual Blades: stationary X/A enter their clip directly in all four modes; first pose and release clock passed")
+
+
 def aerial_hitstop():
     s = DrawScene(11, "dual-blades", 0x174F2B4)
     s.idle(True)
@@ -215,6 +251,7 @@ def axe_charge():
 
 if __name__ == "__main__":
     ground_draws()
+    dual_blade_openings()
     aerial_hitstop()
     axe_charge()
     print("GU draw skills: blade affinity, conditional KO and Switch Axe charge releases passed")

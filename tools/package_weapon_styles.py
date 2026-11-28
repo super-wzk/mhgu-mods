@@ -22,6 +22,10 @@ WEAPONS = {
     "sword-shield": "sns",
     "gunlance": "gl",
 }
+RELEASE_FOLDERS = {
+    name: f"{index}-{name}"
+    for index, name in enumerate((SDK, *(f"{weapon}-extreme" for weapon in WEAPONS), MAGNET_SPIKE))
+}
 # Native rArchive loads in directory order. Put dependencies before users.
 KINDS = {
     ".tex": 0x241F5DEB,
@@ -168,18 +172,18 @@ def package(*, include_magnet_spike=False):
     # Stage the entire release before replacing a previous generated package.
     with tempfile.TemporaryDirectory(dir=destination.parent) as staging:
         release = Path(staging) / destination.name
-        nx = release / SDK / "romfs/nativeNX"
+        nx = release / RELEASE_FOLDERS[SDK] / "romfs/nativeNX"
         (nx / "plugins").mkdir(parents=True)
         shutil.copy2(runtime, nx / "plugins")
         write_arc(nx / "arc/frontier/common.arc", common)
         for tag, (plugin, resources) in weapons.items():
-            nx = release / plugin.parents[3].name / "romfs/nativeNX"
+            nx = release / RELEASE_FOLDERS[plugin.parents[3].name] / "romfs/nativeNX"
             (nx / "plugins").mkdir(parents=True)
             shutil.copy2(plugin, nx / "plugins")
             write_arc(nx / "arc/frontier" / f"{tag}.arc", resources)
         if include_magnet_spike:
             for relative in magnet_files:
-                dst = release / MAGNET_SPIKE / "romfs/nativeNX" / relative
+                dst = release / RELEASE_FOLDERS[MAGNET_SPIKE] / "romfs/nativeNX" / relative
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(magnet_root / relative, dst)
         previous = Path(staging) / "previous"

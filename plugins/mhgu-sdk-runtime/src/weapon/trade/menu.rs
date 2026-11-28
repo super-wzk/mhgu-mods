@@ -171,19 +171,11 @@ impl Catalogue {
                     super::Kind::Upgrade(level) => u32::from(level) + 2,
                     _ => 1,
                 };
-                super::super::menu::details(gu!(0x65cb3c, self.owner, 5), Some(entry), level);
-                put(header, 1u8);
-                put(header + 3, 0u8);
-                put(
-                    header + 6,
-                    super::CHARACTER.with(|c| {
-                        c.inventory
-                            .instances
-                            .values()
-                            .filter(|i| i.equipment == offer.equipment)
-                            .count() as u16
-                    }),
-                );
+                super::super::menu::details(gu!(0x65cb3c, self.owner, 5), Some(entry), level, [0; 3]);
+                put(header, entry.equipment.rarity - 1);
+                let (count, room) = super::super::menu::owned_count(offer.equipment, 0);
+                put(header + 1, if room { 0u8 } else { 4 });
+                put(header + 6, count as u16);
             }
         }
     }

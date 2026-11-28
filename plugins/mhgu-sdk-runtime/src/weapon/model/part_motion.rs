@@ -194,12 +194,19 @@ unsafe fn track(part: u32, actor: u32) -> Option<()> {
         }
         let motions = registered(equipment(manager, actor)?)?;
         let motion = gu!(0x53a058, actor);
-        let vtable = read(actor);
-        let drawn: unsafe extern "C" fn(u32) -> u32 = core::mem::transmute(read(vtable + 376));
+        // 2D6634 plays 5255 with the hunter sheathed. The retail LMT sets
+        // equipment event 30 while the primary weapon is in the sharpening hand.
+        let drawn = if motion == 5255 {
+            gu!(0x2824a8, actor, 30) != 0
+        } else {
+            let query: unsafe extern "C" fn(u32) -> u32 =
+                core::mem::transmute(read(read(actor) + 376));
+            query(actor) == 1
+        };
         let pose = Pose {
             actor,
             motion,
-            drawn: drawn(actor) == 1,
+            drawn,
         };
         let body_frame = f32::from_bits(read(actor + 1280)).max(0.);
         let body_blend = f32::from_bits(read(actor + 1268)).max(0.);

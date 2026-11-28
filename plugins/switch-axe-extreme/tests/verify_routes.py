@@ -416,6 +416,33 @@ def replay(repo, root):
         g.cpu.mem_write(inp + 16, bytes(g.cpu.mem_read(actor + 5156, 16)))
         frame(1, dt)
 
+    # A retail buffered weapon request cannot take the actor out of an
+    # extreme discharge or steal the follow-up from a drawn damage-recovery roll.
+    enter(70)
+    for stock in (2, 19, 20, 35, 38):
+        g.run(g.hooks[0x2AB670], actor, 16, stock, 0)
+        assert state() == (16, 0x8000 + 70)
+    g.put(inp + 16, 1 << 2)
+    frame(50)
+    g.put(inp + 16, 0)
+    frame(82)
+    assert state() == (16, 0x8000 + 169), state()
+    native_action(64, 6)
+    frame(0)
+    native_action(1, 6, 1)
+    half(actor + 1204, 28)
+    stub(0x53A058, lambda *_: 28)
+    g.put(actor + 13100, 50)
+    g.run(g.hooks[0x2AB670], actor, 16, 2, 0)
+    assert state() == (1, 6)
+    half(actor + 5108, 0x120)
+    half(actor + 5112, 0x100)
+    stick(100, g.half(actor + 4076) + 0x4000)
+    frame(50)
+    assert state() == (16, 0x8000 + 153), state()
+    g.cpu.hook_del(g.traps.pop(0x53A058))
+    half(actor + 5108, 0)
+    half(actor + 5112, 0)
     def begin_jump(slot=56, slash=100, sword=False):
         g.run(tick, 0, 0)
         g.put(actor + 13100, slash)

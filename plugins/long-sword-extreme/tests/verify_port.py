@@ -608,6 +608,7 @@ def instant_slash(g, actor, controller, set_action):
 def attack_rolls(g, actor, controller, set_action):
     # Use GU's native world stick angle with the hunter's camera override.
     g.cpu.hook_del(g.traps.pop(0x27F5D0))
+    g.cpu.hook_del(g.traps.pop(0x27E608))
     g.cpu.mem_write(actor + 11990, b"\x01")
     g.put(actor + 12016, 0x3000)
     facing = 0x7000
@@ -636,9 +637,12 @@ def attack_rolls(g, actor, controller, set_action):
         return obj
 
     g.stub(load, load_motion)
-    for i, (yaw, strength, slot) in enumerate((
+    cases = (
             (9102, 120, 7), (32768, 120, 7), (32769, 120, 6), (56434, 120, 6),
-            (9101, 120, 28), (56435, 120, 28), (0x4000, 47, 28), (0, 120, 28))):
+            (9101, 120, 28), (56435, 120, 28), (0x4000, 47, 28), (0, 120, 28))
+    for i, (yaw, strength, slot) in enumerate(cases * 2):
+        fixed = i >= len(cases)
+        g.put(actor + 9536, int(fixed))
         # Cycle between the vertical slash (80) and thrust (38) cancel windows.
         state, opening = (0, 80) if i % 2 == 0 else (4, 38)
         g.cpu.mem_write(g.get(actor + 5060) + 1240, bytes([i % 2]))
@@ -649,8 +653,9 @@ def attack_rolls(g, actor, controller, set_action):
         g.run(controller, actor, inputs)
         g.put(actor + 4076, facing)
         g.put(actor + 5280, 0x1100)  # the body and target facing can differ
-        stick = (facing - yaw - 0x3000 + 0x4000) & 0xffff
+        stick = (0x4000 - yaw + (0 if fixed else 0x1100 - 0x3000)) & 0xffff
         g.cpu.mem_write(actor + 5132, struct.pack("<H", stick))
+        g.cpu.mem_write(actor + 5136, struct.pack("<h", strength))
         g.cpu.mem_write(inputs + 32, struct.pack("<Hh", stick, strength))
         g.put(inputs, 1 << 3)
         for frame in (opening - 1, opening):
@@ -675,7 +680,8 @@ def attack_rolls(g, actor, controller, set_action):
         g.run(controller, actor, inputs)
         set_action(1, 6)
         assert g.run(ENCODE, actor, 28) == 28
-    print("GU attack cancels: FZ left/right sectors, forward roll, neutral stick, signed travel and roll cleanup passed")
+    g.put(actor + 9536, 0)
+    print("GU attack cancels: both direction types, FZ left/right sectors, forward roll, neutral stick, signed travel and roll cleanup passed")
 
 
 def startup_camera(elf):

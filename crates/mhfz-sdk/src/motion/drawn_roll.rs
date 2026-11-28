@@ -27,6 +27,13 @@ impl DrawnRoll {
         side
     }
 
+    /// Keep the direction already captured for this hunter when GU enters the roll.
+    pub fn remember_if_missing(&self, actor: u32, yaw: impl FnOnce() -> Option<u16>) {
+        if self.saved.load(Relaxed) & !3 != actor && let Some(yaw) = yaw() {
+            self.remember(actor, yaw);
+        }
+    }
+
     pub fn clear(&self) {
         self.saved.store(0, Relaxed);
     }

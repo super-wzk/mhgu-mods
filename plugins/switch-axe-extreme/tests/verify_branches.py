@@ -181,6 +181,8 @@ def replay(g, repo, actor, remote, tick, inputs, set_action, reg):
                     clear_input()
                     num(actor + 28, 0)
                     if sword:
+                        # Each independent charge case needs its own light reserve.
+                        g.run(tick, 0, 0)
                         enter(110)  # Complete the light-sword transformation first.
                     enter(162 if sword else 111)
                     walking = branch == 212

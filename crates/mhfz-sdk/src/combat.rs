@@ -66,6 +66,85 @@ pub unsafe fn evade_bonus_frames(actor: u32) -> f32 {
     }
 }
 
+/// Frontier integrates ordinary steps once per logic tick. Weapon-specific
+/// windows start after the motion blend and may scale by the playhead advance.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EvadeClock {
+    Common,
+    WeaponTick,
+    WeaponMotion,
+}
+
+/// Signed local-axis travel from FZ 817CC02A, 81811B0C or 81811C5E.
+pub struct EvadeDistance {
+    side: bool,
+    distance: f32,
+    start: f32,
+    end: f32,
+}
+
+impl EvadeDistance {
+    pub fn side(distance: f32, start: f32, end: f32) -> Self {
+        Self {
+            side: true,
+            distance,
+            start,
+            end,
+        }
+    }
+
+    pub fn forward(distance: f32, start: f32, end: f32) -> Self {
+        Self {
+            side: false,
+            distance,
+            start,
+            end,
+        }
+    }
+
+    fn portion(&self, frame: f32, next: f32, elapsed: f32) -> f32 {
+        let overlap = next.min(self.end) - frame.max(self.start);
+        if next <= frame || overlap <= 0. || elapsed <= 0. {
+            return 0.;
+        }
+        self.distance / (self.end - self.start) * elapsed * (overlap / (next - frame))
+    }
+
+    /// Apply once per local private-action update. 81811C5E scales by the
+    /// playhead advance; the other two helpers run once per 30 Hz logic tick.
+    /// # Safety
+    /// The actor must be the live local quest hunter.
+    #[cfg(all(target_arch = "arm", target_endian = "little"))]
+    pub unsafe fn apply(
+        &self,
+        actor: u32,
+        sample: mhgu_sdk::weapon::style::action::MotionFrame,
+        clock: EvadeClock,
+    ) {
+        use mhgu_sdk::weapon::style::{hunter, movement};
+        if clock != EvadeClock::Common && sample.blend > 0. {
+            return;
+        }
+        if sample.frame >= self.end || sample.next <= self.start || sample.next <= sample.frame {
+            return;
+        }
+        if ![166, 267, 285, 318]
+            .into_iter()
+            .any(|id| unsafe { hunter::has_skill(actor, id) })
+        {
+            return;
+        }
+        let elapsed = if clock == EvadeClock::WeaponMotion {
+            sample.next - sample.frame
+        } else {
+            (unsafe { movement::motion_frames(actor) }) * 0.5
+        };
+        let delta = self.portion(sample.frame, sample.next, elapsed);
+        let (side, forward) = if self.side { (delta, 0.) } else { (0., delta) };
+        unsafe { movement::displace_horizontal(actor, side, forward) };
+    }
+}
+
 /// GU launch directions eligible for the FZ drawn recovery (817E9CB4 / 817EAA30).
 ///
 /// # Safety
@@ -78,26 +157,51 @@ pub unsafe fn knockback_recovery(
     input: &mhgu_sdk::weapon::style::Input,
     states: [u8; 2],
 ) -> Option<u8> {
+    use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
     use mhgu_sdk::weapon::style::movement;
-    if !drawn || !input.command(3) || !matches!(current, (64, 6 | 7)) {
+
+    // Only the local quest controller reads inputs. Phase 0 starts a new launch.
+    static PENDING: AtomicU32 = AtomicU32::new(0);
+    if !drawn
+        || !matches!(current, (64, 6 | 7))
+        || unsafe { ((actor + 5078) as *const i16).read() } <= 0
+    {
+        PENDING.store(0, Relaxed);
         return None;
     }
     unsafe {
-        // 2BB164 selects motion 1015 after landing. Leave airborne, lethal
-        // and other GU hit reactions alone.
-        if ((actor + 5) as *const u8).read() != 2
-            || ((actor + 11988) as *const u8).read() == 0
-            || ((actor + 5078) as *const i16).read() <= 0
-        {
-            return None;
-        }
+        let phase = ((actor + 5) as *const u8).read();
+        let pressed = input.command(3);
+        let held = ((actor + 5108) as *const u16).read() & 0x80 != 0;
         let address = forge_sys::mem::forge_mem_getMainTextAddr() + 0x53a058;
         let motion: unsafe extern "C" fn(u32) -> u32 = core::mem::transmute(address as usize);
-        if motion(actor) != 1015 || !movement::has_evade_stamina(actor, 150.) {
-            return None;
+        match phase {
+            1 => {
+                // FZ 81213142 accepts recovery below floor + 150. GU 2BB164
+                // updates the floor while descending, then attaches at landing.
+                // Keep a near-ground press until that attachment has completed.
+                if pressed
+                    && ((actor + 4116) as *const f32).read() <= 0.
+                    && ((actor + 9512) as *const f32).read() <= 0.
+                    && ((actor + 68) as *const f32).read()
+                        < ((actor + 4336) as *const f32).read() + 150.
+                    && matches!(motion(actor), 1013 | 1014 | 1019 | 1020)
+                {
+                    PENDING.store(actor, Relaxed);
+                }
+                None
+            }
+            2 if ((actor + 11988) as *const u8).read() != 0 && motion(actor) == 1015 => {
+                let queued = PENDING.swap(0, Relaxed) == actor;
+                ((pressed || held || queued) && movement::has_evade_stamina(actor, 150.))
+                    .then_some(states[usize::from(current.1 - 6)])
+            }
+            _ => {
+                PENDING.store(0, Relaxed);
+                None
+            }
         }
     }
-    Some(states[usize::from(current.1 - 6)])
 }
 
 #[repr(u32)]

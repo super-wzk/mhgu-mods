@@ -1,4 +1,4 @@
-use crate::{ModelArchive, model, motion, read};
+use crate::{ModelArchive, model, model::TextureV, motion, read};
 use anyhow::{Context, Result, ensure};
 use mhf_resource::{fmod::Fmod, image, pac};
 use mhgu_resource::{
@@ -53,7 +53,7 @@ pub fn build(
     let (pac, pair, rig) = source.open()?;
     let source = pac::member(&pair, 0)?;
     let images = pac::member(&pac, texture_member)?;
-    let mut assets = appearance(&source, &images, &rig, &model_path, template_path)?;
+    let mut assets = appearance(&source, &images, &rig, &model_path, template_path, TextureV::Flip)?;
     assets.push(Asset {
         name: format!("{base}\\mot\\{name}_{group}"),
         kind: arc::MOTION,
@@ -75,6 +75,7 @@ fn appearance(
     rig: &mhf_resource::rig::Rig,
     model_path: &str,
     template_path: &Path,
+    texture_v: TextureV,
 ) -> Result<Vec<Asset>> {
     let f = Fmod::parse(source)?;
     let textures: Vec<_> = f.textures().collect();
@@ -136,7 +137,7 @@ fn appearance(
     assets.push(Asset {
         name: model_path.to_owned(),
         kind: arc::MODEL,
-        data: model::convert(source, rig)?,
+        data: model::convert(source, rig, texture_v)?,
     });
     Ok(assets)
 }
@@ -155,5 +156,6 @@ pub(crate) fn weapon_assets(
     let pac = pac::decode(pac::mha_member(&source, member)?.to_vec())?;
     let model = pac::member(&pac, 0)?;
     let rig = mhf_resource::rig::Rig::parse(&pac::member(&pac, 1)?)?;
-    appearance(&model, &pac::member(&pac, 2)?, &rig, name, material)
+    let texture_v = if member == "wk451.bin" { TextureV::Source } else { TextureV::Flip };
+    appearance(&model, &pac::member(&pac, 2)?, &rig, name, material, texture_v)
 }

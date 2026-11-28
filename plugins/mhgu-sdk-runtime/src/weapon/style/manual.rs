@@ -1,5 +1,6 @@
 //! GU 1.4 Hunter's Notes style rows and pause manual reader.
 use super::{Entry, entries, registered_entries, registered_entry};
+use crate::weapon::Information;
 use alloc::{boxed::Box, ffi::CString, vec::Vec};
 use core::{
     ffi::CStr,
@@ -92,12 +93,30 @@ fn book(e: &'static Entry) -> Option<Book> {
 // 16320E0 contains GU's equipment categories (weapon id + 7) in notebook order.
 const WEAPONS: [u32; 14] = [0, 7, 1, 11, 2, 12, 3, 9, 8, 14, 13, 6, 4, 10];
 const ROWS: [u32; 8] = [9, 10, 11, 12, 13, 16, 15, 14];
+const FIRST_EXTENSION: u8 = 15; // Row 14 is the Palico manual.
+fn extension_books() -> impl Iterator<Item = Book> {
+    registered_entries()
+        .filter(|entry| entry.kind.is_some())
+        .filter_map(book)
+}
+fn stock_styles(index: u8) -> usize {
+    match index {
+        0..=13 => 6,
+        14 => 2,
+        _ => 0,
+    }
+}
 fn books(index: u8) -> impl Iterator<Item = Book> {
     WEAPONS
         .get(usize::from(index))
         .into_iter()
         .flat_map(|&w| entries(w))
         .filter_map(book)
+        .chain(
+            index
+                .checked_sub(FIRST_EXTENSION)
+                .and_then(|i| extension_books().nth(usize::from(i))),
+        )
 }
 
 unsafe fn get<T: Copy>(p: u32, offset: u32) -> T {
@@ -126,10 +145,15 @@ unsafe fn cursor_value(cursor: u32, method: u32) -> usize {
 unsafe fn notes_count(panel: u32) -> u32 {
     let result = original!(panel);
     unsafe {
-        if get::<u8>(panel, 88) == 2 && get::<u8>(panel, 80) == 6 {
-            let index = get(get(panel, 92), 1);
-            put(panel, 80, (6 + books(index).count()).min(255) as u8);
-        }
+        let count = match get::<u8>(panel, 88) {
+            1 => usize::from(FIRST_EXTENSION) + extension_books().count(),
+            2 => {
+                let index = get(get(panel, 92), 1);
+                stock_styles(index) + books(index).count()
+            }
+            _ => return result,
+        };
+        put(panel, 80, count.min(255) as u8);
     }
     result
 }
@@ -138,29 +162,53 @@ unsafe fn notes_count(panel: u32) -> u32 {
 unsafe fn notes_list(panel: u32) -> u32 {
     unsafe {
         let total = get::<u8>(panel, 80);
-        if get::<u8>(panel, 88) != 2 || total <= 6 {
+        let phase = get::<u8>(panel, 88);
+        let index = get(get(panel, 92), 1);
+        let stock = match phase {
+            1 => usize::from(FIRST_EXTENSION),
+            2 => stock_styles(index),
+            _ => return original!(panel),
+        };
+        if usize::from(total) <= stock {
             return original!(panel);
         }
-        let cursor = get(panel, 76);
-        let first = 8 * cursor_value(cursor, 36);
-        // The stock draw indexes a six-element label table. Let it draw only
-        // its rows (or an empty page), then reuse the remaining row widgets.
-        put(panel, 80, if first == 0 { 6u8 } else { first as u8 });
+        let first = 8 * cursor_value(get(panel, 76), 36);
+        // GU subtracts first from the count with unsigned arithmetic.
+        put(panel, 80, stock.max(first) as u8);
         let result = original!(panel);
         put(panel, 80, total);
-        let layout: u32 = get(panel, 36);
-        let index = get(get(panel, 92), 1);
-        for (row, (entry, _)) in ROWS
-            .iter()
-            .skip(6usize.saturating_sub(first))
-            .zip(books(index).skip(first.saturating_sub(6)))
-        {
+        let layout = get(panel, 36);
+        for (offset, row) in ROWS.iter().enumerate() {
+            let Some(extra) = (first + offset).checked_sub(stock) else {
+                continue;
+            };
+            let Some((entry, _)) = (if phase == 1 {
+                extension_books().nth(extra)
+            } else {
+                books(index).nth(extra)
+            }) else {
+                break;
+            };
             gu!(0x54533c, layout, *row, 1);
             gu!(0x56e530, panel, *row, 1, 1);
             let color = gu!(0x550354, 1, 0, 0, 0);
             gu!(0x56e6fc, panel, *row, 1, color);
-            gu!(0x56e538, panel, *row, 1_000_051);
-            gu!(0x56e808, panel, *row, 1, entry.name.as_ptr() as u32);
+            let label = if phase == 1 {
+                gu!(0x56e538, panel, *row, 1_000_052);
+                gu!(
+                    0x56e6a8,
+                    panel,
+                    *row,
+                    2,
+                    0,
+                    u32::from(entry.kind.unwrap().icon)
+                );
+                entry.weapon_name.unwrap()
+            } else {
+                gu!(0x56e538, panel, *row, 1_000_051);
+                entry.name.as_c_str()
+            };
+            gu!(0x56e808, panel, *row, 1, label.as_ptr() as u32);
         }
         result
     }
@@ -171,8 +219,9 @@ unsafe fn detail_book(panel: u32) -> Option<Book> {
         if get::<u8>(panel, 83) != 255 {
             return None;
         }
-        let row = usize::from(get::<u8>(panel, 82)).checked_sub(6)?;
-        books(get(panel, 81)).nth(row)
+        let index = get(panel, 81);
+        let row = usize::from(get::<u8>(panel, 82)).checked_sub(stock_styles(index))?;
+        books(index).nth(row)
     }
 }
 
@@ -205,17 +254,17 @@ unsafe fn notes_draw(panel: u32) -> u32 {
         gu!(0x65eb68, 0);
         gu!(0x54533c, layout, 0x27, 1);
         gu!(0x56e538, panel, 0x27, 1_000_006);
-        let id: u32 = get(forge::mem::text_addr() + 0x163b05c, index * 4);
-        let weapon = gu!(0x55bc4c, get(forge::mem::text_addr(), 0x1899220), 1, id);
+        let (weapon, icon) = if let (Some(name), Some(kind)) = (entry.weapon_name, entry.kind) {
+            (name.as_ptr() as u32, u32::from(kind.icon))
+        } else {
+            let id = get(forge::mem::text_addr() + 0x163b05c, index * 4);
+            (
+                gu!(0x55bc4c, get(forge::mem::text_addr(), 0x1899220), 1, id),
+                get(forge::mem::text_addr() + 0x163b094, index * 4),
+            )
+        };
         gu!(0x56e808, panel, 0x27, 2, weapon);
-        gu!(
-            0x56e6a8,
-            panel,
-            0x27,
-            3,
-            0,
-            get(forge::mem::text_addr() + 0x163b094, index * 4)
-        );
+        gu!(0x56e6a8, panel, 0x27, 3, 0, icon);
         let page = &pages[page];
         let table = !page.rows.is_empty();
         let title = if table { &page.heading } else { &entry.name };
@@ -258,36 +307,78 @@ fn all_pages() -> impl Iterator<Item = (&'static Entry, usize, &'static CStr)> {
         })
 }
 
+// Both retail hint writers index their child without checking the table length.
+unsafe fn hint_ready(hint: u32) -> bool {
+    unsafe {
+        let layout: u32 = get(hint, 36);
+        let vt: u32 = get(hint, 0);
+        if layout == 0 || vt == 0 {
+            return false;
+        }
+        let base = forge::mem::text_addr();
+        let (group, part) = match get::<u32>(vt, 100).wrapping_sub(base) {
+            0x642b6c => (1, 13),
+            0x6431bc => (9, 1),
+            _ => return false,
+        };
+        // These resident groups are in the main layout, not its appended groups.
+        if group >= get::<u32>(layout, 664) {
+            return false;
+        }
+        let table: u32 = get(layout, 248);
+        if table == 0 {
+            return false;
+        }
+        let node: u32 = get(table, 4 * group);
+        if node == 0 || gu!(0xa38ffc, node) <= part {
+            return false;
+        }
+        let children: u32 = get(node, 216);
+        children != 0 && get::<u32>(children, 4 * part) != 0
+    }
+}
+
 #[forge::hook(offset = 0x5cb780)]
 unsafe fn pause_input(panel: u32) -> u32 {
     unsafe {
         if get::<u32>(panel, 76) != 0 || !registered_entries().any(|e| book(e).is_some()) {
             return original!(panel);
         }
+        let pad: u32 = get(forge::mem::text_addr(), 0x188c670);
+        if pad == 0
+            || (0..6).any(|i| {
+                get::<u32>(panel, 1332 + i * 36) != 0 || get::<u32>(panel, 1336 + i * 36) != 0
+            })
+        {
+            return original!(panel);
+        }
         if !HINT.load(Relaxed) {
             let hint = gu!(0x65e580);
-            // GU keeps three saved hint states. Restore ours when the manual closes.
-            if hint != 0 && get::<u8>(hint, 156) == 0 {
+            if hint != 0 && get::<u8>(hint, 156) == 0 && hint_ready(hint) {
+                let vt = get(hint, 0);
+                let select: unsafe extern "C" fn(u32, u32, u32) =
+                    core::mem::transmute(get::<u32>(vt, 96));
+                let label: unsafe extern "C" fn(u32, u32, u32) =
+                    core::mem::transmute(get::<u32>(vt, 100));
                 gu!(0x642c44, hint);
-                gu!(0x642a78, hint, 4, 0);
-                gu!(0x642b6c, hint, HINT_TEXT.as_ptr() as u32, 0);
+                select(hint, 4, 0);
+                label(hint, HINT_TEXT.as_ptr() as u32, 0);
                 HINT.store(true, Relaxed);
             }
         }
-        let pad: u32 = get(forge::mem::text_addr(), 0x188c670);
         let pressed: u32 = get(pad, 27644);
         let current = READER.load(Relaxed);
         let next = if current == 0 {
             if pressed & 0x2000 == 0 {
                 return original!(panel);
             }
-            let dialog = gu!(0x65efd0);
-            if dialog == 0 || get::<u8>(dialog, 24) != 0 {
-                return original!(panel);
-            }
-            0
+            crate::weapon::inventory::selected()
+                .and_then(|(_, selected)| {
+                    all_pages().position(|(entry, _, _)| core::ptr::eq(entry, selected))
+                })
+                .unwrap_or(0) as u32
         } else if pressed & 0x4000 != 0 {
-            close_dialog();
+            Information::close();
             READER.store(0, Relaxed);
             return 0;
         } else if pressed & (0x10 | 0x40) != 0 {
@@ -328,14 +419,11 @@ unsafe fn pause_input(panel: u32) -> u32 {
             ))
             .unwrap();
             if current == 0 {
-                if gu!(0x65f190, 0, text.as_ptr() as u32, 0, 0, 0) == 0 {
+                if !Information::open(&text) {
                     return 0;
                 }
             } else {
-                let dialog = gu!(0x65efd0);
-                if dialog != 0 {
-                    gu!(0x56e808, dialog, 7, 1, text.as_ptr() as u32);
-                }
+                Information::update(&text);
             }
             READER.store(next + 1, Relaxed);
         }
@@ -343,13 +431,50 @@ unsafe fn pause_input(panel: u32) -> u32 {
     }
 }
 
-unsafe fn close_dialog() {
-    unsafe {
-        let dialog = gu!(0x65efd0);
-        if dialog != 0 {
-            gu!(0x64c600, dialog);
+pub(super) fn style_guide(
+    entry: &'static Entry,
+    pressed: u32,
+    current: &mut Option<usize>,
+) -> bool {
+    let Some((_, pages)) = book(entry) else {
+        return false;
+    };
+    let page = if let Some(page) = *current {
+        if pressed & 0x4000 != 0 {
+            Information::close();
+            *current = None;
+            return true;
         }
+        if pressed & 0x20 != 0 {
+            (page + 1) % pages.len()
+        } else if pressed & 0x80 != 0 {
+            (page + pages.len() - 1) % pages.len()
+        } else {
+            return true;
+        }
+    } else if pressed & 0x1000 != 0 {
+        0
+    } else {
+        return false;
+    };
+    let text = CString::new(alloc::format!(
+        "{}　{}/{}　左右翻页　B 返回\r\n{}",
+        entry.name.to_string_lossy(),
+        page + 1,
+        pages.len(),
+        pages[page].body.to_string_lossy()
+    ))
+    .unwrap();
+    if current.is_some() {
+        Information::update(&text);
+    } else if !Information::open(&text) {
+        return false;
     }
+    *current = Some(page);
+    true
+}
+pub(super) fn has_book(entry: &'static Entry) -> bool {
+    book(entry).is_some()
 }
 
 unsafe extern "C" fn close_manual() -> u32 {
@@ -358,7 +483,7 @@ unsafe extern "C" fn close_manual() -> u32 {
 
     unsafe {
         if READER.swap(0, Relaxed) != 0 {
-            close_dialog();
+            Information::close();
         }
         if HINT.swap(false, Relaxed) {
             let hint = gu!(0x65e580);

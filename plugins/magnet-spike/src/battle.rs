@@ -312,7 +312,6 @@ struct Battle {
     guard_hits: u8,
     evade: Evade,
     bind_engaged: bool,
-    bind_from_impact: bool,
 }
 
 impl Battle {
@@ -330,7 +329,12 @@ impl Battle {
         }
         if unsafe {
             motion::play_step(
-                actor, cursor, step, &mut self.audio, &mut self.particles, &mut self.native,
+                actor,
+                cursor,
+                step,
+                &mut self.audio,
+                &mut self.particles,
+                &mut self.native,
             )
         }
         .is_none()
@@ -364,7 +368,7 @@ impl Battle {
         let state = cursor.state;
         unsafe {
             let mode = motion::local_pose(actor).unwrap_or_default().mode;
-            let bonus = program::power_bonus(magnet::boosts(actor), mode);
+            let bonus = program::power_bonus(magnet::boosts(actor), mode.motion_mode(state));
             combat::events(actor, cursor, bonus, |event, value, late| match event {
                 // FZ 81225CCE / 81225CEA set the hurt immunity timer. Event 8
                 // adds the equipped Evasion bonus from the w13 parameters.
@@ -448,7 +452,6 @@ impl Battle {
                 return true;
             }
             if program::is_bind_drop(id) {
-                self.bind_from_impact = id == 94;
                 action::start_weapon_state(actor);
                 self.flight = Some(Flight::bind_drop());
             } else if !program::is_attraction(id) && program::flight_landing(id).is_some() {
@@ -520,7 +523,14 @@ impl Battle {
     }
 
     unsafe fn transition(&mut self, actor: u32, target: u16, combo: bool) -> bool {
-        let target = if target == 208 {
+        // The miss can reach 100 either in the controller or via opcode 2
+        // at the end of 1442. Resolve both, and the finisher, at the same exit.
+        let target = if self.cursor.as_ref().is_some_and(|c| c.state == 99)
+            && self.mode == program::Mode::Impact
+            && matches!(target, 100 | 105)
+        {
+            if target == 100 { 156 } else { 157 }
+        } else if target == 208 {
             if self.timers.charge.charged { 35 } else { 36 }
         } else if target == 207 {
             // FZ 8122570A selects the counter attack row by contact count.
@@ -566,7 +576,7 @@ impl Battle {
             None
         };
         if unsafe { action::accept_custom_start(actor, id) } {
-            if combo && let Some(yaw) = unsafe { movement::live_relative_stick_yaw(actor) } {
+            if combo && let Some(yaw) = unsafe { movement::attack_turn_yaw(actor) } {
                 unsafe { movement::turn(actor, program::combo_turn(id, yaw)) };
             }
             return unsafe { self.start(actor, id, aim) };
@@ -597,6 +607,25 @@ impl Battle {
         if step.op == 2 {
             return unsafe { self.branch(actor, step.clip) };
         }
+        use mhfz_sdk::combat::{EvadeClock, EvadeDistance as Travel};
+        let value = |i| f32::from(program::parameter(i));
+        let side = |i, sign| Travel::side(sign * value(i), value(i + 1), value(i + 2));
+        let forward = |i, sign| Travel::forward(sign * value(i), value(i + 1), value(i + 2));
+        let travel = match step.clip {
+            1006 | 1010 => Some(side(62, 1.)),
+            1007 | 1011 => Some(side(62, -1.)),
+            1021 => Some(forward(77, 1.)),
+            1447 => Some(forward(74, -1.)),
+            1464 => Some(forward(68, -1.)),
+            1480 => Some(side(71, 1.)),
+            1481 => Some(side(71, -1.)),
+            1493 => Some(side(65, 1.)),
+            1494 => Some(side(65, -1.)),
+            _ => None,
+        };
+        if let Some(travel) = travel {
+            unsafe { travel.apply(actor, sample, EvadeClock::WeaponTick) };
+        }
         let landing = program::flight_landing(state);
         let launch_clip = matches!(step.clip, 1460 | 1472);
         let in_coast_pose =
@@ -623,7 +652,7 @@ impl Battle {
                     state,
                     clip,
                     sample,
-                    self.mode,
+                    self.mode.motion_mode(state),
                     magnet::boosts(actor),
                     None,
                     &mut self.motion_accent,
@@ -713,12 +742,12 @@ impl Battle {
                 unsafe { movement::grant_evade_invulnerability(actor, 8.) };
                 if matches!(command, BindInput::Finish) {
                     // FZ 8121EF40 restores the form saved by event 40.
-                    unsafe { self.branch(actor, if self.bind_from_impact { 157 } else { 105 }) };
+                    unsafe { self.branch(actor, 105) };
                 }
                 return true;
             }
             if self.bind_engaged || sample.blend <= 0. && sample.frame >= 154. {
-                unsafe { self.branch(actor, if self.bind_from_impact { 156 } else { 100 }) };
+                unsafe { self.branch(actor, 100) };
                 return true;
             }
         }
@@ -739,7 +768,7 @@ impl Battle {
         };
         if !drives_flight
             && commands & RESERVED == 0
-            && cursor.art_window(|condition| condition == 0)
+            && (matches!(state, 40..=42 | 44..=46) || cursor.art_window(|condition| condition == 0))
             && unsafe { action::activate_hunter_art(actor) }
         {
             self.cursor = None;
@@ -870,6 +899,13 @@ impl Battle {
             // A magnetic command owns its pad edge even when it lacks a mark
             // or charge. Passing it to GU could start a stock ground action.
             program::cost(id) != 0 || matches!(key, BOOST | SHOT)
+        } else if key == X
+            && matches!(current, (1, 0 | 46))
+            && input.stick_strength <= STICK_DEADZONE
+            && stroke.is_none_or(|s| s.strength <= STICK_DEADZONE)
+        {
+            // GU's stationary draw owns the drawn flag and the return to weapon idle.
+            unsafe { action::transition_to(actor, 1, 1) }
         } else if unsafe { action::enter_draw_attack(actor, id) } {
             unsafe { self.start(actor, id, None) }
         } else {
@@ -894,14 +930,18 @@ static LOCAL: Shared<Battle> = Shared::new(Battle {
     guard_hits: 0,
     evade: Evade::Inactive,
     bind_engaged: false,
-    bind_from_impact: false,
 });
 
 pub(super) fn press_time(actor: u32, id: u8) -> Option<mhfz_sdk::action::Time> {
     LOCAL.with(|state| {
         let mut time = state.cursor.as_ref().filter(|c| c.state == id)?.time;
-        let sample = unsafe { action::MotionFrame::sample(actor) };
-        time.observe(sample.frame, sample.blend * 0.5);
+        if motion::local_pose(actor).is_some_and(|pose| pose.coast == Some(id)) {
+            // advance() keeps the launch clock while displaying the separate coast loop.
+            time.frame += unsafe { movement::motion_frames(actor) }.max(0.);
+        } else {
+            let sample = unsafe { action::MotionFrame::sample(actor) };
+            time.observe(sample.frame, sample.blend * 0.5);
+        }
         Some(time)
     })
 }

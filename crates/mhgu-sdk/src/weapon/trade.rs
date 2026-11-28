@@ -66,6 +66,56 @@ mod native {
         }
     }
 
+    #[repr(C)]
+    pub struct SaleRegistration {
+        pub price: extern "C" fn(u16, u16, u32) -> u32,
+        pub native_row: extern "C" fn(u16, u16, u32) -> u32,
+    }
+
+    #[doc(hidden)]
+    pub unsafe fn publish_sale(api: &'static SaleRegistration) -> bool {
+        unsafe { service::publish(c"mhgu::EquipmentSale", u32::from_le_bytes(*b"SALE"), api) }
+    }
+
+    /// Register the equipment row's base resale value for this upgrade level.
+    pub fn register_sale_price(
+        equipment: EquipmentId,
+        level: u16,
+        zenny: u32,
+    ) -> Result<(), RegisterError> {
+        register_sale(|api| (api.price)(equipment.get(), level, zenny))
+    }
+
+    /// Use a GU catalogue row and its one-based level for resale and upgrade badges.
+    pub fn register_native_level(
+        equipment: EquipmentId,
+        level: u16,
+        kind: crate::weapon::WeaponKind,
+        row: u16,
+        native_level: u8,
+    ) -> Result<(), RegisterError> {
+        if row == 0 || !(1..=32).contains(&native_level) {
+            return Err(RegisterError::Invalid);
+        }
+        let header =
+            u32::from(kind.gu_id() + 7) | u32::from(native_level - 1) << 5 | u32::from(row) << 16;
+        register_sale(|api| (api.native_row)(equipment.get(), level, header))
+    }
+
+    fn register_sale(call: impl FnOnce(&SaleRegistration) -> u32) -> Result<(), RegisterError> {
+        if !service::on_game_thread() {
+            return Err(RegisterError::Invalid);
+        }
+        let api: &SaleRegistration =
+            unsafe { service::find(c"mhgu::EquipmentSale", u32::from_le_bytes(*b"SALE")) }
+                .ok_or(RegisterError::Invalid)?;
+        match call(api) {
+            0 => Ok(()),
+            2 => Err(RegisterError::Conflict),
+            _ => Err(RegisterError::Invalid),
+        }
+    }
+
     /// Sell a new level-zero instance at the weapon shop. Register its weapon first.
     pub fn register_purchase(equipment: EquipmentId, zenny: u32) -> Result<(), RegisterError> {
         register(|api| (api.purchase)(equipment.get(), zenny))

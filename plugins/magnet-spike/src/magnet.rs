@@ -430,7 +430,7 @@ fn artwork(actor: u32, state: &Magnet, current: bool) -> [MeterSprite; METER_SPR
         [x, y],
     );
     let drawn = unsafe { action::weapon_drawn(actor) };
-    let mode = motion::local_pose(actor).unwrap_or_default().mode;
+    let mode = unsafe { motion::active_mode(actor, motion::local_pose(actor).unwrap_or_default().mode) };
     for i in 0..2 {
         let boost = if current {
             state.boosts[i]
@@ -626,7 +626,7 @@ pub extern "C" fn strike_contact(
     // FZ 81EC73F0 truncates motion power after affinity. 812281D4
     // applies the gauge rate and then the charge skill, truncating each step.
     let power = power.adjusted(affinity);
-    let mode = motion::local_pose(actor).unwrap_or_default().mode;
+    let mode = unsafe { motion::active_mode(actor, motion::local_pose(actor).unwrap_or_default().mode) };
     let skill = match unsafe { action::ChargeSkill::equipped(actor) } {
         action::ChargeSkill::Focus => program::parameter(53),
         action::ChargeSkill::Slow => program::parameter(55),
@@ -677,7 +677,7 @@ pub extern "C" fn update(scene: &HurtScene<'_>) {
         for boost in &mut state.boosts {
             boost.advance(frames);
         }
-        let mode = motion::local_pose(scene.owner()).unwrap_or_default().mode;
+        let mode = unsafe { motion::active_mode(scene.owner(), motion::local_pose(scene.owner()).unwrap_or_default().mode) };
         let active = state.active_boosts();
         unsafe {
             state

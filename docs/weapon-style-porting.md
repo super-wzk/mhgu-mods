@@ -27,7 +27,7 @@
 1. 在 `tools` 的转换器中复用 `mhf-resource` 解包和 `mhgu-resource` 写入。现有武器把上下身的 0/1、2/3、4/5 三组轨道分别合成全身 LMT，保留原组内槽位、空槽和循环点。按男女骨架分别烘焙后写入同一套 LMT。相同片段使用源槽，有差异的女性模型片段写在源槽加 128 的位置。运行时按装备模型选择，解码时恢复源槽号。
 2. 核对根轨、坐标和武器挂点事件。先看站立、拔刀、收刀和防御回正，再看活动幅度大的攻击。换手或离背要对齐源动作帧，混合期间也要观察。双剑左右手分别有挂点和接触槽。
 3. 用私有路径加载资源，例如 `player/mot/frontier_db`。通过 mhfz-sdk 的 [MotionBanks](../crates/mhfz-sdk/src/motion.rs) 或武器自己的编码器，将源片段映射到 GU 空闲的运行时 bank 和槽。GU 的资源载入和绑定由 mhgu-sdk 提供。播放通过 `action::play_motion` 进入 GU 的层播放函数。
-4. 分别标记动作播放帧、逻辑刻和实际经过时间。一刻 FZ 30 Hz 逻辑时间对应两个 GU 60 Hz 时钟单位。半速动作要分别验证片段事件帧和独立计时，例如大剑纵斩的蓄力升段。表驱动的特效使用 `MotionClock`，按 FZ `817BD900` 在混合结束后扫描 `[当前姿势帧, 下一播放帧)`。跳入新片段时按起播帧重置游标，循环在取到回绕后的姿势时重新扫描，重复采样跳过已处理的区间。见[动作特效游标](../crates/mhfz-sdk/src/effects.rs)。
+4. 分别标记动作播放帧、逻辑刻和实际经过时间。一刻 FZ 30 Hz 逻辑时间对应两个 GU 60 Hz 时钟单位。表内片段通过 `mhfz_sdk::motion::play_step` 播放。FZ 的非零混合多计最后一个插值刻，混合期间猎人停在起播姿势，最后一刻开始推进。动作游标按 FZ 逻辑刻读取混合倒计时。半速动作要分别验证片段事件帧和独立计时，例如大剑纵斩的蓄力升段。表驱动的特效使用 `MotionClock`，按 FZ `817BD900` 在混合结束后扫描 `[当前姿势帧, 下一播放帧)`。跳入新片段时按起播帧重置游标，循环在取到回绕后的姿势时重新扫描，重复采样跳过已处理的区间。见[动作特效游标](../crates/mhfz-sdk/src/effects.rs)。
 
 资源生成脚本负责组装开发用 `dist`。发布时用 `tools/package_weapon_styles.py` 生成 `common.arc` 及每把武器的私有 ARC。武器的逻辑资源名及 EFL、PEL 引用保留，重复的图集与音频样本由打包器改写到共用路径。源参数最好留在提取的数据或动作程序中，运行时以可辨识的名称取用。新增 GU 派生参数也应注明用途和单位，比如[双剑空中下劈的水平速度](../plugins/dual-blades-extreme/src/program.rs)。
 
@@ -39,7 +39,7 @@
 - 从 `Input::command`、`Input::weapon_command` 与原生 `ActionRequest` 取用 GU 已解析的输入。逐项核对按下、持续、松开和组合键优先级。附加肩键读取 `Input::auxiliary_pressed`，由 GU 原生键位查询处理默认 ZR 和交换布局。收刀冲刺的原生过滤可能只保留冲刺键，注册器从 GU 的过滤前按键中恢复附加肩键。`request` 返回已注册的动作 ID 可接手请求。普通武器切招中 `NATIVE_ACTION` 放行原生槽，`PASS` 拒绝本次请求。拔刀路由中的 `PASS` 保留 GU 选中的路由。见[请求解析](../plugins/mhgu-sdk-runtime/src/weapon/style/mod.rs)和[武器路由](../plugins/mhgu-sdk-runtime/src/weapon/style/routes.rs)。
 - 固定的输入窗口优先用 `Style::commands` 绑定到 GU 命令表，分别声明接收起点、可执行帧和停止接收帧。GU 正等待 `X+A` 时，`WeaponAfterCombo` 可暂缓单键，`AttackChord` 可接收 GU 的肩键加 `X+A` 组合。发现原版命令抢占时，查清表号及冲突的目标槽，只调整冲突行并保留需透传的地形或狩技行。动态派生由风格选定后交给 GU，一个输入由对应的命令表或风格分支消费一次。见[命令表接口](../crates/mhgu-sdk/src/weapon/style/action/command.rs)。
 - 扩展武器在本地角色装备记录上生效时，GU `282DA8` 派发其注册风格，`2E9B7C` 的绑定钩子过滤回退武器的专属行，`2AB670` 的切招钩子只放行已注册的私有动作及 GU 公共动作和狩技。用 [扩展武器控制回放](../plugins/great-sword-extreme/tests/verify_menu.py) 核对输入派发、命令表和斗技场固定配装。
-- 转向通过 GU 的方向判定和 `movement::set_facing`、`movement::turn` 更新当前与目标朝向。需要长按摇杆时按实时相机方向取角度，可以像斩斧一样使用 `live_relative_stick_yaw`，沿用 GU 的死区和按住锁，只修正相机方位。若派生有输入缓冲，按该招的源规则保存方向或到执行帧再取方向。见[移动接口](../crates/mhgu-sdk/src/weapon/style/movement.rs)。
+- 转向通过 GU 的方向判定和 `movement::set_facing`、`movement::turn` 更新当前与目标朝向。前后左右派生用 `command_stick_yaw` 读取 GU 的「指定方向类型」和摇杆死区。攻击执行帧的转向用 `attack_turn_yaw`，类型 1 跟随实时相机，类型 2 以猎人自身为基准。持刀冲刺等世界移动继续用 `live_relative_stick_yaw`。若派生有输入缓冲，按该招的源规则保存方向或到执行帧再取方向。见[移动接口](../crates/mhgu-sdk/src/weapon/style/movement.rs)。
 - 公共移动、收刀、落地、受击、骑乘和狩技继续走 GU。`art_slots` 配置装备页槽位数，允许出招的窗口提交 `Transition::HUNTER_ART`。武器专属狩技要从本武器原版派发表确认起手、后续动作、槽更新和收尾。通过 `guard::Policy` 交付防御结果，使用 `guard::take` 取得已发生的格挡。风格通过 `StyleRulesV2` 声明格挡半角及其他可选规则。注册器处理 GU 来袭角、防御强化与伤害结算，具体防御窗口、接招和资源收益由风格决定。见[防御接入](../plugins/mhgu-sdk-runtime/src/weapon/style/guard.rs)。
 
 共享派发在读取任务专用字段前先确认角色类型。注册风格后从 `lib.rs` 用 `remote::bind_playback` 登记常驻的 `Playback`。`tick` 回放 GU 接受的私有动作，`observe` 可在公共动作期间推进或清理队友状态，`action_state` 可为原生 `netPlAction` 提供额外状态的编码和解码。注册器检查武器是否有可用位，并按当前 GU 名册、任务猎人类型和远端装备武器定位回放。离场、换武器或复用名册槽时回收该槽的旧状态。见[远端接口](../crates/mhgu-sdk/src/weapon/style/remote.rs)和[收发与派发入口](../plugins/mhgu-sdk-runtime/src/weapon/style/multiplayer.rs)。

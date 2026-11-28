@@ -150,8 +150,15 @@ pub(super) unsafe fn mark(slot: Slot, actor: u32, hit: u32, monster: u32) -> boo
         if target(target_slot) != monster {
             return false;
         }
-        let bone = read(part, 0);
-        let Some(m) = matrix(monster, bone) else {
+        // GU 16DE70 also expands hurt volumes using special transforms
+        // (e.g. 1010). Keep their impact relative to the monster root.
+        let joint: u16 = read(part, 0);
+        let attachment = (joint < 1000)
+            .then(|| matrix(monster, joint))
+            .flatten()
+            .map(|matrix| (joint, matrix))
+            .or_else(|| matrix(monster, 255).map(|matrix| (255, matrix)));
+        let Some((bone, m)) = attachment else {
             return false;
         };
         let position = read(hit, 32);

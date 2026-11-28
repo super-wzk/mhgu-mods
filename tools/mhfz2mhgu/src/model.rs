@@ -7,15 +7,17 @@ use mhf_resource::{
 use mhgu_resource::model::{self, Bone, MeshGroup, Vertex};
 use std::collections::BTreeMap;
 
-fn extract(o: &Object<'_>, rig: &Rig) -> Result<MeshGroup> {
-    extract_mesh(o, Some(rig))
+#[derive(Clone, Copy)]
+pub(crate) enum TextureV {
+    Source,
+    Flip,
 }
 
 pub(super) fn static_mesh(o: &Object<'_>) -> Result<MeshGroup> {
-    extract_mesh(o, None)
+    extract_mesh(o, None, TextureV::Flip)
 }
 
-fn extract_mesh(o: &Object<'_>, rig: Option<&Rig>) -> Result<MeshGroup> {
+fn extract_mesh(o: &Object<'_>, rig: Option<&Rig>, texture_v: TextureV) -> Result<MeshGroup> {
     o.validate_geometry()?;
     let positions = &o.positions().context("missing FMOD positions")?.values;
     let normals = &o.normals().context("missing FMOD normals")?.values;
@@ -89,7 +91,14 @@ fn extract_mesh(o: &Object<'_>, rig: Option<&Rig>) -> Result<MeshGroup> {
         }
         let p = Vec3::from_array(p);
         let n = Vec3::from_array(normals[i]).normalize_or_zero();
-        let uv = Vec2::new(uvs[i][0], 1. - uvs[i][1]);
+        let [u, v] = uvs[i];
+        let uv = Vec2::new(
+            u,
+            match texture_v {
+                TextureV::Source => v,
+                TextureV::Flip => 1. - v,
+            },
+        );
         ensure!(
             p.is_finite() && n.is_finite() && uv.is_finite(),
             "non-finite vertex {i}"
@@ -164,7 +173,7 @@ pub fn material_name(i: usize) -> String {
     format!("fz_mat_{i:03}")
 }
 
-pub fn convert(source: &[u8], rig: &Rig) -> Result<Vec<u8>> {
+pub fn convert(source: &[u8], rig: &Rig, texture_v: TextureV) -> Result<Vec<u8>> {
     let f = Fmod::parse(source)?;
     let names = f
         .materials()
@@ -174,7 +183,9 @@ pub fn convert(source: &[u8], rig: &Rig) -> Result<Vec<u8>> {
     let objects = f
         .objects()
         .enumerate()
-        .map(|(i, o)| extract(o, rig).with_context(|| format!("FMOD object {i}")))
+        .map(|(i, o)| {
+            extract_mesh(o, Some(rig), texture_v).with_context(|| format!("FMOD object {i}"))
+        })
         .collect::<Result<Vec<_>>>()?;
     let bones = rig
         .joints
@@ -188,4 +199,46 @@ pub fn convert(source: &[u8], rig: &Rig) -> Result<Vec<u8>> {
         })
         .collect::<Result<Vec<_>>>()?;
     model::encode(&bones, &objects, &names)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires MHFZ_DAT"]
+    fn wk451_uses_the_authored_uv_on_both_weapon_halves() -> Result<()> {
+        use mhf_resource::pac;
+        let dat = std::path::PathBuf::from(std::env::var("MHFZ_DAT")?);
+        let archive = std::fs::read(dat.join("extend/wk000.abn"))?;
+        let weapon = pac::decode(pac::mha_member(&archive, "wk451.bin")?.to_vec())?;
+        let mesh = pac::member(&weapon, 0)?;
+        let rig = Rig::parse(&pac::member(&weapon, 1)?)?;
+        let model = Fmod::parse(&mesh)?;
+        for object in model.objects() {
+            let converted = extract_mesh(object, Some(&rig), TextureV::Source)?;
+            let uv = &object.uvs().unwrap().values;
+            assert_eq!(converted.vertices.len(), uv.len());
+            for (vertex, source) in converted.vertices.iter().zip(uv) {
+                assert_eq!(vertex.uv.to_array(), *source);
+            }
+        }
+        let archive = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../plugins/magnet-spike/dist/magnet-spike/romfs/nativeNX/arc/frontier/magnet_spike.arc",
+        );
+        let bytes = std::fs::read(archive)?;
+        let packed = mhgu_resource::arc::entries(&bytes)?
+            .into_iter()
+            .find(|e| {
+                e.kind == mhgu_resource::arc::MODEL
+                    && e.name == r"weapon\frontier\magnet_spike\wk451"
+            })
+            .context("missing packaged trial weapon")?
+            .unpack()?;
+        ensure!(
+            packed == convert(&mesh, &rig, TextureV::Source)?,
+            "packaged wk451 mapping differs from source UVs"
+        );
+        Ok(())
+    }
 }

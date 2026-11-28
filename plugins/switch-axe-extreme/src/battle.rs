@@ -144,8 +144,10 @@ unsafe fn strike(actor: u32, burst: bool, id: u16, frame: f32, late: f32, in_are
             shape: shape.as_raw(),
             no_sharpness_cost: u32::from(burst),
         };
-        let submitted =
-            attack.submit_with_hitstop(actor, mhfz_sdk::combat::attacker_hitstop(row.source_hitstop));
+        let submitted = attack.submit_with_hitstop(
+            actor,
+            mhfz_sdk::combat::attacker_hitstop(row.source_hitstop),
+        );
         if submitted && !burst {
             let kind = u32::from(!sword_pose) | (u32::from(program::counts_for_discharge(id)) << 1);
             if OWNER.load(Relaxed) == actor {
@@ -417,7 +419,7 @@ impl Battle {
             }
             c.time.cycles = 0;
             c.time.frame = f32::from(step.start);
-            c.time.blend = f32::from(step.blend) / 2.;
+            c.time.blend = mhfz_sdk::action::blend_ticks(step.blend);
             let (model_motion, sword) = program::equipment_motion(step.clip, self.gauges.sword);
             self.model_motion = model_motion;
             // FZ 812113BE restores the axe if an unlock opener ends before state
@@ -620,7 +622,7 @@ impl Battle {
             let previous = c.time.frame;
             let state = c.state;
             let previous_phase = self.alternate_swing;
-            let wrapped = c.time.observe(sample.frame, sample.blend);
+            let wrapped = c.time.observe(sample.frame, sample.blend * 0.5);
             write(
                 actor,
                 motion::SWORD_POSE,
@@ -679,7 +681,6 @@ impl Battle {
         directional_slash: u32,
     ) -> bool {
         unsafe {
-            let yaw = direction.unwrap_or(0);
             let c = self.cursor.as_mut().unwrap();
             let state = c.state;
             let step = program::step(state, c.time.step).unwrap();
@@ -688,6 +689,21 @@ impl Battle {
                 movement::stamina(actor, -1., true);
             }
             let (sample, wrapped) = self.sample(actor, step.clip);
+            use mhfz_sdk::combat::{EvadeClock, EvadeDistance as Travel};
+            let value = |i| f32::from(program::param(i));
+            let side = |i, sign| Travel::side(sign * value(i), value(i + 1), value(i + 2));
+            let forward = |i, sign| Travel::forward(sign * value(i), value(i + 1), value(i + 2));
+            let travel = match state {
+                36 | 119 => Some(side(49, -1.)),
+                37 | 120 => Some(side(49, 1.)),
+                106 | 152 => Some(forward(55, -1.)),
+                107 | 153 => Some(side(52, 1.)),
+                108 | 154 => Some(side(52, -1.)),
+                _ => None,
+            };
+            if let Some(travel) = travel {
+                travel.apply(actor, sample, EvadeClock::WeaponTick);
+            }
             // FZ 812132C4 advances the motion program before 81815F30 reads
             // commands. An X+A press on the end tick sees the new clip's window.
             let c = self.cursor.as_mut().unwrap();
@@ -768,14 +784,20 @@ impl Battle {
                 self.gauges.energy(slash)
             };
             let eligible = |id| self.gauges.eligible(id, energy, stamina, self.evades);
-            if c.art_window(eligible) && action::activate_hunter_art(actor) {
+            if (program::is_sprint(state)
+                || matches!(state, AXE_BRAKE | SWORD_BRAKE)
+                || c.art_window(eligible))
+                && action::activate_hunter_art(actor)
+            {
                 self.cursor = None;
                 return true;
             }
             let follows_fade_charge = self
                 .previous_action
                 .is_some_and(program::is_fade_slash_charge);
-            let stick_aim = direction.map(|yaw| read::<u16>(actor, 4076).wrapping_sub(yaw as u16));
+            let turn_direction = movement::attack_turn_yaw(actor).map(|yaw| yaw as i16);
+            let stick_aim =
+                turn_direction.map(|yaw| read::<u16>(actor, 4076).wrapping_sub(yaw as u16));
             let mut x_aim = None;
             if follows_fade_charge {
                 // GU 27CA28 can wait for a chord before 11A03A8 reports X.
@@ -802,13 +824,21 @@ impl Battle {
                     .map(|aim| (id, aim))
                     .or(self.branch_aim.filter(|&(target, _)| target == id))
             });
-            let branch_yaw = direction.unwrap_or_else(|| {
+            let branch_yaw = turn_direction.unwrap_or_else(|| {
                 self.branch_aim.map_or(0, |(_, aim)| {
                     read::<u16>(actor, 4076).wrapping_sub(aim) as i16
                 })
             });
             if let Some(id) = next
-                && self.accept_branch(actor, id, branch_yaw)
+                && self.accept_branch(
+                    actor,
+                    id,
+                    if matches!(id, 202..=204) {
+                        direction.unwrap_or(0)
+                    } else {
+                        branch_yaw
+                    },
+                )
             {
                 return true;
             }
@@ -822,7 +852,8 @@ impl Battle {
                     }
                     let tick = (self.sprint_elapsed * 0.5) as u32;
                     let mut facing = read::<u16>(actor, 4076);
-                    let target = facing.wrapping_sub(yaw as u16);
+                    let steer = movement::live_relative_stick_yaw(actor).unwrap_or(0);
+                    let target = facing.wrapping_sub(steer);
                     // 81817490 tests the unsigned gap before choosing the turn sign.
                     // Evaluate once per FZ tick so the small negative turn overshoots
                     // by the same amount at either GU update rate.
@@ -848,7 +879,8 @@ impl Battle {
                 && blend <= 0.
                 && frame >= 40.
             {
-                let facing = read::<u16>(actor, 4076).wrapping_sub(yaw as u16);
+                let facing = read::<u16>(actor, 4076)
+                    .wrapping_sub(movement::live_relative_stick_yaw(actor).unwrap_or(0));
                 return self.begin_facing(
                     actor,
                     if state == 162 { 164 } else { 113 },
@@ -858,7 +890,8 @@ impl Battle {
             if matches!(state, 112 | 113 | 163 | 164) {
                 let walking = direction.is_some();
                 if walking {
-                    let facing = read::<u16>(actor, 4076).wrapping_sub(yaw as u16);
+                    let facing = read::<u16>(actor, 4076)
+                        .wrapping_sub(movement::live_relative_stick_yaw(actor).unwrap_or(0));
                     movement::set_facing(actor, facing);
                 }
                 let next = match (state, walking) {
@@ -954,7 +987,7 @@ impl Battle {
             let current = action::current(actor);
             let drawn = native!(0x2a2444, actor) != 0;
             let old = self.cursor.as_ref().map(|c| c.state);
-            let direction = movement::live_relative_stick_yaw(actor).map(|yaw| yaw as i16);
+            let direction = movement::command_stick_yaw(actor).map(|yaw| yaw as i16);
             let degrees = direction.map(program::stick_degrees);
             let left = degrees.is_some_and(|d| (-135..=-45).contains(&d));
             let right = degrees.is_some_and(|d| (45..=135).contains(&d));
@@ -1043,6 +1076,9 @@ impl Battle {
                 {
                     return self.begin(actor, state);
                 }
+                if matches!(state, 162..=164) && self.gauges.light == 0 {
+                    return self.begin(actor, program::SWORD_TO_AXE);
+                }
                 let r = input.command(27);
                 // GU 27CA28 reads held X at 0x20. FZ commands 20..22 use it.
                 let held_x = read::<u16>(actor, 5108) & 0x20 != 0;
@@ -1107,7 +1143,11 @@ impl Battle {
                 old.is_some_and(program::is_sprint),
             );
             // FZ 81213142 selects the recovery pair from the current form.
-            let recovery = if self.gauges.sword { [167, 168] } else { [101, 102] };
+            let recovery = if self.gauges.sword {
+                [167, 168]
+            } else {
+                [101, 102]
+            };
             if let Some(state) = knockback_recovery(actor, current, drawn, input, recovery) {
                 return self.begin(actor, state);
             }
@@ -1119,6 +1159,9 @@ impl Battle {
                     let sword = self.gauges.sword;
                     if frame >= 30. && self.roll_followup.is_none_or(program::is_sprint) {
                         let followup = match (sword, x, a, chord) {
+                            (_, _, _, true) if let Some(dir) = slash_dir => {
+                                landing::Attack::Slash(dir).action(self.gauges, arts::slash(actor))
+                            }
                             (false, true, _, _) if degrees.is_some_and(|d| d.abs() <= 45) => {
                                 Some(3)
                             }
@@ -1212,7 +1255,11 @@ impl Battle {
                 return false;
             } else if charge {
                 if sword { 162 } else { 111 }
-            } else if chord && !sword && slash > 0 && let Some(dir) = slash_dir {
+            } else if chord
+                && !sword
+                && slash > 0
+                && let Some(dir) = slash_dir
+            {
                 106 + dir
             } else if chord {
                 // FZ 81212AA8 starts discharge from light-sword idle in any direction.
@@ -1351,16 +1398,18 @@ unsafe fn style_idle_input(actor: u32) -> bool {
 
 pub unsafe extern "C" fn request(actor: u32, r: *const ActionRequest) -> u32 {
     let req = unsafe { &*r };
-    if !req.draw_route
-        && req.group == action::GROUP
-        && matches!(req.flags, 0 | 0x1000)
-        && matches!(req.slot, 0..=7 | 19 | 20 | 35 | 38 | 800)
-    {
+    if !req.draw_route && req.group == action::GROUP && matches!(req.flags, 0 | 0x1000) {
         let current = unsafe { action::current(actor) };
-        // Keep stock weapon commands from bypassing the landing recovery.
+        // The cursor owns ordinary ground weapon attacks during a custom action.
+        // Keep GU's art, aerial and forced routes available.
+        if req.slot < 56 && action::custom_id(current.0, current.1).is_some() {
+            return style::PASS;
+        }
         if unsafe { native!(0x2a2444, actor) != 0 }
-            && (unsafe { landing::recovering(actor, current) }
-                || (movement::ground_idle(current) && unsafe { style_idle_input(actor) }))
+            && ((req.slot < 56 && unsafe { is_forward_roll(actor, current) })
+                || (matches!(req.slot, 0..=7 | 19 | 20 | 35 | 38 | 800)
+                    && (unsafe { landing::recovering(actor, current) }
+                        || (movement::ground_idle(current) && unsafe { style_idle_input(actor) }))))
         {
             return style::PASS;
         }

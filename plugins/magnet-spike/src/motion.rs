@@ -48,6 +48,18 @@ pub fn local_pose(actor: u32) -> Option<WeaponPose> {
     })
 }
 
+// HUD, charge and hit feedback use the authored motion's form while the
+// controller keeps the form that the hunter resumes on a public action.
+pub(super) unsafe fn active_mode(actor: u32, form: Mode) -> Mode {
+    if actor != 0 {
+        let (group, slot) = unsafe { action::current(actor) };
+        if let Some(state @ (94 | 98 | 99)) = action::custom_id(group, slot) {
+            return form.motion_mode(state);
+        }
+    }
+    form
+}
+
 pub fn coast(actor: u32, state: u8) {
     LOCAL_POSE.with(|active| {
         if let Some((_, pose)) = active.as_mut().filter(|(owner, _)| *owner == actor) {
@@ -71,7 +83,7 @@ pub(super) static ROLL: DrawnRoll = DrawnRoll::new(1006, 1007);
 
 pub(super) unsafe fn enter_roll(actor: u32, directional: bool) -> bool {
     let yaw = if directional {
-        unsafe { mhgu_sdk::weapon::style::movement::live_relative_stick_yaw(actor) }.unwrap_or(0)
+        unsafe { mhgu_sdk::weapon::style::movement::command_stick_yaw(actor) }.unwrap_or(0)
     } else {
         0
     };
@@ -87,7 +99,7 @@ pub(super) unsafe fn enter_roll(actor: u32, directional: bool) -> bool {
 }
 
 fn common_clip(actor: u32, request: u32) -> Option<u16> {
-    if !matches!(request, 28 | 5001 | 5003 | 5004 | 5009 | 5012 | 5013) {
+    if !matches!(request, 28 | 5001 | 5002 | 5003 | 5004 | 5009 | 5012 | 5013) {
         return None;
     }
     let impact = local_pose(actor)
@@ -100,6 +112,7 @@ fn common_clip(actor: u32, request: u32) -> Option<u16> {
             .or_else(|| (impact && unsafe { action::current(actor) } == (1, 6)).then_some(1021)),
         5012 => Some(if impact { 1010 } else { 1006 }),
         5013 => Some(if impact { 1011 } else { 1007 }),
+        5002 => Some(1002),
         5001 => Some(if impact { 1020 } else { 1001 }),
         5003 if unsafe { action::current(actor) } == (1, 2) && {
             let (group, slot) = unsafe { action::previous(actor) };
@@ -115,8 +128,11 @@ fn common_clip(actor: u32, request: u32) -> Option<u16> {
     }
 }
 
-pub extern "C" fn finish_sheathe(slot: u16, phase: u8, motion: u32) -> bool {
-    matches!((slot, phase, motion), (2, 1, 5003) | (3, 1, 5009))
+pub extern "C" fn finish_ground_motion(slot: u16, phase: u8, motion: u32) -> bool {
+    matches!(
+        (slot, phase, motion),
+        (1, 1, 5002) | (2, 1, 5003) | (3, 1, 5009)
+    )
 }
 
 extern "C" fn socket(pose: Pose, frame: f32, blend: f32) -> Socket {
@@ -196,7 +212,7 @@ pub(super) unsafe fn current_source(actor: u32) -> Option<u16> {
 
 pub(super) unsafe fn public_source(actor: u32) -> Option<u16> {
     unsafe { current_source(actor) }
-        .filter(|clip| matches!(clip, 1001 | 1003..=1011 | 1020 | 1021 | 1024 | 1462 | 1463))
+        .filter(|clip| matches!(clip, 1001..=1011 | 1020 | 1021 | 1024 | 1462 | 1463))
 }
 
 extern "C" fn part_clip(pose: Pose) -> Clip {
@@ -256,6 +272,7 @@ pub unsafe extern "C" fn decode(actor: u32, packed: u32) -> u32 {
         .and_then(|packed| unsafe { BANKS.decode(actor, packed) })
         .map_or(PASS, |source| match source {
             1001 | 1020 => 5001,
+            1002 => 5002,
             1003 | 1005 | 1462 | 1463 => 5003,
             1008 | 1009 => 5009,
             1021 => 28,
@@ -267,12 +284,7 @@ pub unsafe extern "C" fn decode(actor: u32, packed: u32) -> u32 {
         })
 }
 
-// 8183E574 halves the row value. 817315F8 adds the final interpolation
-// tick only when a blend was actually requested.
-fn blend_ticks(row: u16) -> f32 {
-    let ticks = row / 2;
-    f32::from(ticks + u16::from(ticks != 0))
-}
+use mhfz_sdk::action::blend_ticks;
 
 pub unsafe fn play(actor: u32, clip: u16, start: u16, blend: u16) -> Option<u16> {
     let request = if clip < 1000 {
@@ -280,10 +292,7 @@ pub unsafe fn play(actor: u32, clip: u16, start: u16, blend: u16) -> Option<u16>
     } else {
         PRIVATE | u32::from(clip)
     };
-    let ticks = blend_ticks(blend);
-    let packed = unsafe { action::play_motion(actor, request, f32::from(start), 2. * ticks) }?;
-    unsafe { mhgu_sdk::weapon::style::part_motion::begin_motion(actor, packed, 2. * ticks) };
-    Some(packed)
+    unsafe { mhfz_sdk::motion::play_step(actor, request, start, blend) }
 }
 
 pub unsafe fn play_step(

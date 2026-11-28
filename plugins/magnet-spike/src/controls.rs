@@ -34,6 +34,8 @@ fn scope(actor: u32) -> Option<Scope> {
     let drawn = unsafe { action::weapon_drawn(actor) };
     if let Some(id) = action::custom_id(current.0, current.1) {
         Some(Scope::Weapon(id))
+    } else if matches!(current, (1, 2 | 3)) {
+        Some(Scope::Ground(false))
     } else if drawn && current == (1, 6) {
         Some(Scope::Roll)
     } else if movement::ground_idle(current) || !drawn && movement::sheathed_movement(current) {
@@ -62,6 +64,7 @@ struct Controls {
     scope: Option<Scope>,
     pending: Option<Pending>,
     ready: Stroke,
+    redraw: Option<Stroke>,
     passthrough: u16,
 }
 
@@ -69,6 +72,7 @@ static CONTROLS: Shared<Controls> = Shared::new(Controls {
     owner: 0,
     scope: None,
     pending: None,
+    redraw: None,
     ready: Stroke {
         held: 0,
         pressed: 0,
@@ -143,7 +147,20 @@ impl Controls {
                 || mods & R != 0
                     && (p.stroke.held & (X | A) == X | A
                         || drawn && keys & (B | Y | SPECIAL | special) != 0);
-            if complete || p.remaining <= 0. || held & keys == 0 {
+            // In attraction, X and ZL+X have the same authored branch; likewise
+            // B and ZL+B. Waiting for a chord moves the hunter past the contact.
+            let aerial = match (self.scope, p.stroke.time) {
+                (Some(Scope::Weapon(id)), Some(press))
+                    if crate::program::is_attraction(id)
+                        && mods & R == 0
+                        && keys & (X | B) != 0 =>
+                {
+                    let command = if keys & B != 0 { 0 } else { 2 };
+                    crate::program::cursor(id).press_window(1 << command, press, |_| true)
+                }
+                _ => false,
+            };
+            if complete || aerial || p.remaining <= 0. || held & keys == 0 {
                 self.ready = p.stroke;
                 self.ready.pressed |= buttons.pressed & ZR;
                 self.pending = None;
@@ -180,7 +197,8 @@ pub(super) unsafe extern "C" fn poll(actor: u32, buttons: &mut Buttons) {
     };
     let suppressed =
         buttons.held | buttons.pressed | buttons.released == 0 && raw_edges as u16 != 0;
-    let drawn = unsafe { action::weapon_drawn(actor) };
+    let sheathing = matches!(unsafe { action::current(actor) }, (1, 2 | 3));
+    let drawn = !sheathing && unsafe { action::weapon_drawn(actor) };
     let item_selector = !suppressed
         && scope.is_some()
         && drawn
@@ -207,6 +225,12 @@ pub(super) unsafe extern "C" fn poll(actor: u32, buttons: &mut Buttons) {
             return;
         }
         state.poll(buttons, drawn, special, time, strength, elapsed);
+        if sheathing && state.ready.pressed & X != 0 {
+            // 2CDB38 clears the drawn flag on entry. Keep the resolved draw
+            // until GU completes the sheath and returns to idle or walking.
+            state.redraw = Some(state.ready);
+            state.ready.pressed = 0;
+        }
     });
 }
 
@@ -226,6 +250,13 @@ pub(super) fn take(actor: u32) -> Option<Stroke> {
         }
         if state.scope != scope(actor) {
             return Some(Stroke::default());
+        }
+        if state.scope == Some(Scope::Ground(false))
+            && !matches!(unsafe { action::current(actor) }, (1, 2 | 3))
+            && let Some(redraw) = state.redraw.take()
+            && state.ready.pressed == 0
+        {
+            return Some(redraw);
         }
         let ready = state.ready;
         state.ready.pressed = 0;

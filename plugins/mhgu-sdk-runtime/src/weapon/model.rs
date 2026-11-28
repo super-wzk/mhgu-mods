@@ -1,5 +1,6 @@
 //! Bind the equipment's rModel at GU's weapon-part construction boundary.
-use super::{guild, inventory, local_hunter, profile, resource, set};
+use super::{gu, guild, inventory, profile, resource, set};
+use crate::weapon::records;
 use core::sync::atomic::{AtomicU16, Ordering};
 use mhgu_sdk::weapon::EquipmentModel;
 use mhgu_sdk::weapon::style::hunter;
@@ -27,15 +28,13 @@ unsafe fn equipment(manager: u32, actor: u32) -> Option<inventory::RegisteredEqu
         if equipment == manager + 13884 {
             guild::preview_equipment(manager, actor).map(|weapon| weapon.definition)
         } else if equipment == manager + 12508 || actor == read(manager + 44) {
-            inventory::definition(PREVIEW.load(Ordering::Relaxed)).map(|(_, e)| e)
-        } else if equipment == manager + 124 || actor == local_hunter() {
-            if !inventory::is_native_local(equipment) && hunter::is_quest(actor) {
-                return None;
-            }
-            inventory::selected()
-                .and_then(|(item, _)| inventory::definition(item.equipment.get()).map(|(_, e)| e))
+            inventory::definition(PREVIEW.load(Ordering::Relaxed))
+                .map(|(_, e)| e)
+                .or_else(|| records::display(equipment).map(|w| w.definition))
         } else {
-            profile::peer_model(actor, equipment).map(|weapon| weapon.definition)
+            records::display(equipment)
+                .or_else(|| profile::peer_model(actor, equipment))
+                .map(|weapon| weapon.definition)
         }
     }
 }
@@ -47,12 +46,35 @@ unsafe fn update_preview_weapon(part: u32) -> u32 {
         let manager = read(forge::mem::text_addr() + 0x1885b58);
         if actor == 0
             || manager == 0
-            || read(actor + 5060) != manager + 13884
+            || !(read(actor + 5060) == manager + 13884
+                || (read(actor + 5060) == manager + 12508
+                    && records::display(manager + 12508).is_some()))
             || read(actor + 9120) != part
-            || guild::preview_equipment(manager, actor)
-                .is_none_or(|weapon| weapon.definition.model.is_none())
+            || !mhgu_sdk::service::on_game_thread()
         {
             return original!(part);
+        }
+        let Some(model) = equipment(manager, actor).and_then(|w| w.model) else {
+            return original!(part);
+        };
+        // 289670 binds once. The archive and its rModel can finish loading
+        // on different frames; retry on the live primary part until it owns the mesh.
+        if let Some(ready) = mesh(model)
+            && read(part + 240) != ready
+        {
+            let args = [
+                0,
+                read(part + 5104),
+                read(part + 5108),
+                read(part + 5112),
+                ready,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ];
+            gu!(0x307f18, part, args.as_ptr() as u32);
         }
         // GU skips the part update while a card mannequin's pose gate is
         // closed. Use the normal part update for the registered primary mesh.

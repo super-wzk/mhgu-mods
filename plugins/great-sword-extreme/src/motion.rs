@@ -1,5 +1,5 @@
 use mhfz_sdk::motion::{DrawnRoll, MotionBanks, sprint_sheathe};
-use mhgu_sdk::weapon::style::{PASS, movement::relative_stick_yaw};
+use mhgu_sdk::weapon::style::{PASS, movement::command_stick_yaw};
 
 fn base() -> u32 {
     forge::mem::text_addr()
@@ -37,10 +37,6 @@ pub(super) unsafe extern "C" fn preload(_actor: u32) {
 
 pub(super) static ROLL: DrawnRoll = DrawnRoll::new(1012, 1013);
 
-pub(super) unsafe fn roll_yaw(actor: u32) -> u16 {
-    unsafe { relative_stick_yaw(actor) }.unwrap_or(0)
-}
-
 /// FZ 811D5188 applies aim when a buffered release/counter branch executes.
 /// GU resolves the stick dead zone and camera-relative world direction.
 pub(super) unsafe fn aim(p: u32, branch: u16) {
@@ -50,7 +46,7 @@ pub(super) unsafe fn aim(p: u32, branch: u16) {
         }
         let facing = at::<u16>(p, 4076);
         let target = call!(base() + 0x27f5d0, p) as u16;
-        let delta = target.wrapping_sub(facing) as i16;
+        let delta = command_stick_yaw(p).unwrap_or(0).wrapping_neg() as i16;
         let yaw = match branch {
             87 | 88 => target,
             // The uppercut uses the left/right sectors (8172C3D4).
@@ -89,7 +85,7 @@ pub(super) unsafe extern "C" fn encode(player: u32, request: u32) -> u32 {
             return ROLL
                 .clip(player, || {
                     (at::<u8>(player, 10057) & 1 != 0)
-                        .then(|| relative_stick_yaw(player))
+                        .then(|| command_stick_yaw(player))
                         .flatten()
                 })
                 .and_then(|clip| physical(player, clip))
@@ -152,17 +148,44 @@ unsafe fn equipment_grip(gear: u32, player: u32, weapon: u32) -> u32 {
     original!(gear, player, weapon)
 }
 
+// GU's great-sword model controller chooses channels 9..12 from the stock
+// charge predicate (virtual +1684) and tier (+2024). Custom actions use
+// Frontier's charge clock. Keep the native model-specific visibility rules.
+#[forge::hook(offset = 0x30a8b0)]
+unsafe fn charge_channels(
+    part: u32,
+    kind: u32,
+    actor: u32,
+    drawn: *mut u8,
+    folded: *mut u8,
+    idle: *mut u8,
+    first: *mut u8,
+    second: *mut u8,
+    third: *mut u8,
+) -> u32 {
+    let result = original!(part, kind, actor, drawn, folded, idle, first, second, third);
+    unsafe {
+        if *drawn == 1
+            && *idle == 1
+            && let Some(level @ 1..=4) = crate::battle::model_charge(actor)
+        {
+            *idle = 0;
+            // The native display has three charged channels.
+            match level {
+                1 => *first = 1,
+                2 => *second = 1,
+                _ => *third = 1,
+            }
+        }
+    }
+    result
+}
+
 pub(super) fn install() {
     forge::install_hook!(base(), equipment_grip);
+    forge::install_hook!(base(), charge_channels);
 }
 
 pub(super) unsafe fn play(player: u32, source: u16, start: u16, blend: u16) -> Option<u16> {
-    unsafe {
-        mhgu_sdk::weapon::style::action::play_motion(
-            player,
-            0x10000 | u32::from(source),
-            f32::from(start),
-            f32::from(blend / 2),
-        )
-    }
+    unsafe { mhfz_sdk::motion::play_step(player, 0x10000 | u32::from(source), start, blend) }
 }

@@ -253,6 +253,30 @@ pub(super) fn inventory() -> alloc::vec::Vec<(WeaponInstance, &'static Entry)> {
     })
 }
 
+/// Slots also reserve positions for equipment whose content plugin is currently absent.
+pub(super) fn box_slots() -> alloc::vec::Vec<u32> {
+    CHARACTER.with(|p| {
+        let mut slots = p.inventory.slots.clone();
+        for &id in p.inventory.instances.keys() {
+            if !slots.contains(&id) {
+                if let Some(empty) = slots.iter_mut().find(|slot| **slot == 0) {
+                    *empty = id;
+                } else {
+                    slots.push(id);
+                }
+            }
+        }
+        slots
+    })
+}
+
+pub(super) fn save_slots(mut slots: alloc::vec::Vec<u32>) {
+    while slots.last() == Some(&0) {
+        slots.pop();
+    }
+    CHARACTER.with(|p| p.inventory.slots = slots);
+}
+
 pub(super) fn select(id: Option<u32>) -> bool {
     if id.is_some_and(|id| owned_equipment(id).is_none()) {
         return false;
@@ -270,6 +294,7 @@ pub(super) fn select(id: Option<u32>) -> bool {
                 dirty(actor, eq + 24);
             }
             super::style::validate_arts(actor, eq);
+            super::decorations::refresh();
         }
         profile::selection_changed();
     }

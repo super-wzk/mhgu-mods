@@ -1,4 +1,5 @@
 //! GU equipment-box inventory, status and equipment-set panels.
+use crate::weapon::records;
 use super::{gu, icon, inventory, local_hunter, profile, read, set, sets};
 use core::ffi::CStr;
 use mhgu_sdk::sync::Shared;
@@ -12,7 +13,13 @@ pub(super) unsafe fn details(
     panel: u32,
     entry: Option<inventory::RegisteredEquipment>,
     level: u32,
+    jewels: crate::weapon::decorations::Jewels,
 ) {
+    unsafe { details_with_stats(panel, entry, level, jewels, 0) }
+}
+
+unsafe fn details_with_stats(panel: u32, entry: Option<inventory::RegisteredEquipment>, level: u32,
+    jewels: crate::weapon::decorations::Jewels, aggregate: u32) {
     if panel == 0 {
         return;
     }
@@ -28,29 +35,77 @@ pub(super) unsafe fn details(
                 gu!(0x56ea08, panel, 17, 4, gu!(0x55bc4c, messages, 1, 30));
             }
             gu!(0x56fe88, panel, 17, 7, level, 0, 0);
-            if let Some(stats) = level
+            if let Some(upgrade) = level
                 .checked_sub(1)
-                .and_then(|i| entry.levels.get(i as usize))
+                .filter(|&i| (i as usize) < entry.levels.len())
             {
+                level_badge(panel, entry.equipment.id.get(), upgrade as u16);
                 if read::<u32>(panel, 248) == 5 {
                     gu!(0x56e528, panel, 6, 1);
                     gu!(0x56ea08, panel, 6, 1, entry.details.as_ptr() as u32);
                     gu!(0x56e530, panel, 6, 5, 0);
                 } else {
-                    stat_page(panel, entry, *stats);
+                    stat_page(panel, records::DisplayEquipment { definition: entry, upgrade: upgrade as u16, jewels }, aggregate);
                 }
             }
         }
     }
 }
+// 58565C and 142DE4 use the same three stages for the header and owned count.
+fn crown(equipment: u16, upgrade: u16) -> (u32, u32) {
+    let mut record = [0u32; 11];
+    let Some(header) = super::trade::native_level_header(equipment, upgrade) else { return (0, 0) };
+    record[1] = header;
+    unsafe {
+        let catalog = read::<u32>(forge::mem::text_addr(), 0x1856b18);
+        if catalog == 0 { return (0, 0); }
+        let row = gu!(0x13f03c, catalog, record.as_ptr() as u32);
+        if row == 0 { return (0, 0); }
+        let vtable = read::<u32>(row, 0);
+        let show: unsafe extern "C" fn(u32, u32) -> u32 =
+            core::mem::transmute(read::<u32>(vtable, 128));
+        if show(row, (header >> 5) & 31) != 1 { return (0, 0); }
+        (1 + gu!(0xdbd74, record.as_ptr() as u32), header)
+    }
+}
+
+unsafe fn level_badge(panel: u32, equipment: u16, upgrade: u16) {
+    if unsafe { read::<u32>(panel, 36) } == 0 { return; }
+    let (stage, header) = crown(equipment, upgrade);
+    let mut record = [0u32; 11];
+    record[1] = header;
+    unsafe {
+        gu!(0x56edb0, panel, 17, 1, stage.saturating_sub(1), u32::from(stage != 0));
+        let color = gu!(0x550534, if header == 0 { 0 } else { record.as_ptr() as u32 });
+        gu!(0x56e6fc, panel, 17, 7, color);
+    }
+}
+
+pub(super) fn owned_count(equipment: u16, upgrade: u16) -> (u32, bool) {
+    let (counts, room) = crate::save::CHARACTER.with(|save| {
+        let mut counts = alloc::collections::BTreeMap::<u16, u32>::new();
+        for item in save.inventory.instances.values().filter(|i| i.equipment == equipment) {
+            *counts.entry(item.upgrade).or_default() += 1;
+        }
+        (counts, save.inventory.instances.len() < crate::save::INVENTORY_LIMIT)
+    });
+    let stage = crown(equipment, upgrade).0;
+    let count = counts.into_iter().filter(|(level, _)| crown(equipment, *level).0 == stage)
+        .map(|(_, quantity)| quantity).sum();
+    (count, room)
+}
+
 /// Populate GU's native weapon stat groups (57F9BC / 57FBC0). The scratch object is used
 /// as the identity for the native stat readers during this synchronous draw.
 unsafe fn stat_page(
     panel: u32,
-    e: inventory::RegisteredEquipment,
-    level: mhgu_sdk::weapon::EquipmentLevel,
+    weapon: records::DisplayEquipment,
+    aggregate: u32,
 ) {
     unsafe {
+        let e = weapon.definition;
+        let level = weapon.level();
+        let jewels = weapon.jewels;
         let scratch = [0u32; 11];
         let record = scratch.as_ptr() as u32;
         set(panel, 80, 0u32);
@@ -69,7 +124,7 @@ unsafe fn stat_page(
         for &part in hidden {
             gu!(0x56e530, panel, group, part, 0);
         }
-        super::stats::with_record(record, e, level, || {
+        records::with_record(record, weapon, || {
             gu!(0x585910, panel, record, 0, group, 1, 2);
             if ranged {
                 gu!(0x585e98, panel, record, 0, 4, 7, 8, 10, 9, 11);
@@ -97,19 +152,18 @@ unsafe fn stat_page(
             slot_label,
             gu!(0x55bc4c, messages, 9, 260)
         );
-        for i in 0..3 {
-            gu!(
-                0x56e6a8,
-                panel,
-                group,
-                slot_label + 1 + i,
-                7,
-                if i < u32::from(level.slots) { 2 } else { 0 }
-            );
-        }
+        crate::weapon::decorations::draw(panel, group, slot_label + 1, level.slots, jewels);
         if ranged {
             return;
         }
+        sharpness_bar(panel, level, aggregate);
+    }
+}
+
+unsafe fn sharpness_bar(panel: u32, level: mhgu_sdk::weapon::EquipmentLevel, aggregate: u32) {
+    unsafe {
+        let messages = read::<u32>(forge::mem::text_addr(), 0x1899220);
+        if messages == 0 { return; }
         let layout = read::<u32>(panel, 36);
         let Some(curve) = super::stats::sharpness_curve(level.sharpness_type) else {
             return;
@@ -118,7 +172,11 @@ unsafe fn stat_page(
             return;
         }
         gu!(0x56e808, panel, 2, 8, gu!(0x55bc4c, messages, 9, 259));
-        let limit = (150 + 25 * u32::from(level.sharpness_level)).min(450);
+        // E173C stat 14 is the final sharpness level, including Handicraft.
+        let rank = if aggregate != 0 {
+            gu!(0xe173c, aggregate + 4, 14)
+        } else { u32::from(level.sharpness_level) };
+        let limit = (150 + 25 * rank.min(12)).min(450);
         let scale = read::<f32>(panel, 192) / 450.;
         for i in 0..7 {
             let part = read::<u32>(forge::mem::text_addr() + 0x163010c, 4 * i);
@@ -129,6 +187,27 @@ unsafe fn stat_page(
                 in("r0") layout,in("r1") 2u32,in("r2") part,in("s0") width,clobber_abi("C"));
         }
     }
+}
+#[forge::hook(offset = 0x5859f4)]
+unsafe fn sharpness_detail(panel: u32, record: u32) -> u32 {
+    if let Some(w) = unsafe { records::for_record(record) } {
+        unsafe {
+            let flags = read::<u32>(panel, 80);
+            let aggregate = if flags & 0x8000 != 0 { read(panel, 184) } else { 0 };
+            sharpness_bar(panel, w.definition.levels[usize::from(w.upgrade)], aggregate);
+        }
+        return 0;
+    }
+    original!(panel, record)
+}
+
+#[forge::hook(offset = 0x56e810)]
+unsafe fn equipment_name(panel: u32, group: u32, part: u32, record: u32, a: u32, b: u32, c: u32, flags: u32) -> u32 {
+    let out = original!(panel, group, part, record, a, b, c, flags);
+    if let Some(w) = unsafe { records::for_record(record) } {
+        unsafe { gu!(0x56ea08, panel, group, part, w.definition.name.as_ptr() as u32); }
+    }
+    out
 }
 fn ranged(kind: u32) -> bool {
     if kind < mhgu_sdk::weapon::WeaponKind::COUNT as u32 {
@@ -415,7 +494,7 @@ static DETAIL_SET: Shared<Option<u32>> = Shared::new(None);
 unsafe fn status_weapon(ui: u32) -> u32 {
     let out = original!(ui);
     unsafe {
-        if let Some(weapon) = profile::display(read(ui, 76)) {
+        if let Some(weapon) = records::display(read(ui, 76)) {
             gu!(
                 0x56e808,
                 ui,
@@ -438,18 +517,14 @@ unsafe fn equipment_overview(ui: u32) -> u32 {
         if equipment != 0 {
             let weapon = match DETAIL_SET.with(|current| *current) {
                 Some(slot) => sets::equipment_display(slot),
-                None => profile::display(equipment),
+                None => records::display(equipment),
             };
             if let Some(weapon) = weapon {
                 let entry = weapon.definition;
                 gu!(0x56e808, ui, 5, 3, entry.name.as_ptr() as u32);
                 icon::equipment(ui, 5, 1, entry);
-                let slots = u32::from(entry.levels[usize::from(weapon.upgrade)].slots);
-                let color = gu!(0x560e5c, 0, 0, 1);
-                for i in 0..3 {
-                    gu!(0x56e6a8, ui, 5, 4 + i, 7, if i < slots { 2 } else { 0 });
-                    gu!(0x56e6fc, ui, 5, 4 + i, color);
-                }
+                let slots = entry.levels[usize::from(weapon.upgrade)].slots;
+                crate::weapon::decorations::draw(ui, 5, 4, slots, weapon.jewels);
             }
         }
     }
@@ -480,22 +555,23 @@ unsafe fn status_weapon_details(
         other_player
     );
     unsafe {
-        if compared == 0
-            && other == 0
-            && record > 24
-            && let Some(weapon) = profile::display(record - 24)
+        let page = read::<u32>(panel, 248);
+        if let Some(weapon) = records::for_record(record)
+            && compared == 0 && other == 0 && matches!(page, 0..=2 | 5)
         {
-            details(
+            details_with_stats(
                 panel,
                 Some(weapon.definition),
                 u32::from(weapon.upgrade) + 1,
+                weapon.jewels,
+                if flags & 0x8000 != 0 { equipment } else { 0 },
             );
         }
     }
     out
 }
 
-static STATUS_LIST: Shared<Option<(u32, profile::DisplayEquipment)>> = Shared::new(None);
+static STATUS_LIST: Shared<Option<(u32, records::DisplayEquipment)>> = Shared::new(None);
 
 unsafe fn draw_status_list(ui: u32) {
     let weapon = STATUS_LIST.with(|list| list.filter(|(panel, _)| *panel == ui));
@@ -530,7 +606,7 @@ unsafe fn load_status_list(ui: u32, equipment_data: u32) -> u32 {
     STATUS_LIST.with(|list| {
         *list = equipment_data
             .checked_sub(4)
-            .and_then(|equip| unsafe { profile::display(equip) })
+            .and_then(|equip| unsafe { records::display(equip) })
             .map(|weapon| (ui, weapon));
     });
     unsafe { draw_status_list(ui) };
@@ -624,6 +700,8 @@ pub(super) fn install(base: u32) {
     forge::install_hook!(base, status_style);
     forge::install_hook!(base, status_style_small);
     forge::install_hook!(base, status_weapon);
+    forge::install_hook!(base, sharpness_detail);
+    forge::install_hook!(base, equipment_name);
     forge::install_hook!(base, equipment_overview);
     forge::install_hook!(base, status_weapon_details);
     forge::install_hook!(base, init_status_list);

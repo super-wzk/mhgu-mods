@@ -33,20 +33,31 @@ pub(crate) struct SetWeapon {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub(crate) struct Inventory {
+    #[serde(default, skip_serializing_if = "alloc::vec::Vec::is_empty")]
+    pub slots: alloc::vec::Vec<u32>,
     pub instances: BTreeMap<u32, OwnedWeapon>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub decorations: BTreeMap<u32, [u16; 3]>,
     pub equipped: Option<u32>,
     pub sets: BTreeMap<u8, SetWeapon>,
 }
 
 impl Inventory {
     pub const EMPTY: Self = Self {
+        slots: alloc::vec::Vec::new(),
         instances: BTreeMap::new(),
+        decorations: BTreeMap::new(),
         equipped: None,
         sets: BTreeMap::new(),
     };
 
     fn valid(&self) -> bool {
-        self.instances.len() <= INVENTORY_LIMIT
+        self.slots.len() <= INVENTORY_LIMIT
+            && self.slots.iter().enumerate().all(|(i, id)| *id == 0 || (self.instances.contains_key(id) && !self.slots[..i].contains(id)))
+            && self.decorations
+            .keys()
+            .all(|id| self.instances.contains_key(id))
+            && self.instances.len() <= INVENTORY_LIMIT
             && self
                 .instances
                 .iter()
@@ -149,7 +160,7 @@ impl Save {
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 mod native;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
-pub(super) use native::{character_loaded, install};
+pub(super) use native::{character_loaded, install, preview_weapon};
 
 #[cfg(test)]
 mod tests {

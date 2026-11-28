@@ -13,6 +13,7 @@ pub struct Pose {
     pub actor: u32,
     /// Decoded hunter motion request, including the style's private requests.
     pub motion: u32,
+    /// Visual drawn pose, including the hand-held phase of native sharpening.
     pub drawn: bool,
 }
 

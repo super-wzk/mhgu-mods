@@ -1,5 +1,6 @@
 """Replay the packaged Magnet Spike through GU's normal hunter dispatcher."""
 
+import itertools
 import json
 import math
 import struct
@@ -17,7 +18,7 @@ from verify_ranges import vita_contact_clock, verify_contact_clock, verify_range
 from verify_style import (
     BLOCK, CHANGE_ACTION, COLLISION_PASS, DECODE, DISPATCH, ENCODE, INIT_HUNTER, MANAGER,
     QUEST_CAMERA, QUEST_CAMERA_ORBIT, QUEST_CAMERA_TERRAIN, QUEST_CAMERA_UPDATE, SAVE, SETTLE_GUARD,
-    WEAPON_DISPATCH, api_for, boot, character_save, select_character, setup_controller,
+    WEAPON_DISPATCH, api_for, boot, character_save, quest_arc, select_character, setup_controller,
 )
 
 sys.path.insert(0, str(REPO / "tools/tests"))
@@ -158,6 +159,9 @@ def replay(*, inputs_only=False):
     tick(fallback=1 << 14)
     assert retail == ["ground"] and not motions
 
+    tick(X)
+    assert changes[-1][:2] == (1, 1) and not motions
+    set_action(2, 0)  # Moving draw keeps FZ state 78 and its slash follow-up.
     tick(X)
     assert changes[-1] == (WEAPON, 0x8000 + 78, 0x80)
     assert motions == [(1440, 0., 0.)] and g.get(actor + 10057) & 1, motions
@@ -338,6 +342,8 @@ def replay(*, inputs_only=False):
     assert g.half(actor + 9482) in (0x8000 + 11, 0x8000 + 39)
     packed = g.run(ENCODE, actor, PRIVATE | 1440)
     assert packed & 255 == 40 and g.run(DECODE, actor, packed) == PRIVATE | 1440
+    normal_draw = g.run(ENCODE, actor, 5002)
+    assert normal_draw & 255 == 2 and g.run(DECODE, actor, normal_draw) == 5002
     for clip in (1014, 1015, 1016, 1017, 1022, 1407, 1408, 1429, 1444, 1451, 1452, 1460, 1461, 1471, 1472, 1473):
         encoded = g.run(ENCODE, actor, PRIVATE | clip)
         assert g.run(DECODE, actor, encoded) == PRIVATE | clip, clip
@@ -426,9 +432,48 @@ def replay(*, inputs_only=False):
                     g.run(update_part, part, actor, WEAPON)
                     assert g.get(part + 5068) == expected, (sex, clip, frame)
     g.cpu.mem_write(equipment + 1240, saved_sex)
+    verify_whetstone(g, actor, part, set_action, tick, update_part)
     loop_frames(g, actor, part, ENCODE, update_part)
     verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter, motions, sounds)
     verify_effect_tracks(g, sounds)
+
+
+def verify_whetstone(g, actor, part, set_action, tick, update_part):
+    # GU 2D6634 requests 5255. Its retail LMT places equipment events
+    # 11/12/30 between frame 20 and frame 324, including repeated strokes.
+    set_action(1, 0)
+    tick()
+    g.cpu.hook_del(g.traps.pop(0x2A2444))  # Read the real sheathed flag.
+    whetstone = g.run(ENCODE, actor, 5255)
+    assert g.run(DECODE, actor, whetstone) == 5255
+    g.put(actor + 1204, whetstone)
+    # Read the socket event track from the retail weapon motion bank.
+    lmt = assets(quest_arc("w07.arc"))[r"player\mot\w07\w07", 0x76820D81]
+    clip, = struct.unpack_from("<I", lmt, 8 + 255 * 4)
+    group, = struct.unpack_from("<I", lmt, clip + 52)
+    kinds = struct.unpack_from("<32H", lmt, group)
+    count, runs = struct.unpack_from("<2I", lmt, group + 64)
+    timeline = []
+    for mask, length in struct.iter_unpack("<2I", lmt[runs:runs + count * 8]):
+        events = tuple(kind for i, kind in enumerate(kinds) if mask & (1 << i))
+        timeline.extend([events] * length)
+    for frame, joint, slot in ((19, 2, 0), (20, 8, 1), (220, 8, 1), (100, 8, 1),
+                              (323.5, 8, 1), (324, 2, 0), (20, 8, 1)):
+        events = timeline[int(frame)]
+        g.put(actor + 5340, (1 << len(events)) - 1)
+        for index, event in enumerate(events):
+            g.put(actor + 5356 + 4 * index, event)
+        g.cpu.mem_write(actor + 1280, struct.pack("<f", frame))
+        g.run(update_part, part, actor, WEAPON)
+        assert (g.get(part + 5068), g.half(part + 1204) & 255) == (joint, slot), frame
+        assert g.cpu.mem_read(actor + 10057, 1) == b"\0"
+    # An interrupt can change the hunter motion before the event list is cleared.
+    g.put(actor + 1204, g.run(ENCODE, actor, 1))
+    g.run(update_part, part, actor, WEAPON)
+    actual = g.get(part + 5068), g.half(part + 1204) & 255
+    assert actual == (2, 0), actual
+    g.stub(0x2A2444, lambda *_: 1)
+    g.put(actor + 5340, 0)
 
 
 def verify_magnetic_steps(g, actor, set_action, tick, meter, sounds, confirm_world_refill):
@@ -441,6 +486,10 @@ def verify_magnetic_steps(g, actor, set_action, tick, meter, sounds, confirm_wor
         g.cpu.hook_del(g.traps.pop(address))
         g.stub(address, callback)
 
+    distance_skill = 0
+    g.cpu.hook_del(g.traps.pop(0x2864C4))
+    g.stub(0x2864C4, lambda _, candidate, *__: int(candidate == distance_skill))
+
     def reset():
         g.run(g.hooks[INIT_HUNTER], actor)
         set_action(1, 0)
@@ -448,6 +497,7 @@ def verify_magnetic_steps(g, actor, set_action, tick, meter, sounds, confirm_wor
         tick()
         g.put(actor + 10057, 1)
         g.put(actor + 4076, 0)
+        g.put(actor + 5280, 0)
         g.put(actor + 11072, 0)
         g.cpu.mem_write(actor + 5088, struct.pack("<2f", 1000., 1000.))
 
@@ -574,6 +624,15 @@ def verify_magnetic_steps(g, actor, set_action, tick, meter, sounds, confirm_wor
             tick(frame=1.)
             assert meter()[0] == [16.] * segments + [0.] * (5 - segments)
             position = bytes(g.cpu.mem_read(actor + 64, 12))
+            for distance_skill in (0, 166):
+                tick(frame=2., next_frame=4.)
+                delta = 240. / 34. if distance_skill else 0.
+                expected = {Y: (delta, 0.), A: (-delta, 0.), B: (0., -delta)}[button]
+                origin_x, _, origin_z = struct.unpack("<3f", position)
+                assert math.isclose(at(64) - origin_x, expected[0], abs_tol=0.001)
+                assert math.isclose(at(72) - origin_z, expected[1], abs_tol=0.001)
+                g.cpu.mem_write(actor + 64, position)
+            distance_skill = 0
             before = struct.unpack("<3f", position)
             apply_root_motion(g, actor, clip, 0, 10)
             dx, _, dz = (at(actor_offset) - value for actor_offset, value in zip((64, 68, 72), before))
@@ -1029,12 +1088,30 @@ def verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter, motion
     for contact in (hit, second):
         g.run(0x1687A8, contact)
     assert g.get(actor + 12696) == g.get(actor + 12700) == 0
-    set_action(1, 0)
-    g.cpu.mem_write(actor + 10057, b"\0")
-    tick(X, native_pad=True)
+    # Walk-sheathe with the stick held, then tap X before GU returns to walking.
+    # Exercise the real pad, including a late stock plain-draw request.
+    from verify_inputs import NativePad
+    pad = NativePad(g, actor)
+    set_action(1, 3)
+    g.cpu.mem_write(actor + 10057, bytes([1]))  # Before the native sheath clears drawn.
+    pad.poll(X, strength=100)
+    g.run(CHANGE_ACTION, actor, 1, 1, 0)
+    assert (g.half(actor + 9478), g.half(actor + 9482)) == (1, 3)
+    g.cpu.mem_write(actor + 10057, bytes(1))
+    g.cpu.mem_write(actor + 5, bytes([1]))
+    pad.dispatch()
+    for _ in range(3):
+        pad.poll(0, strength=100)
+        pad.dispatch()
+        assert (g.half(actor + 9478), g.half(actor + 9482)) == (1, 3)
+    set_action(2, 0)
+    pad.poll(0, strength=100)
+    pad.dispatch()
     assert g.half(actor + 9482) == 0x8000 + 78
+    assert motions[-1][0] == 1440
+    pad.poll(0, strength=100)
     tick(frame=60., ended=True)
-    assert g.half(actor + 9482) == 0x8000 + 78
+    assert g.half(actor + 9482) == 0x8000 + 78 and motions[-1][0] == 1049
     tick(frame=39.)
     assert byte(hit + 5) == 0
     tick(frame=42.)
@@ -1085,6 +1162,8 @@ def verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter, motion
     g.run(0x16919C, hit)
     assert byte(hit + 5) == 0
     g.cpu.mem_write(actor + 1292, struct.pack("<f", 1.))
+    set_action(4, 14)  # End the physical pad fixture before injecting other commands.
+    pad.poll(0)
     set_action(1, 0)
     tick(SPECIAL, native_pad=True)
     tick(frame=99., ended=True)
@@ -1138,7 +1217,7 @@ def verify_bind_drop(g, actor, set_action, tick, meter):
         actual = (g.half(actor + 9482), g.half(actor + 1204))
         assert actual == (0x8000 + state, clip), actual
 
-    for impact in (False, True):
+    for impact, exit_path in itertools.product((False, True), ("recover", "roll", "end", "interrupt")):
         g.run(g.hooks[INIT_HUNTER], actor)
         set_action(1, 0)
         g.put(actor + 10057, 0)
@@ -1219,6 +1298,38 @@ def verify_bind_drop(g, actor, set_action, tick, meter):
         tick(frame=15., ended=True)
         expect(99, 1442)
         put_float(actor + 1268, 0.)
+        mode_bits = struct.unpack_from("<I", capture_action(g, actor), 16)[0] >> 22 & 15
+        assert mode_bits == (8 | int(impact)), (impact, mode_bits)
+        if exit_path == "interrupt":
+            set_action(64, 6)  # GU interrupts the shared landing pose while drawn.
+            original = g.originals[DISPATCH]
+            forwarded = []
+            g.stub(original, lambda *_: forwarded.append(g.half(actor + 9478)))
+            tick()
+            g.cpu.hook_del(g.traps.pop(original))
+            assert forwarded == [64]
+            set_action(1, 0)
+            tick(X, native_pad=True)
+            for _ in range(8):
+                if g.half(actor + 9478) == WEAPON:
+                    break
+                tick(native_pad=True)
+            assert g.half(actor + 9482) == 0x8000 + (18 if impact else 0), (
+                impact, g.half(actor + 9478), g.half(actor + 9482))
+            continue
+        if exit_path == "roll":
+            tick(B, frame=123., native_pad=True)
+            expect(99, 1442)
+            tick(B, frame=124., native_pad=True)
+            assert (g.half(actor + 9478), g.half(actor + 9482)) == (1, 6)
+            tick(X, frame=20.)
+            tick(frame=40.)
+            assert g.half(actor + 9482) == 0x8000 + (143 if impact else 140)
+            continue
+        if exit_path == "end":
+            tick(frame=156., ended=True)
+            expect(156 if impact else 100, 1443)
+            continue
         tick(frame=153.)
         expect(99, 1442)
         put_float(actor + 1268, 1.)
@@ -1330,7 +1441,7 @@ def verify_bind_readiness(g, actor, monster, status, hurt, collision, set_action
         blades = [actor + offset for offset in (12320, 12504)]
         for blade in blades:
             g.run(0x1687A8, blade)
-        set_action(1, 0)
+        set_action(2, 0)
         g.cpu.mem_write(actor + 10057, b"\0")
         tick(X, native_pad=True)
         tick(frame=60., ended=True)
@@ -1762,7 +1873,7 @@ def verify_bind_readiness(g, actor, monster, status, hurt, collision, set_action
     controls()
 
     landing()
-    contacts(41)  # 1763, including on a repeat bind.
+    contacts(79)  # 3397 is below the second threshold of 3420.
     collide(2.)
     assert timer() == 0.
     contacts(1)
@@ -2149,7 +2260,7 @@ def verify_bind_snapshot(g, actor, monster, status, arm, contacts, collide, puls
     sequence = 3
     for rank in (1, 2, 3, 4):
         g.cpu.mem_write(quest + 44, bytes([rank]))
-        for tier, threshold in enumerate([1800] * 6):
+        for tier, threshold in enumerate((1800, 3420, 6498, 12346, 23457, 23457)):
             before = len(pulses)
             for value, count in ((threshold - 1, before), (threshold, before + 6)):
                 struct.pack_into("<IH", probe, 24, (tier << 16) | value, sequence)
@@ -2490,7 +2601,7 @@ def verify_strike_spawn(g, actor, monster, status, hurt, set_action, tick):
     assert g.run(g.get(api + 4), WEAPON, callback) == 1
     for hit in (actor + 12320, actor + 12504):
         g.run(0x1687A8, hit)
-    set_action(1, 0)
+    set_action(2, 0)
     g.cpu.mem_write(actor + 10057, b"\0")
     tick(X, native_pad=True)
     tick(frame=60., ended=True)
@@ -3059,6 +3170,34 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     def state():
         return g.half(actor + 9482)
 
+    def aerial_x(frame):
+        put_vec(actor + 1280, frame)
+        pad.poll(X)
+        pad.dispatch()
+        result = state()  # Must enter the attack on this poll, before release.
+        pad.poll(0)
+        return result
+
+    def airborne_contact(contact, power):
+        assert g.half(contact + 56) == power
+        assert g.cpu.mem_read(actor + 10057, 1)[0] & 0x40
+        saved = bytes(g.cpu.mem_read(collision + 28, 64))
+        hp = g.get(status + 880)
+        before = len(credit)
+        g.cpu.mem_write(status + 1160, bytes(2))  # Start a fresh monster damage tick.
+        g.put(collision + 10288, 0)
+        assert g.run(0x1696FC, contact) >= 1
+        # Put a hurt sphere on the first live weapon volume. Use GU's
+        # normal intersection, damage application and player attribution.
+        point = bytes(g.cpu.mem_read(collision + 8248, 12))
+        g.cpu.mem_write(collision + 28, struct.pack("<B3xf", 1, 2.) + point)
+        g.run(0x16C0C0, collision, contact, monster)
+        damage = g.half(status + 1160)
+        assert damage > 0 and credit[before:] == [(0, 0, damage)], (power, damage, credit[before:])
+        g.run(0x97DDC, monster)
+        assert g.get(status + 880) == hp - damage
+        g.cpu.mem_write(collision + 28, saved)
+
     def attract():
         set_action(1, 0)
         assert tick(X, held=held, native_pad=True, fallback=1 << 14)
@@ -3265,7 +3404,7 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
 
     tick(X, frame=49., native_pad=True)
     assert state() == 0x8000 + 58
-    tick(X, frame=50., native_pad=True)  # The FZ aerial slash window opens at 50.
+    assert aerial_x(50.) == 0x8000 + 59  # First eligible physical poll.
     assert (state(), g.half(actor + 1204)) == (0x8000 + 59, 1016), (state(), g.half(actor + 1204))
     put_vec(actor + 64, steered[0], 1000., steered[2])
     rate = 0.5
@@ -3283,6 +3422,7 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     tick(frame=54.)
     power = [g.half(contact + 56) for contact in contacts]
     assert 200 in power, power  # FZ melee record 16.
+    airborne_contact(contacts[power.index(200)], 200)
     assert math.isclose(position(actor + 64)[1], y - 80., abs_tol=0.001)
     tick(frame=56.)
     assert math.isclose(position(actor + 64)[1], y - 80. - 80. * 0.97 - 6., abs_tol=0.001)
@@ -3290,6 +3430,8 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     tick(frame=58.)
     assert state() == 0x8000 + 60 and g.half(actor + 1204) == 1015
     assert position(actor + 64)[1] == 0. and configure[-1] == 0
+    set_action(4, 14)
+    pad.poll(0)
 
     put_vec(actor + 64, 0., 0., 0.)
     set_action(1, 0)
@@ -3329,9 +3471,17 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     tick(frame=34., native_pad=True)
     tick(frame=36.)
     tick(frame=38.)
-    tick(X, frame=50., native_pad=True)
+    for frame in range(40, 150, 2):
+        tick(frame=min(frame, 85.))
+        if g.half(actor + 1204) == 1461:
+            break
+    assert g.half(actor + 1204) == 1461
+    for frame in (2., 4., 6.):
+        tick(frame=frame)
+    assert math.dist(position(actor + 64), position(pose + 48)) < 300.
+    assert aerial_x(8.) == 0x8000 + 73
     assert state() == 0x8000 + 73 and g.half(actor + 1204) == 1017
-    assert g.half(contacts[0] + 56) == 25
+    airborne_contact(contacts[0], 25)
     x, _, z = position(actor + 64)
     put_vec(actor + 64, x, 1000., z)
     y = 1000.
@@ -3357,6 +3507,8 @@ def verify_shot(g, actor, monster, status, monster_vt, hurt, collision, credit, 
     g.run(0x1687A8, contacts[0])
     tick(frame=8.)
     assert g.half(contacts[0] + 56) == 120
+    set_action(4, 14)
+    pad.poll(0)
 
     # Plain B can branch during attraction without entering GU's ground roll.
     # The attraction starts with event 45. The emergency landing's event 11
@@ -3732,7 +3884,7 @@ def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick,
     def draw(affinity):
         for hit in (actor + 12320, actor + 12504):
             g.run(0x1687A8, hit)
-        set_action(1, 0)
+        set_action(2, 0)
         g.cpu.mem_write(g.get(actor + 5060) + 802, struct.pack("<h", affinity))
         g.cpu.mem_write(actor + 10057, b"\0")
         tick(X, native_pad=True)
@@ -3753,7 +3905,12 @@ def verify_magnetic_charge(g, actor, monster, hurt, collision, set_action, tick,
     number(actor + 5088, 0.)
     assert charge_attack() == 0
     number(actor + 5088, 1000.)
-    # Four accepted attraction states consumed one segment each.
+    # Start the independent regen test at exactly one segment. The airborne
+    # damage cases above now legitimately recharge the gauge on contact.
+    elapsed(3200.)
+    for _ in range(4):
+        assert charge_attack() == 0x8000 + 12
+        tick(frame=99., ended=True)
     assert charge_attack() == 0x8000 + 12
     assert meter()[0][0] < 16. and meter()[0][1:] == [0.] * 4
     assert meter(flashes=True) == [(0, 1)]
@@ -3842,7 +3999,7 @@ def verify_deflection(g, actor, vtable, monster, part, set_action, tick, motions
     def draw(buttons, state, frame):
         for slot in (hit, actor + 12504):
             g.run(0x1687A8, slot)
-        set_action(1, 0)
+        set_action(2, 0)
         g.cpu.mem_write(actor + 10057, b"\0")
         tick(buttons, native_pad=True)
         assert g.half(actor + 9482) == 0x8000 + state
@@ -3939,7 +4096,7 @@ def verify_magnetic_boost(g, actor, monster, collision, set_action, tick, meter)
     def hit(buttons, expected, *, contact=True):
         for slot in (12320, 12504):
             g.run(0x1687A8, actor + slot)
-        set_action(1, 0)
+        set_action(2, 0)
         g.cpu.mem_write(actor + 10057, b"\0")
         tick(buttons, native_pad=True)
         tick(frame=60., ended=True)

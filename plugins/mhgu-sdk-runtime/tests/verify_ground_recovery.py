@@ -91,7 +91,47 @@ def replay(weapon, plugin, vt, sprint=None, recoveries=()):
             assert bool(exits) == finished, (plugin, slot, clip, previous, frame, delta, exits)
     if recoveries:
         replay_launch(g, desc, actor, set_action, recoveries)
+    runs = (103, 148, 178, 179, 105, 151) if weapon == 8 else sprint[:2]
+    if weapon == 7:
+        runs = (*runs, 71, 82)
+    replay_sprint_arts(g, desc, actor, set_action, runs)
     print(f"{plugin}: Frontier ground-action replay passed")
+
+
+def replay_sprint_arts(g, desc, actor, set_action, states):
+    inputs = g.alloc(40)
+    tick = g.get(desc + 20)
+    g.put(actor + 10068, 3)
+    g.cpu.mem_write(actor + 10057, b"\1")
+    g.cpu.mem_write(inputs + 34, struct.pack("<h", 120))
+    g.put(actor + 5180, 0)
+    g.cpu.hook_del(g.traps.pop(0x2E9D54))
+
+    def transition(*_):
+        table = g.get(actor + 9384)
+        entry = g.get(g.get(table + 20))
+        command = g.get(entry + 8) + 100
+        group, slot = g.half(command), g.half(command + 2)
+        if (group, slot) == (0x8010, 241):
+            if not g.get(actor + 5180) & 7:
+                return 0
+            set_action(16, 241)
+        elif group & 0x8000:
+            return 0
+        else:
+            set_action(group, slot)
+        return 1
+
+    g.stub(0x2E9D54, transition)
+    for state in states:
+        for slot in range(3):
+            g.put(actor + 5180, 0)
+            set_action(16, 0x8000 + state)
+            g.put(actor + 5088, struct.unpack("<I", struct.pack("<f", 900))[0])
+            g.run(tick, actor, inputs)
+            g.put(actor + 5180, 1 << slot)
+            g.run(tick, actor, inputs)
+            assert g.half(actor + 9482) == 241, (state, slot, g.half(actor + 9482))
 
 
 def replay_launch(g, desc, actor, set_action, cases):
@@ -113,6 +153,7 @@ def replay_launch(g, desc, actor, set_action, cases):
             set_action(16, 0x8000 + form_action)
             g.run(tick, actor, g.alloc(40))
         for direction, (state, bank, clip) in zip((6, 7), directions):
+            g.put(inp, 1 << 3)
             source = {13: 1200, 14: 1400, 15: 1000}[bank] + clip
             assert g.run(ENCODE, actor, 0x10000 | source) == 256 * bank + clip
             set_action(64, direction)
@@ -136,6 +177,18 @@ def replay_launch(g, desc, actor, set_action, cases):
                 g.cpu.mem_write(actor + 5088, struct.pack("<f", reserve))
                 g.run(tick, actor, inp)
                 assert g.half(actor + 9482) == direction and not stamina
+            # A press just before ground contact survives the native landing
+            # transition. The launch still owns the hunter while in the air.
+            g.put(inp, 1 << 3)
+            g.cpu.mem_write(actor + 5, b"\1")
+            g.cpu.mem_write(actor + 1204, struct.pack("<H", 0x10E if direction == 6 else 0x114))
+            g.cpu.mem_write(actor + 68, struct.pack("<f", 149))
+            g.cpu.mem_write(actor + 4116, struct.pack("<f", -1))
+            g.run(tick, actor, inp)
+            assert g.half(actor + 9482) == direction and not stamina
+            g.put(inp, 0)
+            g.cpu.mem_write(actor + 5, b"\2")
+            g.cpu.mem_write(actor + 1204, struct.pack("<H", 0x10F))
             g.cpu.mem_write(actor + 11988, b"\1")
             g.run(tick, actor, inp)
             action = g.half(actor + 9478), g.half(actor + 9482)

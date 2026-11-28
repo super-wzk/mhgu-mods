@@ -8,6 +8,7 @@ use mhgu_sdk::weapon::style::{
     input::{Buttons, PadButton},
 };
 
+const X: u16 = PadButton::X as u16;
 const B: u16 = PadButton::B as u16;
 const Y: u16 = PadButton::Y as u16;
 const SHOULDERS: u16 = PadButton::R as u16 | PadButton::Zl as u16 | PadButton::Zr as u16;
@@ -42,13 +43,21 @@ pub(super) unsafe fn claim(actor: u32, before: u16, after: &Buttons) {
     let pass = after.held | after.pressed | after.released;
     let taken = before & !pass;
     let mut slots = 0;
-    if taken & (SHOULDERS | Y) != 0 && pass & Y == 0 {
-        slots |= (1 << 2) | (1 << 3);
+    let drawn = unsafe { action::weapon_drawn(actor) };
+    if drawn {
+        if taken & (SHOULDERS | Y) != 0 && pass & Y == 0 {
+            slots |= (1 << 2) | (1 << 3);
+        }
+        if taken & (SHOULDERS | B) != 0 && pass & B == 0 {
+            slots |= (1 << 6) | (1 << 7);
+        }
     }
-    if taken & (SHOULDERS | B) != 0 && pass & B == 0 {
-        slots |= (1 << 6) | (1 << 7);
+    if taken & X != 0 && (!drawn || matches!(unsafe { action::current(actor) }, (1, 2 | 3))) {
+        // The weapon owns X through sheath recovery. A latched retail draw
+        // (group 1, slot 1) would consume the moving attack as a plain draw.
+        slots |= 1 << 1;
     }
-    if slots == 0 || !unsafe { action::weapon_drawn(actor) } {
+    if slots == 0 {
         clear(actor);
         return;
     }

@@ -20,7 +20,7 @@ GREAT_SWORD_DETAILS = (
 
 
 def register_weapon(g, *, ident=16, ranged=False, limit=3, style=42, art_slots=0,
-                    weapon_name="Custom weapon", icon=13, controller=0, request=0, actions=0):
+                    weapon_name="Custom weapon", icon=13, controller=0, request=0, actions=0, max_slots=0):
     api = api_for(g, b"mhgu::WeaponRegistryV7", b"WPN7")
     register = g.get(api)
     descriptor, name, type_name = g.alloc(8), g.alloc(16), g.alloc(48)
@@ -38,9 +38,52 @@ def register_weapon(g, *, ident=16, ranged=False, limit=3, style=42, art_slots=0
     g.cpu.mem_write(other, struct.pack("<H?B", ident, ranged, icon))
     assert g.run(register, other, style_descriptor(g, 43, 0x10000 | ident), type_name, name, 0) == 2
     model, levels = g.alloc(12), g.alloc(12 * (limit + 1))
+    g.cpu.mem_write(levels + 12 * limit + 8, bytes([max_slots]))
     g.cpu.mem_write(model, struct.pack("<HH5BxH", ident, ident, 1, 0, 0, 0, 0, 0))
     assert g.run(g.get(api + 20), model, levels, limit + 1, name, name, 0, 0) == 0
     return tuple(g.get(api + i * 4) for i in range(1, 5))
+
+
+def setup_decorations(g):
+    # Two identical SDK weapons, the highlighted copy is Lv.4 with three slots.
+    box, pouch = (g.alloc(n) for n in (30000,256))
+    tables, gems, records = (g.alloc(n) for n in (56,112,24))
+    g.put(0x1858438, box)
+    g.put(0x18584B8, pouch)
+    g.put(0x18583A8,tables)
+    items, item_rows = g.alloc(112),g.alloc(56*2641)
+    g.put(tables+28,items)
+    g.put(items+100,2641)
+    g.put(items+108,item_rows)
+    for id in (2638,2639,2640):
+        g.put(item_rows+56*id+8,id)
+        g.cpu.mem_write(item_rows+56*id+14,bytes([99]))
+    g.stub(0x1943a4,lambda *_:0)
+    g.put(tables+44,gems)
+    g.put(gems+100,3)
+    g.put(gems+108,records)
+    g.cpu.mem_write(records+4,bytes([1]))
+    g.cpu.mem_write(records+16,bytes([2]))
+    g.cpu.mem_write(records+28,bytes([3]))
+    g.put(pouch+26,(1<<16)|2639)
+    g.put(box+26,(1<<16)|2638)
+    for addr in (0x1943d4,0x3f8634,0x3f8678):
+        g.stub(addr,lambda *_:0)
+    # The replay has no live skill allocator or graphical comparison panels.
+    for address in (0x26e354,0x26e43c,0x26e600,0x26e580,0x26fc24,0x26e50c,0x552c8c,0x72cb4c):
+        g.stub(address,lambda ptr,*args:ptr)
+    g.stub(0x13c208,lambda *args:0)
+    # Stock controller owns jewel-list construction and navigation. Supply the
+    # selected item table and allow the real debit/credit and socket writes.
+    g.stub(0xb84114,lambda *args:0)
+    g.stub(0x7af3a0,lambda n,*args:g.alloc(n))
+    g.stub(0x7af3e4,lambda *args:0)
+    g.stub(0x13efe30,lambda d,s,n,*args:g.cpu.mem_write(d,bytes(g.cpu.mem_read(s,n))))
+    g.stub(0x550110,lambda *args:2)
+    g.stub(0x1951fc,lambda *_:0)
+    g.stub(0x195374,lambda *_:2)
+    g.stub(0x195400,lambda _,i,*args: (2638,2639)[i])
+    return box,pouch
 
 
 def verify_expansion_controls(g):
@@ -228,7 +271,7 @@ def verify_status(g):
     # The packet identifies the specific equipment while preserving the native fallback.
     equipped, grant, upgrade, instance = register_weapon(g)
     data = json.loads(character_save({0: 10}))
-    data["data"]["inventory"] = {"instances": {"1": {"equipment": 16, "upgrade": 2}}, "equipped": 1, "sets": {}}
+    data["data"]["inventory"] = {"instances": {"1": {"equipment": 16, "upgrade": 2}}, "equipped": 1, "sets": {}, "decorations":{"1":[2638,0,0]}}
     g.files[SAVE] = json.dumps(data).encode()
     select_character(g, 0)
     assert g.cpu.mem_read(local + 1236, 1) == b"\x01"
@@ -245,6 +288,7 @@ def verify_status(g):
     g.run(0x57F468, details, local + 68, 0, scratch, 0, 0x8000, 0, 0)
     assert (17, 3) not in labels
     g.run(0x202640, process, local, 0)
+    assert struct.unpack_from("<3H",sent[-1],8+34)==(2638,0,0) and g.half(local+34)==0
     assert struct.unpack_from("<I", sent[-1], 1400)[0] == 0x98040020
     assert sent[-1][8 + 1236] == 1 and g.cpu.mem_read(local + 1236, 1) == b"\x01"
     g.cpu.mem_write(packet, sent[-1])
@@ -286,6 +330,12 @@ def verify_guild(g):
     labels.clear()
     g.run(0x5A41A0, view)
     assert (9, 2) not in labels
+    packet = g.alloc(17 + 6328)
+    g.stub(0x13EFE30, lambda out, src, size, *_: g.cpu.mem_write(out, bytes(g.cpu.mem_read(src, size))))
+    g.run(0x2221E0, packet, card)
+    g.put(view + 80, packet + 17)
+    g.run(0x5A41A0, view)
+    assert labels[9, 2] == "Custom weapon"
     g.put(view + 80, card)
 
     native_record = g.alloc(44)
@@ -575,7 +625,7 @@ def verify_set_styles(g):
 def verify_stock_grid(g):
     # Retail callbacks also run outside the extension controller's scoped reads.
     player = g.get(0x1897F78)
-    manager, save = g.alloc(40032), g.alloc(64)
+    manager, save = g.alloc(40032), g.alloc(270000)
     g.put(0x1885B58, manager)
     for village, guild in ((0, 0), (1, 2), (3, 7)):
         g.put(player + 2392, village << 21)
@@ -588,6 +638,12 @@ def verify_stock_grid(g):
     g.cpu.mem_write(manager + 132, struct.pack("<7H", *range(40, 47)))
     for slot in (0, *range(40, 48)):
         assert g.run(0x144590, save, slot) == int(40 <= slot <= 46)
+    # Both entry points have a PC-relative instruction in the original prologue.
+    assert g.run(0x14426C,save,0,0xffff) == 3
+    assert g.run(0x14426C,save,0,41) == 1
+    g.cpu.mem_write(save+254070+136*8,struct.pack("<H",23))
+    assert g.run(0x148340,save,0,23) == 8
+    assert g.run(0x148340,save,1,23) == 255
     for kind, entry in enumerate((0x142268, 0x149374)):
         calls = []
         g.stub(entry, lambda arg, *_: calls.append(arg) or 13)
@@ -765,7 +821,7 @@ def verify():
         assert len(lines) == 5 and lines[-1] == MANUAL_HINT
         assert all(effect in details for effect in effects)
 
-    equipped, grant, upgrade, instance = register_weapon(g, art_slots=3)
+    equipped, grant, upgrade, instance = register_weapon(g, art_slots=3, max_slots=3)
     g.cpu.mem_write(eq + 1236, b"\0")
     g.cpu.mem_write(eq + 28, struct.pack("<HH", 7, 8))
     native = bytes(g.cpu.mem_read(eq, 1376))
@@ -801,12 +857,13 @@ def verify():
     g.put(grid+92,g.alloc(160))
     g.put(grid+96,g.alloc(160))
     g.run(0x553030, box + 372)
-    for offset in (336, 408, 444):
+    for offset in (336, 408, 444, 516, 552):
         g.run(0x54ED74, box + offset)
     g.cpu.hook_del(g.traps[0x65CB3C])
     g.stub(0x65CB3C, lambda owner, index, *_: {0: home, 2: grid, 16: panel, 17: info}.get(index, 0)
            if owner == box else 0)
     g.stub(0x714E34, lambda *_: 0)
+    g.stub(0x65CBA0, lambda _,idx,*args: home if idx == 0 else 0)
     cursor_positions = []
     g.put(home + 88, struct.unpack("<I", struct.pack("<f", 32.0))[0])
     def float_arg():
@@ -822,7 +879,7 @@ def verify():
     g.stub(0x56FC58, localized)
     # Run the GU root controller, its cursor, child initialization and close.
     # Only the external panels, sounds and lobby helpers are substituted here.
-    for addr in (0x1B844, 0x72D75C, 0x65EFCC, 0x65CBC4, 0x65CBA0, 0x65E794,
+    for addr in (0x1B844, 0x72D75C, 0x65EFCC, 0x65CBC4, 0x65E794,
                  0x65E874, 0x65EA84, 0x718934, 0x718A0C, 0x259058, 0x259124,
                  0x54A9FC, 0x2772C4, 0x714DA0, 0x714BE4):
         g.stub(addr, lambda *_: 0)
@@ -862,7 +919,7 @@ def verify():
     for _ in range(6):
         press_home(0x40)
     assert press_home(0x2000) == 3
-    assert g.half(box+394) == 0x0a0a
+    assert g.get(box+88) == 1
     assert press_home(0x4000) == 1
     g.put(home + 92, 9)
     extra_stock_row[0] = 1
@@ -912,12 +969,19 @@ def verify():
     assert press_home(0x2000) == 1
     busy[0] = 0
 
-    def open_inventory():
+    def open_inventory(kind=0):
         assert press_home(0x2000) == 3
+        assert g.get(box+88) == 1
+        for _ in range(kind):
+            press_home(0x40)
+        assert g.get(box+132) == kind
+        assert press_home(0x2000) == 3 and g.get(box+88) == 2
         assert g.half(box+394) == 0x0a0a
 
     def press_inventory(mask):
         press_home(mask)
+        if mask == 0x4000 and g.get(box+88) == 1:
+            assert press_home(0x4000) == 1
         return int(g.get(box+64) == 3)
 
     open_inventory()
@@ -936,6 +1000,56 @@ def verify():
     open_inventory()
     assert g.half(box+400) == 2
     assert g.half(box+392) == 0
+    jewel_box, pouch = setup_decorations(g)
+    assert press_inventory(0x4000) == 0
+    open_inventory(2)
+    assert g.get(box+136) == 0
+    press_inventory(0x2000)
+    assert g.get(box+136) == 1
+    press_inventory(0x2000)
+    assert g.get(box+136) == 2
+    press_inventory(0x40)
+    press_inventory(0x2000)
+    assert g.get(box+136) == 3
+    press_inventory(0)
+    assert g.half(jewel_box+28) == 0
+    save_character(g)
+    assert json.loads(g.files[SAVE])["data"]["inventory"]["decorations"] == {"1":[2638,0,0]}
+    # Replace the first jewel using the second entry from the pouch.
+    press_inventory(0x2000)
+    press_inventory(0x40)
+    press_inventory(0x40)
+    press_inventory(0x2000)
+    assert g.get(box+136) == 3
+    press_inventory(0)
+    save_character(g)
+    assert json.loads(g.files[SAVE])["data"]["inventory"]["decorations"] == {"1":[2639,0,0]}
+    assert g.half(jewel_box+28) == 1 and g.half(pouch+28) == 0
+    # GU's Y bulk-removal flow returns the jewel to the real item box.
+    for _ in range(3):
+        if g.get(box+136) != 0: press_inventory(0x4000)
+    assert g.get(box+136) == 0
+    def remove_all():
+        press_inventory(0x8000)
+        assert g.get(box+136) == 8
+        press_inventory(0x80)
+        press_inventory(0x2000)
+        assert g.get(box+136) == 9
+        press_inventory(0)
+        assert g.get(box+136) == 0
+
+    prior_box = bytes(g.cpu.mem_read(jewel_box+26, 2300*4))
+    g.cpu.mem_write(jewel_box+26,struct.pack("<HH",9,99)*2300)
+    remove_all()
+    save_character(g)
+    assert json.loads(g.files[SAVE])["data"]["inventory"]["decorations"] == {"1":[2639,0,0]}
+    g.cpu.mem_write(jewel_box+26,prior_box)
+    remove_all()
+    assert sorted([g.half(jewel_box+26),g.half(jewel_box+30)]) == [2638,2639]
+    assert g.half(jewel_box+28) == g.half(jewel_box+32) == 1
+    assert g.get(box+136) == 0
+    assert press_inventory(0x4000) == 0
+    open_inventory()
     g.cpu.mem_write(eq + 576, struct.pack("<4H", 11, 4, 23, 7))
     assert press_inventory(0x2000) == 1 and g.get(box + 136) == 1
     assert press_inventory(0) == 1 and prompts[-1] == (20, 119, 0)
@@ -946,6 +1060,12 @@ def verify():
     assert g.run(equipped) == 0x10010 and g.run(selected, 0x10010) == 42
     arts = struct.unpack("<4H", g.cpu.mem_read(eq + 576, 8))
     assert arts == (0, 4, 0, 2), arts
+    assert press_inventory(0x4000) == 0
+    open_inventory(5)
+    press_inventory(0x2000)
+    assert g.get(box+136) == 0
+    assert press_inventory(0x4000) == 0
+    open_inventory()
     assert press_inventory(0x1000) == 1 and g.get(box + 136) == 5
     assert press_inventory(0) == 1 and prompts[-1] == (20, 126, 0)
     assert press_inventory(0x2000) == 1 and g.get(box + 136) == 6
@@ -961,7 +1081,26 @@ def verify():
     assert g.half(ui + 68) == 3  # Only the unlocked general Arts.
     assert row() == 0 and g.half(ui + 32) == 1 and marks[panel, 7, 1] == 1
     assert labels[widgets, 7, 2] == labels[info, 2, 2] == "Custom weapon"
-    assert press(0x1000) == 1
+    dialog = g.alloc(128)
+    g.stub(0x65EFD0,lambda *_:dialog)
+    def show_guide(_,body,*args):
+        labels[dialog,7,1] = g.string(body)
+        g.put(dialog+76,1)
+        return 1
+    g.stub(0x65F190,show_guide)
+    g.stub(0x64C600,lambda *_:g.put(dialog+76,0))
+    guide = b"First page\nOne\n\nSecond page\nTwo"
+    src = g.alloc(len(guide))
+    g.cpu.mem_write(src,guide)
+    binder = g.get(api_for(g,b"mhgu::StyleManualV1",b"SMN1"))
+    assert g.run(binder,42,src,len(guide))
+    open_box()
+    assert "<ICON PAD_X>" in labels[info,3,2]
+    assert press(0x1000)==1
+    assert any("First page" in text for text in labels.values() if isinstance(text,str))
+    assert press(0x20)==1
+    assert any("Second page" in text for text in labels.values() if isinstance(text,str))
+    assert press(0x4000)==1
     assert press(0x2000) == 5
     assert g.half(ui + 32) == 3  # GU creates its native three-slot UI.
     assert press(0x2000) == 6
@@ -990,7 +1129,7 @@ def verify():
     inventory = json.loads(g.files[SAVE])["data"]["inventory"]
     assert inventory == {"instances": {"1": {"equipment": 16, "upgrade": 3},
                                        "2": {"equipment": 16, "upgrade": 0}},
-                         "equipped": 1, "sets": {}}
+                         "equipped": 1, "sets": {}, "slots": [2, 1]}
     select_character(g, 1)
     assert g.run(instance, first, out) == 0 and g.run(equipped) == 0
     select_character(g, 0)
@@ -998,11 +1137,25 @@ def verify():
     g.stub(g.originals[0x144768], lambda *_: 0)
     stock = g.alloc(128)
     g.cpu.mem_write(stock + 32, b"\x07")
+    # Execute GU's actual BL in the grid renderer and in the sale eligibility check.
+    # Weapon index zero remains GU's physical backing while only armor index one
+    # should carry a visible E in the stock box.
+    equipped_indices = g.get(0x1885B58) + 132
+    previous_indices = bytes(g.cpu.mem_read(equipped_indices,14))
+    g.cpu.mem_write(equipped_indices,struct.pack("<7H",0,1,2,3,4,5,6))
+    def marked(slot):
+        return g.run(0x5B932C,native_save,slot,until=0x5B9330)
+    assert not marked(0) and marked(1)
+    assert g.run(0x14426C,native_save,0,0) == 1
+    assert g.run(0x144C04,native_save,0) == 1
     g.run(g.hooks[0x144768], stock, 0, 0)
+    assert marked(0) and marked(1)
+    assert g.run(0x144C04,native_save,0) == 0
+    g.cpu.mem_write(equipped_indices,previous_indices)
     assert g.run(equipped) == 0 and g.run(instance, first, out) == 1
     g.cpu.mem_write(eq + 1236, b"\x01")
     open_inventory()
-    g.cpu.mem_write(box+392,bytes([1,0]))
+    g.cpu.mem_write(box+392,bytes([0,0]))  # Sorted Lv.1 copy remains first after reload.
     assert press_inventory(0x2000) == 1 and g.get(box + 136) == 1
     assert press_inventory(0) == 1 and prompts[-1] == (20, 119, 0)
     assert press_inventory(0x2000) == press_inventory(0) == press_inventory(0) == 1
@@ -1012,7 +1165,7 @@ def verify():
     assert g.half(ui + 32) == 1 and labels[widgets, 7, 2] == "Custom weapon"
     assert press(0x4000) == 0
     open_inventory()
-    assert g.half(box + 392) == 1
+    assert g.half(box + 392) == 0
     g.run(g.hooks[0x144768], stock, 0, 0)
     assert g.run(equipped) == 1
 
@@ -1068,13 +1221,80 @@ def verify():
     assert xy == {"x": 0, "y": 0}
     assert [part for (group, part), visible in cells.items() if group == 12 and visible] == [2, 3]
     cells.clear()
-    assert names[-1] == ("Custom weapon", 1)
+    assert names[-1] == ("Custom weapon", 101)
     assert press_inventory(0x20) == 1
     g.run(0x5B68FC, grid)
     assert xy == {"x": 36, "y": 0}
     xy.clear()
     g.run(0x5B68FC, grid)
     assert xy == {"x": 36, "y": 0}
+    assert bytes(g.cpu.mem_read(native_save, 0x3A000)) == original_save
+
+    # Move the final duplicate into an empty slot on page two, then reload.
+    assert press_inventory(0x4000) == 0
+    open_inventory(4)
+    press_inventory(g.run(0x65F914))
+    press_inventory(0x20)
+    press_inventory(0x2000)
+    press_inventory(0x20)
+    press_inventory(0x2000)
+    assert g.get(box+136) == 2
+    press_inventory(0)
+    save_character(g)
+    saved = json.loads(g.files[SAVE])["data"]["inventory"]
+    assert saved["slots"][100:103] == [101, 0, 102]
+    data = json.loads(g.files[SAVE])
+    saved = data["data"]["inventory"]
+    saved["instances"]["102"]["upgrade"] = 3
+    saved["decorations"] = {"102": [2638, 0, 0]}
+    saved["sets"]["2"] = {"instance": 102, "fingerprint": 17}
+    saved["sets"]["3"] = {"instance": 101, "fingerprint": 18}
+    g.files[SAVE] = json.dumps(data).encode()
+    item_rows = g.get(g.get(g.get(0x18583A8) + 28) + 108)
+    g.put(item_rows + 56 * 2638 + 28, 37)
+    press_inventory(0x4000)
+    select_character(g, 0)
+    open_inventory(5)
+    press_inventory(g.run(0x65F914))
+    press_inventory(0x20)
+    press_inventory(0x20)
+    # Quote and cancel, then sell the same duplicate and verify wallet and reload.
+    sale = api_for(g,b"mhgu::EquipmentSale",b"SALE")
+    # GU 1434E4 resolves the source series and calls its level-specific price.
+    catalog, vt, kind_fn, price_fn = (g.alloc(n) for n in (4,352,4,4))
+    g.put(catalog,vt)
+    g.put(vt+24,kind_fn)
+    g.put(vt+348,price_fn)
+    g.stub(kind_fn,lambda *args:14)
+    g.stub(price_fn,lambda _,level,*args:level * 100)
+    g.cpu.hook_del(g.traps.pop(0x13c208))
+    g.stub(0x13c208,lambda _,kind,series,*args:catalog if (kind,series)==(14,1) else 0)
+    assert g.run(g.get(sale+4),16,3,(1<<16) | (6<<5) | 14) == 0
+    drawn = []
+    g.stub(g.originals[0x5b90a8],lambda _,name,price,*args:drawn.append((g.string(name),price)))
+    g.run(0x5B68FC,grid)
+    assert drawn[-1] == ("Custom weapon",637)
+    player = g.get(0x1897F78)
+    balance = g.get(player + 36)
+    for confirm in (False, True):
+        press_inventory(0x2000)
+        assert g.get(box+136) == 1, (confirm, g.get(box+824),g.half(box+396),prompts[-1],g.get(box+136))
+        press_inventory(0)
+        assert prompts[-1][:2] == (20,144)
+        press_inventory(0x2000 if confirm else 0x4000)
+        if confirm: press_inventory(0)
+        else:
+            press_inventory(0x4000)  # GU first moves the choice to No, then dismisses.
+            assert g.get(box+136) == 0
+            assert g.run(instance, 102, out) and g.get(player + 36) == balance
+    assert not g.run(instance, 102, out) and g.run(instance, 101, out)
+    assert g.get(player + 36) == balance + 637
+    save_character(g)
+    select_character(g, 0)
+    assert not g.run(instance, 102, out) and g.run(instance, 101, out)
+    remaining = json.loads(g.files[SAVE])["data"]["inventory"]
+    assert remaining["sets"] == {"3": {"instance": 101, "fingerprint": 18}}
+    assert not remaining.get("decorations")
     assert bytes(g.cpu.mem_read(native_save, 0x3A000)) == original_save
 
     without_mod = boot(elf, g.files[SAVE])

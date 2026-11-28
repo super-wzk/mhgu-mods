@@ -31,11 +31,14 @@ STYLE_IDS = {
 ENCODE, DECODE = 0x27C6A0, 0x27C6D4
 MENU_OPEN, MENU_UPDATE = 0x548B7C, 0x5490FC
 STATUS_STYLE, STATUS_STYLE_SMALL = 0x62FB78, 0x633450
-SET_STYLE_HOOKS = {0xDE16C, 0xDE1C0, 0x29CDFC, 0x307F18, 0xDEE34, 0xDB7E0, 0xDB88C, 0xDB900, 0xDBE74, 0xDB984, 0xDBA5C, 0x54EE98, 0x5B91E0, 0x5C1FA4, 0x14394C, 0x143894, 0x713DB8, 0x144768, 0x630268, 0x72D3D8, 0x58A3DC, 0x58A44C, 0x5D96F8, 0x146CB8, 0x146560, 0x147250, 0x1480B4}
-SET_STYLE_HOOKS |= {0x277848, 0x714B20, 0x718084, 0x1418E0, 0x144C04, 0x1440C8,
+SET_STYLE_HOOKS = {0xDB568, 0xDB594, 0xDB66C, 0xDB7B8, 0x1446B8, 0x550570, 0x5859F4, 0x56E810, 0xDB028, 0x72C6CC, 0x3E1208, 0xE175C, 0xDADF0, 0xE15F4, 0xE14C8, 0xDDD48, 0xDE16C, 0xDE1C0, 0x29CDFC, 0x307F18, 0xDB7E0, 0xDB88C, 0xDB900, 0xDBE74, 0xDB984, 0xDBA5C, 0x54EE98, 0x5B91E0, 0x5C1FA4, 0x14394C, 0x143894, 0x713DB8, 0x144768, 0x630268, 0x72D3D8, 0x58A3DC, 0x58A44C, 0x5D96F8, 0x146CB8, 0x146560, 0x147250, 0x1480B4}
+SET_STYLE_HOOKS |= {0x277848, 0x718084, 0x1418E0, 0x144C04, 0x1440C8,
                     0x144190, 0x141944, 0x144590, 0x1449B4, 0x144B68, 0x145B58,
                     0x14935C, 0x1424EC, 0x149E6C, 0x72AA48, 0x72AB38, 0x56EA38,
                     0x5B973C, 0x5B6C78}
+
+SET_STYLE_HOOKS |= {0x26E964, 0x5B90A8, 0x143390, 0x1437E0, 0x143A14, 0x14426C, 0x144DAC, 0x144F94,
+                    0x1450F0, 0x14526C, 0x1454A8, 0x1456BC, 0x148340, 0x72C7E0, 0x72CEC4}
 
 PROFILE_HOOKS = {0x202640, 0x202764, 0x202894, 0x274400, 0x2776D4, 0x273BE0}
 PROFILE_HOOKS |= {0x62E258, 0x57F468, 0x546F84, 0x303790, 0x589BC4, 0x589C74, 0x589D50,
@@ -50,7 +53,7 @@ GAME_STYLE = 0x268818
 ART_READY = 0x2A26C8
 ART_CAPACITY = 0x2778AC
 VALOR_HUD = 0x639BD0
-WEAPON_HUD_HOOKS = {0x544CC8, 0x544DB8}
+WEAPON_HUD_HOOKS = {0x60DB68, 0x61225C, 0x634124, 0x657338, 0x544CC8, 0x544DB8}
 FX_RELEASE = 0x32A104
 DRAW_ROUTE = 0x115FCF4
 DB_DRAW_ROUTE = 0x11BA2A0
@@ -248,7 +251,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             DECODE,
             MENU_OPEN,
             MENU_UPDATE,
-            0x5B1294, 0x5B0F70, 0x646A3C, 0x646AD0, 0x5CB780, 0x65F7A4,
+            0x5B1294, 0x5B0F70, 0x646A3C, 0x646AD0, 0x5CB780, 0x65F7A4, 0x64BC40,
             STATUS_STYLE,
             STATUS_STYLE_SMALL,
             *PROFILE_HOOKS,
@@ -300,7 +303,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
         else set()
     )
     if "registry" in order and "sword" in order:
-        expected.update((EQUIPMENT_GRIP, MODEL_DEPTH, 0xA6084, 0x17F188))
+        expected.update((EQUIPMENT_GRIP, 0x30A8B0, MODEL_DEPTH, 0xA6084, 0x17F188))
     actual = set(g.hooks)
     assert actual == expected, (
         [hex(addr) for addr in sorted(expected - actual)],
@@ -1082,6 +1085,39 @@ def verify_battle(g, p, remote, resources):
     g.put(tables + 11 * 4, stock)
     g.stub(0x285F68, lambda *_: table_list)
 
+    # The native command table can change action before 282DA8 gets control.
+    # Poll the real style filter, then release the stick before motion 28.
+    g.stub(g.originals[0x27EBBC], lambda *_: 0)
+    for setting in (0, 1):
+        g.put(p + 9536, setting)
+        for stick, slot in ((0, 13), (0x8000, 12), (0x4000, 28)):
+            neutral()
+            g.put(p + 5280, 0)
+            h(5132, stick)
+            h(5136, 120)
+            h(5112, 0x80)
+            g.run(g.hooks[0x27EBBC], p)
+            assert g.half(p + 5112) == 0x80
+            action(1, 6)
+            h(5136, 0)
+            assert g.run(g.hooks[ENCODE], p, 28) & 255 == slot
+        for button, frame in ((0x20, 58), (0x100, 72)):
+            for stick, slot in ((0, 13), (0x8000, 12)):
+                neutral()
+                tick(0, held=button, pressed=button)
+                g.put(p + 5280, 0)
+                h(5132, stick)
+                h(5136, 120)
+                h(5112, 0x80)
+                g.run(g.hooks[0x27EBBC], p)
+                h(5136, 0)
+                tick(frame, held=0x80, pressed=0x80)
+                assert (g.half(p + 9478), g.half(p + 9482)) == (1, 6)
+                assert g.run(g.hooks[ENCODE], p, 28) & 255 == slot
+    g.put(p + 9536, 0)
+    neutral()
+    tick()
+
     def roll(side):
         action(1, 6)
         g.cpu.mem_write(p + 10057, b"\x01")
@@ -1402,6 +1438,9 @@ def verify_battle(g, p, remote, resources):
         assert g.run(g.hooks[ENCODE], p, 28) & 255 == slot
     # GU's clock can pause. A long pause at one frame must not charge up.
     f(28, 2.)
+    model_part = g.alloc(5200)
+    channels = g.alloc(6)
+    g.put(model_part + 5076, 1)
     for key, hold, release, expected, interval in [
         (32, 0, True, 60, 20),
         (32, 23, True, 60, 20),
@@ -1462,6 +1501,9 @@ def verify_battle(g, p, remote, resources):
         if release:
             if check_first_tier:
                 tier = (60, 85, 105, 146).index(expected)
+                # GU 30A8B0 sets draw, fold, idle, then three charge channels.
+                g.run(g.hooks[0x30A8B0], model_part, 0, p, *(channels + n for n in range(6)))
+                assert list(g.cpu.mem_read(channels, 6)) == [1, 0, *(int(n == tier) for n in range(4))], (tier, hold, list(g.cpu.mem_read(channels, 6)), g.half(p + 9482), g.get(p + 10057) & 1)
                 assert charge_rises == list(range(128, 128 + tier)), (hold, interval, charge_rises)
                 flashes = [g.get(unit + 68) for unit in units if g.get(unit + 68) in routes[10]]
                 assert flashes == (list(routes[10]) if tier else []), (hold, interval, flashes)

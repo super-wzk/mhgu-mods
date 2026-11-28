@@ -68,7 +68,7 @@ def verify_inputs(g, actor, equipment, scratch, set_action, changes):
         g.put(actor + 9384, 0)
         pad.poll(0)
         pad.dispatch()
-        set_action(2 if walk else 1, 30 if walk else 0)
+        set_action(2 if walk else 1, 30 if walk and drawn else 0)
         g.cpu.mem_write(actor + 10057, bytes([drawn]))
         g.cpu.mem_write(actor + 5, b"\x01")
         g.cpu.mem_write(actor + 9392, bytes(48))
@@ -122,8 +122,11 @@ def verify_inputs(g, actor, equipment, scratch, set_action, changes):
                 g.run(COMMAND_UPDATE, actor)
             pad.dispatch()
             assert state() not in ((1, 2), (1, 3), (1, 6)), (seq, state())
-            if state()[0] == 16:
+            if state()[0] == 16 or state() == (1, 1):
                 break
+        if expected == (1, 1):
+            assert state() == expected and all(c[0] != 16 for c in changes), changes
+            return
         assert state() == (16, 0x8000 + expected), (seq, expected, state(), changes)
         assert len([c for c in changes if c[0] == 16]) == 1, changes
 
@@ -189,7 +192,9 @@ def verify_inputs(g, actor, equipment, scratch, set_action, changes):
         for seq in ((X | A,), (X, X | A), (A, X | A)):
             attack(seq, 2)
             attack(seq, 79, drawn=False)
-        attack((X,), 78, drawn=False)
+        attack((X,), (1, 1), drawn=False)
+        attack((X,), 78, drawn=False, strength=80)
+        attack((X,), 78, drawn=False, walk=True, strength=80)
         ground()
         g.put(actor + 5180, 0)
         pad.poll(ZL | X | A | B)
@@ -295,13 +300,42 @@ def verify_inputs(g, actor, equipment, scratch, set_action, changes):
             assert g.get(actor + 5172) & 0x40 == 0
             pad.poll(key | A)
             pad.dispatch()
-            assert state() == (16, 0x8000 + 82)
+            # The preceding impact bind keeps its form when returning to ground.
+            assert state() == (16, 0x8000 + 84), state()
         else:
             assert g.get(actor + 5172) & 0x40
             pad.poll(key | X)
             assert g.half(actor + 5112) & X
             pad.dispatch()
             assert state() == (1, 0)
+    # The directional art shortcuts survive the w13 filter during both runs,
+    # their loops and braking. Let the real GU table consume each shortcut.
+    g.cpu.mem_write(pad.settings + 17516, b"\0")
+    g.cpu.mem_write(pad.settings + 17519, b"\1")
+    g.cpu.hook_del(g.traps.pop(0x2A8B34))
+    g.stub(0x2A8B34, lambda *_: int(bool(g.get(actor + 5180) & 7)))
+    g.stub(0x2ACBEC, lambda *_: 0)
+
+    def select_art(_, group, slot, flags):
+        for ptr, value in ((group, 16), (slot, 85), (flags, 0x40)):
+            g.cpu.mem_write(ptr, struct.pack("<H", value))
+        return 1
+
+    g.stub(0x2ACB60, select_art)
+    for run in (40, 41, 42, 44, 45, 46):
+        for key in (0x100000, 0x800000, 0x200000):
+            ground()
+            set_action(16, 0x8000 + run)
+            pad.poll(0, strength=120)
+            pad.dispatch()
+            pad.poll(key, strength=120)
+            assert g.get(actor + 5180) & 7
+            pad.dispatch()
+            assert state() == (16, 85), (run, key, state())
+    g.cpu.hook_del(g.traps.pop(0x2A8B34))
+    g.stub(0x2A8B34, lambda *_: 0)
+    g.put(actor + 5180, 0)
+    g.cpu.mem_write(pad.settings + 17519, b"\0")
     # Opening a GUI while a single is pending cancels it, even on button release.
     ground()
     pad.poll(X)

@@ -150,7 +150,7 @@ pub fn cursor(state: u8) -> Cursor {
         combo_override: Some((2..=3, 17..=19)),
         ..RULES
     };
-    let rules = if discharge_dodge(state) {
+    let rules = if discharge_dodge(state) || matches!(state, 3 | 7 | 20 | 28 | 88) {
         &DISCHARGE_RULES
     } else {
         &RULES

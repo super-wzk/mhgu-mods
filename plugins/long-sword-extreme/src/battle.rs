@@ -148,7 +148,7 @@ unsafe fn relative(actor: u32, input: &Input) -> i16 {
     if input.stick_strength < STICK_DEADZONE {
         return 0;
     }
-    unsafe { read::<u16>(actor, 4076).wrapping_sub(native!(0x27f5d0, actor) as u16) as i16 }
+    unsafe { movement::command_stick_yaw(actor).unwrap_or(0) as i16 }
 }
 
 unsafe fn spirit(actor: u32) -> i32 {
@@ -271,7 +271,15 @@ impl Battle {
             if input.auxiliary_pressed != 0 {
                 bits |= 1 << CMD_PARRY;
             }
-            if input.command(8) {
+            // 2A79CC masks the filtered press down to the dash shoulder when
+            // GU's dash flag is set. Its gameplay snapshot still has Special.
+            let (group, slot) = action::current(actor);
+            let sprint_special = action::custom_id(group, slot).is_some_and(is_sprinting)
+                && read::<u32>(actor, 10096) & 1 != 0
+                && read::<u32>(actor, 5124)
+                    & u32::from(mhgu_sdk::weapon::style::input::special_attack_mask() | 0x1000)
+                    != 0;
+            if input.command(8) || sprint_special {
                 bits |= 1 << CMD_RELEASE;
             }
             bits
@@ -467,7 +475,7 @@ impl Battle {
                     }
                     c.time.cycles = 0;
                     c.time.frame = f32::from(step.start);
-                    c.time.blend = f32::from(step.blend) / 2.;
+                    c.time.blend = mhfz_sdk::action::blend_ticks(step.blend);
                     sound::update(
                         &mut self.audio,
                         actor,
@@ -838,7 +846,7 @@ impl Battle {
             let sample = action::MotionFrame::sample(actor);
             let frame = sample.frame;
             let last = c.time.frame;
-            let wrapped = c.time.observe(frame, sample.blend);
+            let wrapped = c.time.observe(frame, sample.blend * 0.5);
             let dt = read::<f32>(actor, 28).max(0.);
             self.dash_ground(actor, state, sample, dt);
             if state == 71 {
@@ -887,7 +895,7 @@ impl Battle {
             let sample = action::MotionFrame::sample(actor);
             let frame = sample.frame;
             let last = c.time.frame;
-            let wrapped = c.time.observe(frame, sample.blend);
+            let wrapped = c.time.observe(frame, sample.blend * 0.5);
             sound::update(&mut self.audio, actor, Some(step.clip), frame, None);
             if matches!(state, 48 | 50 | 51 | 53) && read::<f32>(actor, 1268) <= 0. {
                 // 824EDE3C/64: turn 1024 units per FZ tick for eight motion frames.
@@ -929,8 +937,13 @@ impl Battle {
             };
             self.dash_ground(actor, state, sample, dt);
             let c = self.cursor.as_mut().unwrap();
-            if (state == SPRINT || c.art_window(eligible)) && self.activate_art(actor) {
+            if (is_sprinting(state) || state == BRAKE || c.art_window(eligible))
+                && self.activate_art(actor)
+            {
                 return true;
+            }
+            if is_sprinting(state) && bits & (1 << CMD_RELEASE) != 0 && cut(actor) > 0 {
+                return self.begin(actor, program::release(cut(actor)));
             }
             if matches!(state, 71 | 82) {
                 if input.stick_strength < STICK_DEADZONE || read::<f32>(actor, 5088) <= 0. {
@@ -960,9 +973,6 @@ impl Battle {
             if state == SPRINT {
                 if bits & (1 << CMD_PARRY) != 0 {
                     return self.begin(actor, 78);
-                }
-                if bits & (1 << CMD_RELEASE) != 0 && cut(actor) > 0 {
-                    return self.begin(actor, program::release(cut(actor)));
                 }
                 if input.command(27) {
                     return self.begin(actor, if gauge >= program::DASH_COST { 71 } else { 82 });
@@ -1169,15 +1179,10 @@ impl Battle {
             if roll_active && drawn {
                 return self.after_roll(actor, input, bits);
             }
-            if matches!(current, (64, 6 | 7))
-                && read::<u8>(actor, 5) == 2
-                && bits & (1 << 1) != 0
-                && read::<u8>(actor, 11988) != 0
-                && drawn
-                && read::<i16>(actor, 5078) > 0
-                && native!(0x53a058, actor) == 1015
+            if let Some(state) =
+                mhfz_sdk::combat::knockback_recovery(actor, current, drawn, input, [75, 74])
             {
-                return self.begin(actor, if current.1 == 6 { 75 } else { 74 });
+                return self.begin(actor, state);
             }
             let ground = movement::ground_idle(current)
                 || (matches!(current.0, 1 | 2)

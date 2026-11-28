@@ -7,6 +7,13 @@ const fn half(data: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([data[at], data[at + 1]])
 }
 
+// 8183E574 halves the row value. 817315F8 adds the final interpolation
+// tick only when a blend was actually requested.
+pub fn blend_ticks(row: u16) -> f32 {
+    let ticks = row / 2;
+    f32::from(ticks + u16::from(ticks != 0))
+}
+
 #[derive(Clone, Copy)]
 pub struct Step {
     pub op: u16,

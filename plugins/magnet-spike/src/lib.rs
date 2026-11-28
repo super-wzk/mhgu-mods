@@ -102,7 +102,7 @@ static STYLE: Style = Style {
 
 static RULES: rules::Rules = rules::Rules {
     // FZ 81813350 reads w13's 90-degree half-angle at mhfdat[0x65c].
-    ground_motion: Some(motion::finish_sheathe),
+    ground_motion: Some(motion::finish_ground_motion),
     guard_half_angle: 0x4000,
     deflection: Some(mhfz_sdk::combat::deflection),
     camera_offset: Some(mhfz_sdk::camera::offset),
@@ -175,6 +175,10 @@ fn register_weapon() -> Result<(), RegisterError> {
         return Err(RegisterError::Invalid);
     }
     mhfz_sdk::effects::model::install();
+    // Use the same GU w07 series as the trial weapon stats, from Lv.4 to Lv.11.
+    for level in 0..TRIAL_LEVELS.len() {
+        trade::register_native_level(TRIAL_SPIKE.id, level as u16, mhgu_sdk::weapon::WeaponKind::from_gu(7).unwrap(), 1, level as u8 + 4)?;
+    }
     trade::register_purchase(TRIAL_SPIKE.id, 100)?;
     trade::register_recipe(TRIAL_SPIKE.id, POTION_RECIPE)?;
     for level in 0..TRIAL_LEVELS.len() - 1 {

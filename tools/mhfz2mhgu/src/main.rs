@@ -391,7 +391,7 @@ fn main() -> Result<()> {
         } => hunter_fx::dual_blades(&dat, &output, &gu_weapon),
         Command::Model { source, output } => {
             let (_, pair, rig) = source.open()?;
-            save(&output, model::convert(&pac::member(&pair, 0)?, &rig)?)
+            save(&output, model::convert(&pac::member(&pair, 0)?, &rig, model::TextureV::Flip)?)
         }
         Command::Motion {
             source,

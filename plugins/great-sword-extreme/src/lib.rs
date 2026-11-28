@@ -89,6 +89,7 @@ mod entry {
         if !rules::bind(EXTREME.id, &RULES) {
             forge::log::prelude::warn!("Style {}: GU rule service unavailable", EXTREME.id);
         }
+        mhgu_sdk::weapon::style::input::bind_filter(EXTREME.id, super::battle::sample_roll);
         super::guard_body::install();
         mhfz_sdk::effects::model::install();
         unsafe { mhgu_sdk::weapon::style::preload::bind(EXTREME.id, motion::preload) };

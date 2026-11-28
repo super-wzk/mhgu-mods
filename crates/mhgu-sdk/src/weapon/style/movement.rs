@@ -58,7 +58,7 @@ pub unsafe fn motion_frames(actor: u32) -> f32 {
 /// # Safety
 /// The actor must be a live local quest hunter in its ground action update.
 pub unsafe fn displace_forward(actor: u32, distance: f32) {
-    unsafe { displace_local(actor, distance, 0.) };
+    unsafe { displace_local(actor, 0., distance, 0.) };
 }
 
 /// Add a vertical displacement in world units during a private action's windup.
@@ -66,15 +66,24 @@ pub unsafe fn displace_forward(actor: u32, distance: f32) {
 /// # Safety
 /// The actor must be a live local quest hunter in its ground action update.
 pub unsafe fn displace_vertical(actor: u32, distance: f32) {
-    unsafe { displace_local(actor, 0., distance) };
+    unsafe { displace_local(actor, 0., 0., distance) };
 }
 
-unsafe fn displace_local(actor: u32, forward: f32, vertical: f32) {
+/// Add a horizontal displacement along the hunter's local X and Z axes.
+///
+/// # Safety
+/// The actor must be a live local quest hunter in its ground action update.
+pub unsafe fn displace_horizontal(actor: u32, side: f32, forward: f32) {
+    unsafe { displace_local(actor, side, forward, 0.) };
+}
+
+unsafe fn displace_local(actor: u32, side: f32, forward: f32, vertical: f32) {
     const VELOCITY: Field<[f32; 3]> = Field::at(4112);
     unsafe {
         let hunter = Object::at(actor).unwrap();
         let frames = hunter.get::<f32>(Field::at(28));
-        if (forward == 0. && vertical == 0.)
+        if (side == 0. && forward == 0. && vertical == 0.)
+            || !side.is_finite()
             || !forward.is_finite()
             || !vertical.is_finite()
             || !frames.is_finite()
@@ -84,10 +93,11 @@ unsafe fn displace_local(actor: u32, forward: f32, vertical: f32) {
         }
         let yaw = Angle::from_units(hunter.get(Field::at(4076)));
         let (sin, cos) = yaw.sin_cos();
-        let speed = forward / frames;
+        let x = (sin * forward + cos * side) / frames;
+        let z = (cos * forward - sin * side) / frames;
         let velocity = hunter.get(VELOCITY);
         // GU 539EFC adds velocity × raw frame delta without consuming velocity.
-        hunter.set(VELOCITY, [sin * speed, vertical / frames, cos * speed]);
+        hunter.set(VELOCITY, [x, vertical / frames, z]);
         let integrate: unsafe extern "C" fn(u32) = core::mem::transmute(entry(0x539efc));
         integrate(actor);
         hunter.set(VELOCITY, velocity);
@@ -328,6 +338,35 @@ pub unsafe fn relative_stick_yaw(actor: u32) -> Option<u16> {
     }
 }
 
+unsafe fn fixed_command_yaw(actor: u32) -> Option<u16> {
+    unsafe {
+        let fixed = ((actor + 9536) as *const u32).read() != 0
+            || ((actor + 9488) as *const u32).read() & 0x4000 != 0;
+        fixed.then(|| 0x4000u16.wrapping_sub(((actor + 5132) as *const u16).read()))
+    }
+}
+
+/// Stick yaw for a directional command, with forward at zero. Mirrors GU
+/// 27E638 with its force-camera argument cleared. The input update at
+/// 2A79CC copies the directional-control option to the hunter each frame.
+///
+/// # Safety
+/// The actor must be a live local hunter on the game thread.
+pub unsafe fn command_stick_yaw(actor: u32) -> Option<u16> {
+    unsafe {
+        let strength: unsafe extern "C" fn(u32, u32) -> u32 = core::mem::transmute(entry(0x27e608));
+        if strength(actor, 0) == 0 {
+            return None;
+        }
+        if let Some(yaw) = fixed_command_yaw(actor) {
+            return Some(yaw);
+        }
+        let aim: unsafe extern "C" fn(u32) -> u32 = core::mem::transmute(entry(0x27f5d0));
+        let target = ((actor + 5280) as *const u16).read();
+        Some(target.wrapping_sub(aim(actor) as u16))
+    }
+}
+
 fn camera_view() -> Option<[f32; 3]> {
     use crate::memory::{Field, Object, singleton};
     unsafe {
@@ -391,6 +430,21 @@ pub unsafe fn live_relative_stick_yaw(actor: u32) -> Option<u16> {
             (libm::atan2f(x, z) * f32::from_bits(0x4622f983) + 0.5) as i32 as u16
         });
         Some(relative.wrapping_add(locked_yaw).wrapping_sub(live_yaw))
+    }
+}
+
+/// Direction for an attack which samples its turn at execution time. A Type 1
+/// turn follows the live camera; Type 2 takes the stick relative to the hunter.
+///
+/// # Safety
+/// The actor must be a live local hunter on the game thread.
+pub unsafe fn attack_turn_yaw(actor: u32) -> Option<u16> {
+    unsafe {
+        if fixed_command_yaw(actor).is_some() {
+            command_stick_yaw(actor)
+        } else {
+            live_relative_stick_yaw(actor)
+        }
     }
 }
 

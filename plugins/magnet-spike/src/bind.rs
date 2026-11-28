@@ -156,7 +156,16 @@ extern "C" fn observe(scene: &HurtScene<'_>, active: bool) {
     }
 }
 
-const BIND_THRESHOLD: u16 = 1800;
+// FZ 811425BC applies the percentage to the previous integer threshold.
+const BIND_THRESHOLDS: [u16; 5] = {
+    let mut tiers = [1800; 5];
+    let mut i = 1;
+    while i < tiers.len() {
+        tiers[i] = (tiers[i - 1] as u32 * 190 / 100) as u16;
+        i += 1;
+    }
+    tiers
+};
 const BIND_DURATION: u16 = 240;
 
 struct Meter {
@@ -188,7 +197,7 @@ impl Meter {
     }
 
     fn ready(&self) -> bool {
-        self.accumulated >= BIND_THRESHOLD
+        self.accumulated >= BIND_THRESHOLDS[usize::from(self.completed_binds)]
     }
 }
 
@@ -582,7 +591,7 @@ impl Meters {
             meter.flashes = ReadyFlashes::new(state.spawn);
         }
         meter.accumulated = accumulated;
-        meter.completed_binds = (state.value >> 16) as u8;
+        meter.completed_binds = ((state.value >> 16) as u8).min(4);
         meter.hold = Hold::from_wire(state.detail);
         meter.sent = None;
     }

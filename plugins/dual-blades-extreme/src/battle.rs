@@ -231,7 +231,7 @@ impl Battle {
 
     unsafe fn commands(&mut self, actor: u32, input: &Input) -> Commands {
         unsafe {
-            let relative_yaw = movement::live_relative_stick_yaw(actor).unwrap_or(0);
+            let relative_yaw = movement::command_stick_yaw(actor).unwrap_or(0);
             let direction = direction(relative_yaw);
             let mut bits = 0;
             if input.command(3) && movement::has_evade_stamina(actor, EVADE_STAMINA_COST) {
@@ -380,7 +380,12 @@ impl Battle {
                 u32::from(!sprint),
                 0
             );
-            if was_sheathed && matches!(state, DRAW_SLASH | 62 | 67 | DASH_SLASH | AERIAL_MOUNT_FINISH) {
+            if was_sheathed
+                && matches!(
+                    state,
+                    DRAW_SLASH | 62 | 67 | DASH_SLASH | AERIAL_MOUNT_FINISH
+                )
+            {
                 native!(0x2a264c, actor, 1);
             } else {
                 native!(0x2a2560, actor, 1);
@@ -421,7 +426,7 @@ impl Battle {
                         self.packed = packed;
                         cursor.time.cycles = 0;
                         cursor.time.frame = f32::from(step.start);
-                        cursor.time.blend = f32::from(step.blend / 2);
+                        cursor.time.blend = mhfz_sdk::action::blend_ticks(step.blend);
                         let frame = f32::from(step.start);
                         self.effects.seek(step.clip, frame);
                         sound::update(&mut self.audio, actor, Some(step.clip), frame, Some(frame));
@@ -606,6 +611,28 @@ impl Battle {
             }
             let cursor = self.cursor.as_mut().unwrap();
             let sample = action::MotionFrame::sample(actor);
+            use mhfz_sdk::combat::{EvadeClock, EvadeDistance as Travel};
+            let travel = match step.clip {
+                1426 => Some(Travel::forward(180., 0., 16.)),
+                1427 => Some(Travel::side(180., 0., 28.)),
+                1428 => Some(Travel::side(-180., 0., 28.)),
+                1429 => Some(Travel::forward(-180., 0., 30.)),
+                1445 => Some(Travel::side(300., 4., 20.)),
+                1446 => Some(Travel::side(-300., 4., 20.)),
+                1447 => Some(Travel::forward(-200., 4., 20.)),
+                _ => None,
+            };
+            if let Some(travel) = travel {
+                travel.apply(
+                    actor,
+                    sample,
+                    if matches!(step.clip, 1445..=1447) {
+                        EvadeClock::WeaponMotion
+                    } else {
+                        EvadeClock::Common
+                    },
+                );
+            }
             let frame = sample.frame;
             sound::update(&mut self.audio, actor, Some(step.clip), frame, None);
             if MONSTER_HIT.swap(false, Relaxed) {
@@ -614,7 +641,7 @@ impl Battle {
                     self.finish_window = program::finish_window();
                 }
             }
-            let wrapped = cursor.time.observe(frame, sample.blend);
+            let wrapped = cursor.time.observe(frame, sample.blend * 0.5);
             self.effects.motion_events(actor, step.clip, sample);
             self.events(actor);
 
@@ -685,7 +712,6 @@ impl Battle {
             }
 
             let mode = phase(actor);
-            let vitality = read::<i16>(actor, 5078) > 1;
             let sustained = can_sustain(actor, mode);
             let eligible = |id| match id {
                 0 | 1 | 15 => true,
@@ -703,7 +729,7 @@ impl Battle {
                 23 => self.hit,
                 _ => false,
             };
-            if (cursor.art_window(eligible) || state == SPRINT)
+            if (matches!(state, SPRINT | BRAKE) || cursor.art_window(eligible))
                 && action::activate_hunter_art(actor)
             {
                 self.clear_action(actor);
@@ -737,8 +763,11 @@ impl Battle {
 
             if state == SPRINT {
                 let has_direction = movement::steer(actor);
+                // w06 row 82590254 opens the sprint callback on clip 1030 at frame 30.
+                let can_branch = sample.blend <= 0.
+                    && sprint::can_brake(frame, self.cursor.as_ref().unwrap().time.cycles);
                 // FZ 811F0C32 gives the forward evade priority over X and A.
-                if commands.has(0) {
+                if can_branch && commands.has(0) {
                     return match mode {
                         0 | 1 => self.evade(actor, 0, false),
                         2 => self.begin(actor, 40),
@@ -749,22 +778,18 @@ impl Battle {
                     movement::has_evade_stamina(actor, EVADE_STAMINA_COST).then_some(AERIAL_DANCE)
                 } else if commands.has(CMD_SLASH_DOWN) {
                     Some(DASH_SLASH)
-                } else if commands.has(CMD_COMBO) {
-                    // Frontier has no X+A branch from sprint.
-                    None
                 } else {
-                    idle_attack(commands, mode, vitality)
+                    // 811F0C32 accepts only evade, slash-down and sweep (mask 0x205).
+                    None
                 };
-                if let Some(next) = attack {
+                if can_branch && let Some(next) = attack {
                     return self.begin(actor, next);
                 }
                 if commands.has(10) && action::transition_to(actor, 1, 2) {
                     self.clear_action(actor);
                     return true;
                 }
-                if sprint::can_brake(frame, self.cursor.as_ref().unwrap().time.cycles)
-                    && (!has_direction || read::<f32>(actor, 5088) <= 0.)
-                {
+                if can_branch && (!has_direction || read::<f32>(actor, 5088) <= 0.) {
                     return self.begin(actor, BRAKE);
                 }
             }
@@ -941,6 +966,13 @@ impl Battle {
                 return self.begin(actor, 18);
             }
             if commands.has(0) {
+                if mode >= 2 {
+                    // Free movement (w06 callback 811F08D4) enters the forward
+                    // evade in the movement heading. Attack cancels use 811EF15A.
+                    let facing = movement::attack_turn_yaw(actor)
+                        .map(|yaw| read::<u16>(actor, 4076).wrapping_sub(yaw));
+                    return self.begin_facing(actor, if mode == 3 { 84 } else { 40 }, facing);
+                }
                 return self.evade(actor, commands.relative_yaw, false);
             }
             if let Some(state) = idle_attack(commands, mode, read::<i16>(actor, 5078) > 1) {
@@ -1044,7 +1076,10 @@ unsafe fn submit_strike(actor: u32, state: u8, strike_id: u16, late: f32, swap_h
         no_sharpness_cost: 0,
     };
     unsafe {
-        attack.submit_with_hitstop(actor, mhfz_sdk::combat::attacker_hitstop(row.source_hitstop));
+        attack.submit_with_hitstop(
+            actor,
+            mhfz_sdk::combat::attacker_hitstop(row.source_hitstop),
+        );
     }
 }
 

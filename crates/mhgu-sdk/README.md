@@ -42,6 +42,8 @@ trade::register_upgrade(EQUIPMENT.id, 0, Recipe {
 })?;
 ```
 
+每个可出售的强化等级通过 `trade::register_sale_price` 登记基础卖价，或通过 `trade::register_native_level` 指定 GU 武器类型、数据行和从 1 起算的原版等级。原版参考行同时决定该级的售价、冠标与等级文字颜色。售价与购买、生产和强化配方独立。
+
 材料填写 GU 道具编号，每项数量为 1–255，同一配方内编号不重复。金额为 0–9,999,999z。运行时在确认页用游戏的道具表检查编号，同时检查角色的余额、持有量和装备箱容量。
 
 ## 武器风格插件
@@ -54,7 +56,7 @@ trade::register_upgrade(EQUIPMENT.id, 0, Recipe {
 
 GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提供 GU 已解析的公共和武器指令，`request` 处理 GU 已接受的拔刀和武器切招请求。公共动作可返回 `PASS` 交给 GU。空输入通知插件结束，actor 为 0 时代表旧猎人已失效。
 
-[input](src/weapon/style/input.rs) 读取 GU 的组合键状态、过滤后的 X／A 按下沿和当前附加肩键。通过 [movement](src/weapon/style/movement.rs) 查询摇杆方向、应用朝向和使用原生耐力入口。回避准入复用 `has_evade_stamina` 检查体术、料理和免耗效果。需要消耗强走时间的招式用 `spend_stamina` 先结算 GU 的单次耐力消耗，再以 60 Hz 帧数缩短强走药和强走旋律。读取任务专用字段前，用 [hunter::is_quest](src/weapon/style/hunter.rs) 核对角色类型。
+[input](src/weapon/style/input.rs) 读取 GU 的组合键状态、过滤后的 X／A 按下沿和当前附加肩键。通过 [movement](src/weapon/style/movement.rs) 查询摇杆方向、应用朝向和使用原生耐力入口。方向派生用 `command_stick_yaw`，攻击执行时转向用 `attack_turn_yaw`，两者均读取猎人的 GU 指定方向类型。回避准入复用 `has_evade_stamina` 检查体术、料理和免耗效果。需要消耗强走时间的招式用 `spend_stamina` 先结算 GU 的单次耐力消耗，再以 60 Hz 帧数缩短强走药和强走旋律。读取任务专用字段前，用 [hunter::is_quest](src/weapon/style/hunter.rs) 核对角色类型。
 
 风格招式可通过 `movement::grant_evade_invulnerability` 延长 GU 受击检查使用的回避计时。时长以 GU 帧为单位，由招式根据当前技能和动作事件计算。
 

@@ -64,8 +64,8 @@ unsafe fn wave_power(actor: u32, index: usize) -> Option<u16> {
         if index == 0 {
             // GU 116E4D8 expires the two oils independently.
             let mind_eye = read::<u32>(actor, 13096) == 4 && read::<f32>(actor, 13104) > 0.;
-            let chaos = matches!(read::<u32>(actor, 13100), 5..=7)
-                && read::<f32>(actor, 13108) > 0.;
+            let chaos =
+                matches!(read::<u32>(actor, 13100), 5..=7) && read::<f32>(actor, 13108) > 0.;
             (mind_eye, chaos)
         } else {
             // GU 1168EEC replicates ordinary oils in the low word and Chaos Oil in the high word.
@@ -182,7 +182,7 @@ impl Battle {
         self.packed = packed;
         c.time.cycles = 0;
         c.time.frame = s.start.into();
-        c.time.blend = (s.blend / 2).into();
+        c.time.blend = mhfz_sdk::action::blend_ticks(s.blend);
         self.fx.seek(s.clip, c.time.frame);
         unsafe {
             sound::update(
@@ -350,7 +350,33 @@ impl Battle {
             return;
         }
         let sample = unsafe { MotionFrame::sample(a) };
-        let wrapped = c.time.observe(sample.frame, sample.blend);
+        if input.is_some() {
+            use mhfz_sdk::combat::{EvadeClock, EvadeDistance as Travel};
+            let travel = match s.clip {
+                1419 => Some(Travel::forward(180., 0., 30.)),
+                1420 => Some(Travel::side(180., 0., 30.)),
+                1421 => Some(Travel::side(-180., 0., 30.)),
+                1422 => Some(Travel::forward(-180., 0., 30.)),
+                1451 => Some(Travel::side(50., 2., 20.)),
+                1452 => Some(Travel::side(-50., 2., 20.)),
+                1453 => Some(Travel::forward(-50., 2., 20.)),
+                _ => None,
+            };
+            if let Some(travel) = travel {
+                unsafe {
+                    travel.apply(
+                        a,
+                        sample,
+                        if matches!(s.clip, 1451..=1453) {
+                            EvadeClock::WeaponMotion
+                        } else {
+                            EvadeClock::Common
+                        },
+                    )
+                };
+            }
+        }
+        let wrapped = c.time.observe(sample.frame, sample.blend * 0.5);
         unsafe {
             self.trail.tick(a, dt);
             sound::update(&mut self.sound, a, Some(s.clip), sample.frame, None);
@@ -366,7 +392,10 @@ impl Battle {
                     if input.is_some() {
                         // w04 state 36 accepts X before execution. Keep that
                         // input while falling, but start the ground slash only after landing.
-                        self.cursor.as_mut().unwrap().branch(bits & (1 << 2), |n| n <= 1);
+                        self.cursor
+                            .as_mut()
+                            .unwrap()
+                            .branch(bits & (1 << 2), |n| n <= 1);
                     }
                     return;
                 }
@@ -391,7 +420,7 @@ impl Battle {
                 return;
             }
             let c = self.cursor.as_mut().unwrap();
-            if (state == SPRINT || c.art_window(|n| n <= 1))
+            if (matches!(state, SPRINT | BRAKE) || c.art_window(|n| n <= 1))
                 && unsafe { action::activate_hunter_art(a) }
             {
                 self.cursor = None;
@@ -473,7 +502,7 @@ impl Battle {
         unsafe {
             let current = action::current(a);
             let dt = read::<f32>(a, 28).max(0.);
-            let yaw = movement::live_relative_stick_yaw(a);
+            let yaw = movement::command_stick_yaw(a);
             let bits = self.inputs(input, dt, yaw);
             if let Some(id) = action::custom_id(current.0, current.1) {
                 if self.cursor.as_ref().is_none_or(|c| c.state != id) || read::<u8>(a, 5) == 0 {
@@ -513,15 +542,10 @@ impl Battle {
             }
             self.roll_branch = None;
             motion::clear_roll(a);
-            if drawn
-                && matches!(current, (64, 6 | 7))
-                && read::<u8>(a, 5) == 2
-                && bits & 1 != 0
-                && read::<u8>(a, 11988) != 0
-                && read::<i16>(a, 5078) > 0
-                && native!(0x53a058, a) == 1015
+            if let Some(state) =
+                mhfz_sdk::combat::knockback_recovery(a, current, drawn, input, [41, 40])
             {
-                return self.begin(if current.1 == 6 { 41 } else { 40 }, 0);
+                return self.begin(state, 0);
             }
             let guarding = matches!(current, (32, 0 | 1 | 9));
             if !(ground || guarding) || !drawn {
@@ -694,7 +718,9 @@ unsafe fn round_force(actor: u32, tier: u32) -> u32 {
         let result = original!(actor, tier);
         if first && read::<u32>(actor, 12716) != 0 {
             if hunter::local() == Some(actor) {
-                if live(0, actor) && let Some(power) = wave_power(actor, 0) {
+                if live(0, actor)
+                    && let Some(power) = wave_power(actor, 0)
+                {
                     collision::launch_art(actor, 0, tier, power);
                 }
             } else if let Some(slot) = Roster::current().and_then(|r| r.peer_index(actor))

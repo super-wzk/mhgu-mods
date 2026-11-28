@@ -146,12 +146,5 @@ pub unsafe extern "C" fn decode(actor: u32, packed: u32) -> u32 {
 }
 
 pub unsafe fn play(actor: u32, clip: u16, start: u16, blend: u16) -> Option<u16> {
-    unsafe {
-        action::play_motion(
-            actor,
-            PRIVATE | u32::from(clip),
-            f32::from(start),
-            f32::from(blend / 2),
-        )
-    }
+    unsafe { mhfz_sdk::motion::play_step(actor, PRIVATE | u32::from(clip), start, blend) }
 }

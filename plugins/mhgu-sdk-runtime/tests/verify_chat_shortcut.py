@@ -97,7 +97,7 @@ def replay(elf, registry_enabled):
     if registry_enabled:
         sampled = []
         stub(g.originals[TARGET_CAMERA],
-             lambda *_: sampled.append((g.get(pad + UI_PRESSED), g.get(pad + UI_HELD))))
+             lambda *_: sampled.append((g.get(pad + UI_PRESSED), g.get(pad + UI_HELD), g.cpu.mem_read(settings + 17516, 1)[0])))
         for control, swapped, camera_pad, stick_camera, target in (
             (0, 0, 0, 0, ZL),
             (0, 1, 0, 0, 0x400),
@@ -111,12 +111,29 @@ def replay(elf, registry_enabled):
             g.cpu.mem_write(settings + 17403, bytes([stick_camera]))
             for pressed in (0, L3, R3, target, L3 | R3, target | R3):
                 buttons = pressed | A
-                expected = (buttons & ~target) | (target if pressed & R3 else 0)
+                expected = buttons if pressed & R3 else buttons & ~target
                 g.put(pad + UI_PRESSED, buttons)
                 g.put(pad + UI_HELD, buttons)
                 g.run(TARGET_CAMERA, menu)
-                assert sampled[-1] == (expected, buttons), (control, stick_camera, buttons)
+                assert sampled[-1] == (expected, buttons, 2 if pressed & R3 else control), (control, stick_camera, buttons)
+                assert g.cpu.mem_read(settings + 17516, 1)[0] == control
                 assert g.get(pad + UI_PRESSED) == buttons
+    if registry_enabled:
+        # Let the original cUIOCPanelTargetCamera select its sequence and cache it.
+        camera_manager = g.alloc(100)
+        g.put(g.get(0x65734c + g.get(0x657570)), camera_manager)
+        for address in (0x56E808, 0x6666D4, 0x56E528):
+            constant(address, 0)
+        sequences = []
+        stub(0x56E538, lambda panel, group, sequence, _: sequences.append((group, sequence)))
+        for layout in range(4):
+            g.cpu.mem_write(settings + 17516, bytes([layout]))
+            g.put(menu + 84, 0xffffffff)
+            g.run(g.hooks[0x657338], menu)
+            assert sequences == [(96, 0xf42ac)]
+            sequences.clear()
+            g.run(g.hooks[0x657338], menu)
+            assert not sequences and g.cpu.mem_read(settings + 17516, 1)[0] == layout
     print(f"registry={registry_enabled}: chat, map zoom and target input passed")
 
 

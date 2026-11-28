@@ -9,7 +9,7 @@ sys.path.insert(0, str(ROOT.parent / "great-sword-extreme/tests"))
 sys.path.insert(0, str(ROOT.parent / "mhgu-sdk-runtime/tests"))
 from verify_style import character_save, BLOCK, CHANGE_ACTION, api_for, boot, hunters, load_registered_style, service, setup_controller
 
-def main():
+def main(*, distance_only=False):
     g = boot((REPO / "mhgu/main.elf").read_bytes(), character_save({8: 13}), ("registry",))
     desc = load_registered_style(g, ROOT / "dist/switch-axe-extreme/romfs/nativeNX/plugins/switch_axe_extreme.nro")
     _, selected = service(g)
@@ -31,6 +31,37 @@ def main():
     g.cpu.hook_del(g.traps.pop(0x283238))
     g.cpu.mem_write(actor+5088,struct.pack('<f',900.))
     g.cpu.mem_write(actor+1284,struct.pack('<f',180.))
+    if distance_only:
+        def num(address, value):
+            g.cpu.mem_write(address, struct.pack("<f", value))
+        def half(address, value):
+            g.cpu.mem_write(address, struct.pack("<H", value))
+        def enter(id):
+            set_action(16, 0x8000 + id)
+            frame(0)
+        skill = 0
+        g.cpu.hook_del(g.traps.pop(0x2864C4))
+        g.stub(0x2864C4, lambda _, candidate, *__: int(skill == candidate))
+        # 812132C4 gives the four steps 200 / (12-4) per Vita tick,
+        # and the six fade slashes 150 / (18-10). GU delta 2 is one tick.
+        num(actor + 28, 2.)
+        half(actor + 4076, 0)
+        for state, start, dx, dz in (
+            (36, 4, -25, 0), (37, 4, 25, 0), (119, 4, -25, 0), (120, 4, 25, 0),
+            (106, 10, 0, -18.75), (107, 10, 18.75, 0), (108, 10, -18.75, 0),
+            (152, 10, 0, -18.75), (153, 10, 18.75, 0), (154, 10, -18.75, 0),
+        ):
+            for skill in (0, 166, 267, 285, 318):
+                for playhead in (start - 2, start, start + 8):
+                    enter(state)
+                    g.cpu.mem_write(actor + 64, bytes(12))
+                    num(actor + 1276, playhead + 2)
+                    frame(playhead)
+                    actual = struct.unpack("<3f", g.cpu.mem_read(actor + 64, 12))
+                    expected = (dx, 0., dz) if skill and playhead == start else (0., 0., 0.)
+                    assert actual == expected, (state, skill, playhead, actual, expected)
+        print("GU evade distance: ten axe/sword actions, four skill sources and window boundaries passed.")
+        return
     set_action(1,0)
     g.put(inputs+16,1<<14)
     frame(0)
@@ -163,4 +194,5 @@ def main():
     print("GU NRO: weapon selection, axe strike, buffered combo, guard window, absorption, light-sword stance and sword attack passed.")
 
 if __name__=="__main__":
+    main(distance_only=True)
     main()

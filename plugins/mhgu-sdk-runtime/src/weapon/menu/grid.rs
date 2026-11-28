@@ -1,10 +1,10 @@
 //! Supply SDK inventory records to GU's Change Equipment controller.
-use super::{EXTENSION_TITLE, gu, inventory, ranged, read, set};
+use super::{gu, inventory, ranged, read, set};
 use alloc::vec::Vec;
 use mhgu_sdk::{sync::Shared, weapon::WeaponInstance};
 
-// The grid and the switch branch only need a non-empty, non-armour tag.
-const WEAPON_RECORD_TAG: u32 = 31;
+// Use GU's weapon category and a missing catalogue row for temporary UI copies.
+const WEAPON_RECORD_TAG: u32 = 7;
 
 #[repr(C)]
 struct Row {
@@ -18,12 +18,14 @@ struct Grid {
     owner: u32,
     panel: u32,
     rows: Vec<Row>,
+    slots: Vec<u32>,
     smith: bool,
 }
 
 #[derive(Clone, Copy)]
 enum Phase {
     Opening,
+    Comparison,
     Input,
     Draw,
     Smith,
@@ -83,28 +85,37 @@ fn owner_is(owner: u32) -> bool {
 }
 
 fn row<T>(slot: u32, f: impl FnOnce(&Row) -> T) -> Option<T> {
-    GRID.with(|grid| grid.as_ref()?.rows.get(slot as usize).map(f))
+    GRID.with(|grid| {
+        let grid = grid.as_ref()?;
+        let id = *grid.slots.get(slot as usize)?;
+        grid.rows.iter().find(|r| r.instance.id == id).map(f)
+    })
 }
 
 pub(super) unsafe fn open(owner: u32, native: impl FnOnce() -> u32) -> u32 {
     let panel = unsafe { gu!(0x65cb3c, owner, 2) };
     populate(owner, panel, false);
     let result = with_scope(owner, Phase::Opening, native);
-    if unsafe { read::<u32>(owner, 64) } != 3 {
+    if unsafe { read::<u32>(owner, 64) } == 3 { unsafe { weapon_only_rows(owner); } } else {
         close();
     }
     result
 }
 
 fn populate(owner: u32, panel: u32, smith: bool) {
-    let rows = inventory::inventory()
+    let rows: Vec<Row> = inventory::inventory()
         .into_iter()
         .filter_map(|(instance, entry)| {
             let (_, equipment) = inventory::definition(instance.equipment.get())?;
             let mut record = [0; 11];
-            // GU's read-only record header tags a weapon and its item row.
-            // The SDK ID never enters the native catalogue or save.
-            record[1] = WEAPON_RECORD_TAG | (u32::from(instance.equipment.get()) << 16);
+            // DADF0 copies bytes 4..40 into the native comparison and socket panels.
+            record[1] = WEAPON_RECORD_TAG | (0xffff << 16);
+            record[9] = u32::from_le_bytes(*b"FZBX");
+            record[7] = u32::from(instance.equipment.get());
+            record[8] = u32::from(instance.upgrade);
+            let [a, b, c] = crate::weapon::decorations::installed(instance.id);
+            record[2] = u32::from(a) << 16;
+            record[3] = u32::from(b) | u32::from(c) << 16;
             Some(Row {
                 record,
                 instance,
@@ -113,7 +124,8 @@ fn populate(owner: u32, panel: u32, smith: bool) {
             })
         })
         .collect();
-    GRID.with(|grid| *grid = Some(Grid { owner, panel, rows, smith }));
+    let slots = if smith { rows.iter().map(|r| r.instance.id).collect() } else { inventory::box_slots() };
+    GRID.with(|grid| *grid = Some(Grid { owner, panel, rows, slots, smith }));
 }
 
 pub(in crate::weapon) unsafe fn open_smith(owner: u32) {
@@ -141,59 +153,63 @@ pub(in crate::weapon) fn upgraded(item: WeaponInstance) {
     GRID.with(|grid| {
         if let Some(row) = grid.as_mut().and_then(|g| g.rows.iter_mut().find(|r| r.instance.id == item.id)) {
             row.instance = item;
+            row.record[8] = u32::from(item.upgrade);
         }
     });
 }
 
-// The extension occupies a separate home row and enters the same equipment
-// child that GU opens from Manage Equipment → Change Equipment.
-#[forge::hook(offset = 0x714b20)]
-unsafe fn open_child(owner: u32) -> u32 {
-    if !scope().is_some_and(|s| s.owner == owner && matches!(s.phase, Phase::Opening)) {
-        return original!(owner);
-    }
-    unsafe {
-        set(owner, 132, 0u32);
-        gu!(0x71f108, owner);
-        gu!(0x65cbc4, owner, 0);
-        set(owner, 88, 2u32);
+mod management;
 
-        if let Some((equipped, _)) = inventory::selected()
-            && let Some(slot) = GRID.with(|grid| {
-                grid.as_ref()?
-                    .rows
-                    .iter()
-                    .position(|r| r.instance.id == equipped.id)
-            })
-        {
-            set(owner, 392, (slot % 10) as u8);
-            set(owner, 393, (slot / 10 % 10) as u8);
-            set(owner, 396, (slot / 100) as u16);
-        }
-    }
-    0
+unsafe fn weapon_only_rows(owner: u32) {
+    let home = unsafe { gu!(0x65cb3c, owner, 0) };
+    if home != 0 { unsafe { set(home, 174, 0u8); set(home, 176, 0u8); } }
 }
 
 #[forge::hook(offset = 0x718084)]
 unsafe fn update_child(owner: u32) -> u32 {
-    if !owner_is(owner) {
-        return original!(owner);
-    }
-    let result = with_scope(owner, Phase::Input, || unsafe { gu!(0x7201cc, owner) });
-    if result == 0 {
-        // Return through GU's home transition. The extension has no submenu.
-        close();
-        unsafe {
-            set(owner, 88, 0u32);
-            gu!(0x54f260, 0, 2);
+    if !owner_is(owner) { return original!(owner); }
+    unsafe {
+        let submenu = read::<u32>(owner, 88) == 1;
+        let kind = read::<u32>(owner, 132);
+        let pad = read::<u32>(forge::mem::text_addr(), 0x188c670);
+        let accept = pad != 0 && read::<u32>(pad, 27644) & 0x2000 != 0;
+        if submenu && accept && matches!(kind, 1 | 3) {
+            gu!(0x54f260, 0, 3);
+            return 1;
         }
+        let phase = if submenu && accept && kind == 0 { Phase::Opening } else { Phase::Input };
+        let result = with_scope(owner, phase, || original!(owner));
+        if result == 0 { close(); }
+        else if read::<u32>(owner, 88) == 1 { weapon_only_rows(owner); }
+        else if submenu && accept && kind == 0 && let Some((equipped, _)) = inventory::selected()
+            && let Some(slot) = GRID.with(|g| g.as_ref()?.slots.iter().position(|&id| id == equipped.id)) {
+            set(owner, 392, (slot % 10) as u8);
+            set(owner, 393, (slot / 10 % 10) as u8);
+            set(owner, 396, (slot / 100) as u16);
+            set(owner, 824, slot as u32);
+            with_scope(owner, Phase::Input, || gu!(0x72ab38, owner, 0, 0));
+        }
+        result
     }
-    result
+}
+
+pub(in crate::weapon) unsafe fn projected(record: u32) -> Option<crate::weapon::records::DisplayEquipment> {
+    if record == 0 || scope().is_none() { return None; }
+    unsafe {
+        if read::<u16>(record, 4) & 31 != WEAPON_RECORD_TAG as u16
+            || read::<u32>(record, 36) != u32::from_le_bytes(*b"FZBX") { return None; }
+        let mut w = crate::weapon::records::DisplayEquipment::registered(read(record, 28), read(record, 32))?;
+        w.jewels = read(record, 10);
+        Some(w)
+    }
 }
 
 unsafe extern "C" fn box_size(save: u32, kind: u32) -> u32 {
     if kind == 0 && for_save(save).is_some() {
-        return GRID.with(|grid| grid.as_ref().map_or(0, |grid| grid.rows.len() as u32));
+        if let Some(s) = scope() && !smith_open(s.owner) && unsafe { read::<u32>(s.owner, 132) } != 0 {
+            return crate::save::INVENTORY_LIMIT as u32;
+        }
+        return GRID.with(|grid| grid.as_ref().map_or(0, |grid| grid.slots.len() as u32));
     }
     // 1418E4 loads the player pointer through a PC-relative literal.
     let (base_slots, slots_per_unlock) = match kind {
@@ -224,8 +240,17 @@ unsafe fn cell(save: u32, kind: u32, page: u32, slot: u32) -> u32 {
 
 #[forge::hook(offset = 0x143894)]
 unsafe fn selection(save: u32, kind: u32, slot: u32) -> u32 {
-    if kind == 0 && for_save(save).is_some() {
-        return row(slot, |r| r.record.as_ptr() as u32).unwrap_or(0);
+    if kind == 0 && let Some(scope) = for_save(save) {
+        if matches!(scope.phase, Phase::Comparison) {
+            // Native comparison reads only the retail weapon category here.
+            let current = unsafe { inventory::current_equipment() };
+            return if current != 0 && row(slot, |_| ()).is_some() { current + 24 } else { 0 };
+        }
+        static EMPTY: [u32; 11] = [0; 11];
+        let empty = if !smith_open(scope.owner) && unsafe { read::<u32>(scope.owner, 132) } != 0 && slot < crate::save::INVENTORY_LIMIT as u32 {
+            EMPTY.as_ptr() as u32
+        } else { 0 };
+        return row(slot, |r| r.record.as_ptr() as u32).unwrap_or(empty);
     }
     original!(save, kind, slot)
 }
@@ -235,6 +260,19 @@ unsafe fn can_equip(save: u32, slot: u32) -> u32 {
     if for_save(save).is_some() {
         let equipped = inventory::selected().map(|(item, _)| item.id);
         return u32::from(row(slot, |r| Some(r.instance.id) != equipped) == Some(true));
+    }
+    // GU 144C04 rejects its current weapon before testing weapon compatibility.
+    // A return to that same physical record is a real change from an SDK weapon.
+    if slot < 2000 && save != 0 && inventory::selected().is_some() {
+        unsafe {
+            let manager = read::<u32>(forge::mem::text_addr(), 0x1885b58);
+            let eq = gu!(0x277454, manager);
+            if (7..=21).contains(&(read::<u8>(save, 32 + slot * 44) & 31))
+                && eq != 0 && gu!(0xe100c, eq + 4, 0) == slot
+                && gu!(0x276278, manager) != 0 {
+                return 1;
+            }
+        }
     }
     original!(save, slot)
 }
@@ -263,7 +301,14 @@ unsafe fn equipment_type(save: u32, kind: u32, slot: u32) -> u32 {
     original!(save, kind, slot)
 }
 
-unsafe extern "C" fn equipped(save: u32, slot: u32) -> u32 {
+// GU also calls 144590 before selling or mutating the physical backing slot.
+// Keep those checks physical and resolve the visible mark at its UI callers.
+#[unsafe(naked)]
+unsafe extern "C" fn equipped(_save: u32, _slot: u32) -> u32 {
+    core::arch::naked_asm!("mov r2, lr", "b {query}", query = sym equipped_at);
+}
+
+unsafe extern "C" fn equipped_at(save: u32, slot: u32, caller: u32) -> u32 {
     if for_save(save).is_some() {
         let equipped = inventory::selected().map(|(item, _)| item.id);
         return u32::from(row(slot, |r| Some(r.instance.id) == equipped) == Some(true));
@@ -272,7 +317,14 @@ unsafe extern "C" fn equipped(save: u32, slot: u32) -> u32 {
     unsafe {
         let manager = read::<u32>(forge::mem::text_addr(), 0x1885b58);
         let equipment = gu!(0x277454, manager);
-        u32::from(equipment != 0 && (0..7).any(|part| gu!(0xe100c, equipment + 4, part) == slot))
+        if equipment == 0 { return 0; }
+        let weapon = gu!(0xe100c, equipment + 4, 0) == slot;
+        if weapon {
+            let ui = matches!(caller.wrapping_sub(forge::mem::text_addr()),
+                0x5b6db4 | 0x5b6ebc | 0x5b9330 | 0x71f3b4 | 0x720d90 | 0x72abb8);
+            return u32::from(!ui || inventory::selected().is_none());
+        }
+        u32::from((1..7).any(|part| gu!(0xe100c, equipment + 4, part) == slot))
     }
 }
 
@@ -348,6 +400,13 @@ unsafe fn apply_sort(save: u32, kind: u32) -> u32 {
                         r.instance.id,
                     )
                 });
+                let mut sorted = grid.rows.iter().map(|r| r.instance.id);
+                for id in &mut grid.slots {
+                    if *id == 0 || grid.rows.iter().any(|r| r.instance.id == *id) {
+                        *id = sorted.next().unwrap_or(0);
+                    }
+                }
+                if !grid.smith { inventory::save_slots(grid.slots.clone()); }
             }
         });
         return 0;
@@ -366,13 +425,45 @@ unsafe fn stock_box_view(save: u32, kind: u32, mode: u32, slot: u32) -> u32 {
 #[forge::hook(offset = 0x72aa48)]
 unsafe fn skill_cursor(owner: u32, slot: u32) -> u32 {
     if scope().is_some_and(|s| s.owner == owner) {
-        unsafe {
-            gu!(0x54edec, owner + 444, 5, 0, 0);
-            gu!(0x54ee34, owner + 444, 0, 6);
+        let current = unsafe { inventory::current_equipment() };
+        if row(slot, |_| ()).is_none() || current == 0 || unsafe { read::<u32>(current, 396) } == 0 {
+            unsafe {
+                gu!(0x54edec, owner + 444, 5, 0, 0);
+                gu!(0x54ee34, owner + 444, 0, 6);
+            }
+            return 0;
+        }
+        return with_scope(owner, Phase::Comparison, || original!(owner, slot));
+    }
+    original!(owner, slot)
+}
+
+// 1446B8 normally rebuilds jewel points in the retail inventory cell by index.
+// The extension candidate has a different inventory and is evaluated on its copy below.
+#[forge::hook(offset = 0x1446b8)]
+unsafe fn refresh_cell(save: u32, kind: u32, slot: u32) -> u32 {
+    if kind == 0 && for_save(save).is_some() {
+        return u32::from(row(slot, |_| ()).is_some());
+    }
+    original!(save, kind, slot)
+}
+
+// GU makes an independent cEquip for each side of its skill comparison.
+#[forge::hook(offset = 0x72c6cc)]
+unsafe fn compare_weapon(arg: u32, copy: u32, slot: u32) -> u32 {
+    if scope().is_some_and(|s| matches!(s.phase, Phase::Comparison)) {
+        if let Some(item) = row(slot, |r| r.instance) {
+            crate::weapon::records::remember(copy, crate::weapon::records::DisplayEquipment::owned(item));
+            unsafe {
+                gu!(0x26e580, copy, 1);
+                gu!(0x26fc24, copy);
+                return gu!(0x4d0720, read::<u32>(forge::mem::text_addr(), 0x1896c20),
+                    gu!(0x3f8398, read::<u32>(forge::mem::text_addr(), 0x18843f0)), copy);
+            }
         }
         return 0;
     }
-    original!(owner, slot)
+    original!(arg, copy, slot)
 }
 
 #[forge::hook(offset = 0x72ab38)]
@@ -381,7 +472,11 @@ unsafe fn details(owner: u32, kind: u32, phase: u32) -> u32 {
         return original!(owner, kind, phase);
     }
     unsafe {
-        let candidate = row(read(owner, 824), |r| (r.equipment, r.instance.upgrade));
+        let current = inventory::current_equipment();
+        if current != 0 && read::<u32>(current, 396) != 0 {
+            return with_scope(owner, Phase::Comparison, || original!(owner, kind, phase));
+        }
+        let candidate = row(read(owner, 824), |r| (r.equipment, r.instance));
         if candidate.is_none() {
             gu!(0x65cc0c, owner, 3);
             gu!(0x65cc0c, owner, 4);
@@ -397,6 +492,7 @@ unsafe fn details(owner: u32, kind: u32, phase: u32) -> u32 {
                     current_panel,
                     Some(equipment),
                     u32::from(item.upgrade) + 1,
+                    crate::weapon::decorations::installed(item.id),
                 );
             } else {
                 let equipment = inventory::local_equipment();
@@ -407,13 +503,14 @@ unsafe fn details(owner: u32, kind: u32, phase: u32) -> u32 {
         crate::weapon::menu::details(
             if panel == 0 { current_panel } else { panel },
             candidate.map(|(e, _)| e),
-            candidate.map_or(0, |(_, level)| u32::from(level) + 1),
+            candidate.map_or(0, |(_, item)| u32::from(item.upgrade) + 1),
+            candidate.map_or([0; 3], |(_, item)| crate::weapon::decorations::installed(item.id)),
         );
     }
     0
 }
 
-fn row_display(panel: u32, record: u32) -> Option<(inventory::RegisteredEquipment, u32)> {
+fn row_display(panel: u32, record: u32) -> Option<(inventory::RegisteredEquipment, u16)> {
     if !matches!(scope()?.phase, Phase::Draw) {
         return None;
     }
@@ -423,7 +520,7 @@ fn row_display(panel: u32, record: u32) -> Option<(inventory::RegisteredEquipmen
         let at = record.checked_sub(begin)? as usize / core::mem::size_of::<Row>();
         let row = grid.rows.get(at)?;
         (row.record.as_ptr() as u32 == record)
-            .then_some((row.equipment, u32::from(row.instance.upgrade) + 1))
+            .then_some((row.equipment, row.instance.upgrade))
     })
 }
 
@@ -432,13 +529,17 @@ unsafe fn icon(panel: u32, group: u32, part: u32, record: u32, style: u32, flag:
     if let Some((entry, _)) = row_display(panel, record) {
         return unsafe { super::super::icon::equipment(panel, group, part, entry) };
     }
+    if let Some(w) = unsafe { crate::weapon::records::for_record(record) } {
+        return unsafe { crate::weapon::icon::equipment(panel, group, part, w.definition) };
+    }
     original!(panel, group, part, record, style, flag)
 }
 
 #[forge::hook(offset = 0x5b973c)]
 unsafe fn name(panel: u32, record: u32, kind: u32) -> u32 {
-    if let Some((entry, level)) = row_display(panel, record) {
-        return unsafe { gu!(0x5b8f38, panel, entry.name.as_ptr() as u32, 1, level, 1, 0) };
+    if let Some((entry, upgrade)) = row_display(panel, record) {
+        let (count, room) = crate::weapon::menu::owned_count(entry.equipment.id.get(), upgrade);
+        return unsafe { gu!(0x5b8f38, panel, entry.name.as_ptr() as u32, 1, count, u32::from(room), 0) };
     }
     original!(panel, record, kind)
 }
@@ -456,13 +557,7 @@ unsafe fn draw(panel: u32) -> u32 {
     let Some(owner) = panel_owner(panel) else {
         return original!(panel);
     };
-    with_scope(owner, Phase::Draw, || unsafe {
-        let result = original!(panel);
-        if !smith_open(owner) {
-            gu!(0x56ea08, panel, 4, 1, EXTENSION_TITLE.as_ptr() as u32);
-        }
-        result
-    })
+    with_scope(owner, Phase::Draw, || original!(panel))
 }
 
 #[forge::hook(offset = 0x5b6c78)]
@@ -475,7 +570,7 @@ unsafe fn draw_sort(panel: u32, kind: u32) -> u32 {
 }
 
 pub(super) fn install(base: u32) {
-    forge::install_hook!(base, open_child);
+    management::install(base);
     forge::install_hook!(base, update_child);
     for (offset, replacement) in [
         (0x1418e0, box_size as unsafe extern "C" fn(u32, u32) -> u32),
@@ -500,6 +595,8 @@ pub(super) fn install(base: u32) {
     forge::install_hook!(base, apply_sort);
     forge::install_hook!(base, stock_box_view);
     forge::install_hook!(base, skill_cursor);
+    forge::install_hook!(base, compare_weapon);
+    forge::install_hook!(base, refresh_cell);
     forge::install_hook!(base, details);
     forge::install_hook!(base, icon);
     forge::install_hook!(base, name);

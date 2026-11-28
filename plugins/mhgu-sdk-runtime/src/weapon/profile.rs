@@ -1,6 +1,7 @@
 //! Style identity carried alongside GU's room equipment records.
 use super::{
     gu, inventory, local_hunter,
+    records::{self, DisplayEquipment},
     style::{Entry, active_equipment, registered_entry},
 };
 use mhgu_sdk::sync::Shared;
@@ -22,23 +23,6 @@ struct PeerStyle {
     id: u32,
     weapon: u32,
     upgrade: Option<u8>,
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct DisplayEquipment {
-    pub definition: inventory::RegisteredEquipment,
-    pub upgrade: u16,
-}
-
-impl DisplayEquipment {
-    pub fn registered(id: u16, upgrade: u16) -> Option<Self> {
-        let definition = inventory::definition(id)?.1;
-        definition.levels.get(usize::from(upgrade))?;
-        Some(Self {
-            definition,
-            upgrade,
-        })
-    }
 }
 
 static PEERS: Shared<[Option<PeerStyle>; PLAYERS]> = Shared::new([None; PLAYERS]);
@@ -64,45 +48,49 @@ pub(super) fn selection_changed() {
 }
 
 pub(super) unsafe fn status_entry(equipment: u32) -> Option<&'static Entry> {
-    unsafe { status(equipment).map(|v| v.0) }
-}
-pub(super) unsafe fn display(equipment: u32) -> Option<DisplayEquipment> {
-    unsafe { status(equipment).and_then(|v| v.1) }
+    if let Some(w) = unsafe { records::display(equipment) } {
+        return inventory::definition(w.definition.equipment.id.get()).map(|(entry, _)| entry);
+    }
+    unsafe {
+        if equipment != 0
+            && (inventory::is_native_local(equipment)
+                || equipment == inventory::actor_equipment(local_hunter()))
+        {
+            return active_equipment(equipment);
+        }
+        room(equipment).map(|v| v.0)
+    }
 }
 
-unsafe fn status(equipment: u32) -> Option<(&'static Entry, Option<DisplayEquipment>)> {
+pub(super) unsafe fn room(equipment: u32) -> Option<(&'static Entry, Option<DisplayEquipment>)> {
     unsafe {
         let base = forge::mem::text_addr();
         let manager: u32 = read(base + MANAGER);
-        if manager == 0 || equipment == 0 {
+        if manager == 0 {
             return None;
         }
-        let current: unsafe extern "C" fn(u32) -> u32 = core::mem::transmute(base + 0x275a30);
-        let actor = local_hunter();
-        if equipment == current(manager) || (actor != 0 && equipment == read::<u32>(actor + 5060)) {
-            return inventory::selected()
-                .and_then(|(item, entry)| {
-                    Some((
-                        entry,
-                        Some(DisplayEquipment::registered(
-                            item.equipment.get(),
-                            item.upgrade,
-                        )?),
-                    ))
-                })
-                .or_else(|| active_equipment(equipment).map(|entry| (entry, None)));
+        if equipment < manager + 7004 || equipment >= manager + 12508 {
+            return None;
         }
-
         let peer_equipment: unsafe extern "C" fn(u32, u32) -> u32 =
             core::mem::transmute(base + 0x27617c);
         let peers = PEERS.with(|peers| *peers);
         for (slot, peer) in peers.into_iter().enumerate() {
             if let Some(peer) = peer
                 && peer.manager == manager
+                && equipment == manager + 7004 + 1376 * slot as u32
                 && peer_equipment(manager, slot as u32) == equipment
                 && peer.weapon == equipment_weapon(equipment)
             {
-                return resolved(peer).map(|entry| (entry, peer_display(peer)));
+                return resolved(peer).map(|entry| {
+                    (
+                        entry,
+                        peer_display(peer).map(|mut display| {
+                            display.jewels = read(equipment + 34);
+                            display
+                        }),
+                    )
+                });
             }
         }
         None
@@ -155,15 +143,12 @@ unsafe fn advertised(equipment: u32, flags: u32) -> u32 {
     if equipment == 0 || flags & !STOCK_FLAGS != 0 {
         return flags;
     }
-    let selected = unsafe { inventory::is_native_local(equipment) }
-        .then(inventory::selected)
-        .flatten();
-    if let Some((item, _)) = selected {
+    if let Some(item) = unsafe { records::display(equipment) } {
         // Current GU senders pass only the reply bit. Leave any other flags intact.
         if flags & !1 == 0 {
             return EQUIPMENT_TAG
                 | (u32::from(item.upgrade) << 17)
-                | (u32::from(item.equipment.get()) << 1)
+                | (u32::from(item.definition.equipment.id.get()) << 1)
                 | flags;
         }
         return flags;
@@ -176,16 +161,35 @@ unsafe fn advertised(equipment: u32, flags: u32) -> u32 {
     }
 }
 
+// The two retail senders copy cEquip before serializing. Only the copy
+// carries extension jewels; the native weapon keeps its own decorations.
+unsafe fn send_equipment(equipment: u32, flags: u32, send: impl FnOnce(u32) -> u32) -> u32 {
+    if flags & EQUIPMENT_MASK == EQUIPMENT_TAG
+        && let Some(weapon) = unsafe { records::display(equipment) }
+    {
+        let jewels = weapon.jewels;
+        if unsafe { read::<[u16; 3]>(equipment + 34) } != jewels {
+            let mut copy = unsafe { read::<[u32; 344]>(equipment) };
+            let at = copy.as_mut_ptr() as u32;
+            unsafe {
+                super::set(at, 34, jewels);
+            }
+            return records::with_record(at + 24, weapon, || send(at));
+        }
+    }
+    send(equipment)
+}
+
 #[forge::hook(offset = 0x202640)]
 unsafe fn broadcast(process: u32, equipment: u32, flags: u32) -> u32 {
     let flags = unsafe { advertised(equipment, flags) };
-    original!(process, equipment, flags)
+    unsafe { send_equipment(equipment, flags, |eq| original!(process, eq, flags)) }
 }
 
 #[forge::hook(offset = 0x202764)]
 unsafe fn unicast(process: u32, equipment: u32, flags: u32, target: u32) -> u32 {
     let flags = unsafe { advertised(equipment, flags) };
-    original!(process, equipment, flags, target)
+    unsafe { send_equipment(equipment, flags, |eq| original!(process, eq, flags, target)) }
 }
 
 #[forge::hook(offset = 0x202894)]
@@ -238,6 +242,9 @@ fn retire(slot: u32) {
 unsafe fn replace_equipment(manager: u32, slot: u32, equipment: u32) -> u32 {
     retire(slot);
     let out = original!(manager, slot, equipment);
+    if slot < 4 {
+        records::remember(manager + 7004 + 1376 * slot, None);
+    }
     let received = RECEIVING.with(|pending| {
         pending.filter(|&(sender, address, style)| {
             sender == slot && address == equipment && style.manager == manager

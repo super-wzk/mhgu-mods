@@ -130,8 +130,22 @@ def replay(repo, elf, cases):
     hints = []
     stub(0x65E580, lambda *_: hint)
     stub(0x642C44, lambda obj, *_: hints.append(("save", obj)) or 0)
-    stub(0x642A78, lambda *_: 0)
-    stub(0x642B6C, lambda obj, text, *_: hints.append((g.string(text), obj)) or 0)
+    # The alternate hint implementation must receive both virtual calls.
+    # Real GU 1.4 vtables: group 1/child 13 vs. group 9/child 1.
+    base_hint, alternate_hint = 0x1777b48, 0x1777bc0
+    assert (g.get(base_hint+100),g.get(alternate_hint+100))==(0x642b6c,0x6431bc)
+    g.put(hint, base_hint)
+    layout, groups, group, children = (g.alloc(n) for n in (672,40,224,8))
+    g.put(hint+36,layout)
+    g.put(layout+248,groups)
+    g.put(layout+664,10)
+    g.put(groups+4,group)
+    g.put(groups+36,group)
+    g.put(group+216,children)
+    g.put(children+4,g.alloc(4))
+    stub(0xa38ffc,lambda *_:2)
+    stub(0x643104, lambda *_:0)
+    stub(0x6431bc,lambda obj,text,*_: hints.append((g.string(text),obj)) or 0)
     stub(0x642D34, lambda obj, *_: hints.append(("restore", obj)) or 0)
     stub(0x65EFD0, lambda *_: dialog)
     stub(0x65F190, lambda _, text, *__: capture(dialog, 7, 1, text) or 1)
@@ -141,7 +155,24 @@ def replay(repo, elf, cases):
         g.put(pad + 27644, mask)
         g.run(g.hooks[0x5CB780], panel)
 
+    panel = g.alloc(1520)
     g.put(panel + 76, 0)
+    original_input = g.originals[0x5CB780]
+    native_ticks = []
+    stub(original_input,lambda *_: native_ticks.append(1) or 0)
+    for tile in range(6):
+        for flag in (1332,1336):
+            g.put(panel+flag+36*tile,1)
+            press(0x2000)
+            g.put(panel+flag+36*tile,0)
+    assert native_ticks == [1]*12 and not hints
+    g.cpu.hook_del(g.traps.pop(original_input))
+    # A two-child group cannot serve the base hint's child 13. A still opens the guide.
+    press(0x2000)
+    assert not hints and strings[-1][2].endswith(all_pages[0][1])
+    press(0x4000)
+    closed.clear()
+    g.put(hint, alternate_hint)
     for i, (title, body) in enumerate(all_pages):
         press(0x2000 if i == 0 else 0x20)
         assert strings[-1][2].startswith(title) and strings[-1][2].endswith(body)

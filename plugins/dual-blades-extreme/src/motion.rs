@@ -1,6 +1,6 @@
 use crate::read;
 use mhfz_sdk::motion::{DrawnRoll, MotionBanks, sprint_sheathe};
-use mhgu_sdk::weapon::style::{PASS, action, movement::relative_stick_yaw};
+use mhgu_sdk::weapon::style::{PASS, action, movement::command_stick_yaw};
 
 // FZ common action 202, weapon row in 825901F4.
 const SPRINT_SHEATHE: u16 = 1032;
@@ -65,7 +65,7 @@ pub unsafe extern "C" fn encode(actor: u32, request: u32) -> u32 {
         let clip = unsafe {
             ROLL.clip(actor, || {
                 (read::<u8>(actor, 10057) & 1 != 0)
-                    .then(|| relative_stick_yaw(actor))
+                    .then(|| command_stick_yaw(actor))
                     .flatten()
             })
         };
@@ -97,12 +97,5 @@ pub unsafe extern "C" fn decode(actor: u32, packed: u32) -> u32 {
 }
 
 pub unsafe fn play(actor: u32, clip: u16, start: u16, blend: u16) -> Option<u16> {
-    unsafe {
-        action::play_motion(
-            actor,
-            PRIVATE | u32::from(clip),
-            f32::from(start),
-            f32::from(blend / 2),
-        )
-    }
+    unsafe { mhfz_sdk::motion::play_step(actor, PRIVATE | u32::from(clip), start, blend) }
 }

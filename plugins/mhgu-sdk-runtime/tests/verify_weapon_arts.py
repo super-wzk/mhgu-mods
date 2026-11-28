@@ -132,10 +132,23 @@ def switch_axe():
         for frame in (46, 90):
             g.put(a + 1280, float_bits(frame))
             assert meters() == (0, light, 1)
+        # Test the sustained Riot state, after the first drain has already fired.
+        g.put(a + 13128, 0)
+        g.run(g.hooks[0x11A75F8], a)
+        light -= 3
+        assert g.cpu.mem_read(a + 13124, 1) == b"\1" and meters()[:2] == (0, light)
         s.action(16, 88 + tier)
         g.cpu.mem_write(a + 5, b"\1")
         g.put(a + 10084, tier)
-        s.stub(0x280C1C, lambda *_: 1)
+        # 11A5050 tests motion frame 56 with the real GU crossing predicate.
+        g.cpu.hook_del(g.traps.pop(0x280C1C))
+        g.put(a + 1268, 0)
+        g.put(a + 1284, float_bits(240))
+        g.put(a + 5328, float_bits(54))
+        g.put(a + 5332, float_bits(1))
+        g.run(0x11A08E0, a)
+        assert meters()[:2] == (0, light)
+        g.put(a + 5328, float_bits(55))
         g.run(0x11A08E0, a)
         filled = (75, 100, 100)[tier]
         assert meters()[:2] == (filled, light)
@@ -166,7 +179,8 @@ def switch_axe():
         assert meters()[:2] == (filled, light)
         # Let the last pulse land in drawn idle, during a swing, or while walking.
         finish_swing = tier == 1
-        before_morph = (16, 0x8000 + 78) if finish_swing else (2 if tier == 2 else 1, 0)
+        before_morph = ((16, 0x8000 + 78) if finish_swing else
+                        (16, 0x8000 + 163) if tier == 2 else (1, 0))
         s.action(*before_morph)
         g.put(a + 1280, 0)
         assert meters()[:2] == (filled, light)

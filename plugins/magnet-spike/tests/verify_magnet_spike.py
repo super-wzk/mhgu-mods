@@ -2,11 +2,13 @@
 
 import hashlib
 import json
+import os
 import struct
 import sys
 from pathlib import Path
 
 from unicorn import UC_HOOK_CODE
+from unicorn.arm_const import UC_ARM_REG_SP
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parents[1]
@@ -37,8 +39,32 @@ def attach_details(g, facility):
     return values
 
 
+def observe_badge(g, facility):
+    # Execute the w07 catalogue vtable and GU's DBD74 / level colour logic.
+    # Raw row 1 starts after the header and the 33-byte empty row.
+    base = g.alloc(40)
+    g.put(base, 0x1739A4C)
+    limits = bytes([8, 3])
+    if os.environ.get("MHGU_ROMFS"):
+        table = Path(os.environ["MHGU_ROMFS"]) / "nativeNX/table/weapon07BaseData.w07d"
+        assert table.read_bytes()[50:52] == limits
+    g.cpu.mem_write(base + 13, limits)
+    g.put(0x1856B18, g.alloc(512))
+    g.cpu.hook_del(g.traps.pop(0x13C208))
+    g.stub(0x13C208, lambda _, tag, series, *args: base if (tag, series) == (14, 1) else 0)
+    panel = g.get(g.get(facility.owner + 52) + 20)
+    g.put(panel + 36, g.alloc(64))
+    g.stub(0x546AFC, lambda *args: 0)
+    badges = []
+    if 0x56EDB0 in g.traps:
+        g.cpu.hook_del(g.traps.pop(0x56EDB0))
+    g.stub(0x56EDB0, lambda p, group, part, sprite:
+           badges.append((sprite, g.get(g.cpu.reg_read(UC_ARM_REG_SP)))) if (p,group,part)==(panel,17,1) else None)
+    return badges
+
+
 def verify_manual(g):
-    panel, dialog = g.alloc(100), g.alloc(128)
+    panel, dialog = g.alloc(1520), g.alloc(128)
     guide = []
     g.stub(0x65E580, lambda *_: 0)
     g.stub(0x65EFD0, lambda *_: dialog)
@@ -52,46 +78,67 @@ def verify_manual(g):
     g.put(pressed, 0x2000)
     g.run(g.hooks[0x5CB780], panel)
     assert len(guide) == 1 and guide[0].startswith("极之型磁斩锤")
-    for move in ("磁界瞄准", "磁界弹", "磁界接近", "磁界脱离", "垂直下落斩",
-                 "垂直下落挥击", "紧急着地"):
-        assert move in guide[0], move
+    from verify_manual import expand
+    pages = (ROOT / "src/manual.txt").read_text().strip().split("\n\n")
     g.stub(0x56E808, lambda _, group, part, body: guide.append(g.string(body)))
     g.put(pressed, 0x20)
-    g.run(g.hooks[0x5CB780], panel)
-    assert len(guide) == 2 and "以打击形态拔刀并精准防御" in guide[1]
-    for move in ("防御反击", "防御强袭", "磁力二连斩", "磁力二连挥击", "后撤斩", "磁冲击", "磁力强袭"):
-        assert move in guide[1], move
-    rows = guide[1].splitlines()
-    assert any("<ICON PAD_A>" in row and "向右使出磁力回避" in row for row in rows)
-    assert any("<ICON PAD_Y>" in row and "向左使出磁力回避" in row for row in rows)
-    assert any("<ICON PAD_X>" in row and "<ICON PAD_A>" in row
-               and "回避成功时武器闪光并强化，产生追加打击" in row for row in rows)
-    g.run(g.hooks[0x5CB780], panel)
-    assert len(guide) == 3 and "显示剩余磁力" in guide[2]
-    assert "缩短强走药与强走旋律的剩余时间" in guide[2]
-    assert "会心和蓄力技能影响单次回充量" in guide[2]
-    assert "标记在磁界脱离的距离内" in guide[2] and "标记在磁界接近的距离内" in guide[2]
-    assert "首次接触硬部位时按当前形态弹刀" in guide[2]
-    assert "右摇杆（R3）" in guide[2] and "切换原版锁定目标" in guide[2]
-    g.run(g.hooks[0x5CB780], panel)
-    assert len(guide) == 4 and "左侧是斩击磁气，右侧是打击磁气" in guide[3]
-    assert "当前形态动作值提高 10%" in guide[3]
-    g.run(g.hooks[0x5CB780], panel)
-    assert len(guide) == 5 and "消耗一格磁力，派生空中起手" in guide[4]
-    assert "<ICON PAD_X>" in guide[4] and "<ICON PAD_A>" in guide[4]
-    assert "可麻痹的怪物" in guide[4] and "每次磁缚都需积蓄1800" in guide[4]
-    assert "碰到可束缚的怪物时触发磁缚" in guide[4]
-    assert "游标随束缚计时移动，达标后变色" in guide[4]
-    assert "延长束缚，积累终结资格" in guide[4] and "使出磁缚终结" in guide[4]
-    assert "使自己束缚的地面目标倒下" in guide[4]
-    g.run(g.hooks[0x5CB780], panel)
-    assert len(guide) == 6 and all(word in guide[5] for word in ("拔刀冲刺", "强化砸击", "落地", "受身"))
-    g.run(g.hooks[0x5CB780], panel)
-    assert len(guide) == 7 and "回复药×1" in guide[6] and "Lv.8" in guide[6]
+    for index, page in enumerate(pages):
+        if index:
+            g.run(g.hooks[0x5CB780], panel)
+        assert expand(page).replace("\t", "　").replace("\n", "\r\n") in guide[index]
     g.stub(0x64C600, lambda *_: 0)
     g.put(pressed, 0x4000)
     g.run(g.hooks[0x5CB780], panel)
     g.put(pressed, 0)
+
+
+def verify_notes(g):
+    panel, state, cursor, vt, detail, arrows = (g.alloc(n) for n in (100,4,100,80,100,140))
+    g.put(panel+92,state)
+    g.put(panel+76,cursor)
+    g.put(cursor,vt)
+    page, selected = [1], [15]
+    for offset, value in [(36,page),(56,selected)]:
+        callback = g.alloc(4)
+        g.put(vt+offset,callback)
+        g.stub(callback,lambda *_, value=value: value[0])
+    g.put(detail+84,arrows)
+    labels = {}
+    def substitute(addr, fn):
+        if addr in g.traps:
+            g.cpu.hook_del(g.traps.pop(addr))
+        g.stub(addr,fn)
+    for addr in (0x54533C,0x56E538,0x56E6A8,0x65EB68,0x54EDEC,0x600DE4,
+                 0x56E528,0x56E530,0x550354,0x56E6FC,0x65D424,0x65D464,
+                 0x65E794,0x65E5BC,0x56EAB8,0x54EE34):
+        substitute(addr,lambda *_:0)
+    empty = g.alloc(4)
+    substitute(0x55BC4C,lambda *_: empty)
+    substitute(0x56E808,lambda _,group,part,text: labels.update({(group,part):g.string(text)}))
+    g.cpu.mem_write(panel+88,b"\1")
+    g.run(g.hooks[0x5B1294],panel)
+    assert g.cpu.mem_read(panel+80,1)==bytes([16])
+    g.run(g.hooks[0x5B0F70],panel)
+    assert labels[14,1]=="磁斩锤"
+    g.run(0x5B12D4,panel)
+    selected[0]=page[0]=0
+    g.run(g.hooks[0x5B1294],panel)
+    assert g.cpu.mem_read(panel+80,1)==bytes([1])
+    g.run(g.hooks[0x5B0F70],panel)
+    assert labels[9,1]=="极之型磁斩锤"
+    g.cpu.mem_write(detail+81,bytes([15,0,255]))
+    g.run(g.hooks[0x646A3C],detail,cursor)
+    pages=(ROOT/"src/manual.txt").read_text().strip().split("\n\n")
+    assert g.cpu.mem_read(detail+80,1)==bytes([len(pages)])
+    for i, body in enumerate(pages):
+        page[0]=i
+        g.run(g.hooks[0x646AD0],detail)
+        assert labels[39,2]=="磁斩锤"
+        if "\t" in body:
+            assert labels[3,2]==body.splitlines()[0]
+        else:
+            assert labels[17,1].startswith(body.splitlines()[0])
+    assert g.run(0x5B132C,panel) and g.cpu.mem_read(state+1,1)==bytes([15])
 
 
 def verify(sdk_last):
@@ -108,7 +155,12 @@ def verify(sdk_last):
     assert g.half(g.run(base, 0x1001) + 2) == 16
     progression = [(100, 0, 10, 0), (110, 0, 17, 4), (140, 1, 13, 6), (170, 1, 16, 8),
                    (210, 1, 18, 8), (240, 2, 68, 8), (290, 2, 15, 10), (320, 3, 14, 10)]
+    sale = api_for(g, b"mhgu::EquipmentSale", b"SALE")
+    native_price = g.get(sale + 4)
     for i, (attack, slots, curve, sharpness) in enumerate(progression):
+        header = (1 << 16) | ((i + 3) << 5) | 14
+        assert g.run(native_price, 0x1001, i, header + (1 << 16)) == 2
+        assert g.run(native_price, 0x1001, i, header) == 0
         record = g.run(level, 0x1001, i)
         assert struct.unpack("<3hBb3Bx", g.cpu.mem_read(record, 12)) == (
             attack, 0, 0, 0, 0, slots, curve, sharpness)
@@ -151,6 +203,7 @@ def verify(sdk_last):
     shop.connect()
     verify_icon(g)
     values = attach_details(g, shop)
+    badges = observe_badge(g, shop)
     shop_viewer = g.alloc(160)
     g.put(shop.owner + 2016, shop_viewer)
     shop.open("磁斩锤", ICON)
@@ -158,6 +211,7 @@ def verify(sdk_last):
     g.put(g.get(0x188C670) + 27636, 0x10000)
     shop.press()
     assert g.get(shop_viewer + 88) == 1
+    assert badges[-1] == (0, 0)
     assert values[2, 2] == 100 and values[2, 28] == 0
     assert NAME in shop.rows[0] and g.get(shop.header+24)==100
     assert g.get(shop.header + 16) == rarity_color and g.half(shop.header + 20) == ICON
@@ -168,8 +222,12 @@ def verify(sdk_last):
     shop.answer_equip(True)
     assert g.run(instance, 0, out) and g.get(out) == 1
 
+    verify_member_icon(g, preview_manager)
+
     smith = Facility(g, True)
     smith.connect()
+    attach_details(g, smith)
+    badges = observe_badge(g, smith)
     smith_viewer = g.alloc(160)
     g.put(smith.owner + 12816, smith_viewer)
     smith.open("磁斩锤", ICON)
@@ -217,6 +275,7 @@ def verify(sdk_last):
     smith.press(A)
     assert g.cpu.mem_read(smith.owner + 4, 3) == bytes((7, 25, 0))
     for target in range(2, 9):
+        assert badges[-1] == (int(target == 8), int(target >= 5)), (target, badges[-3:])
         assert g.half(smith.owner + 10464) == 1
         assert g.string(g.get(smith.owner + 11828)) == "回复药"
         assert g.half(smith.owner + 11820) == 1
@@ -241,6 +300,11 @@ def verify(sdk_last):
         g.put(pouch + 26, (1 << 16) | POTION)
         smith.press()
     assert g.cpu.mem_read(smith.owner + 4, 2) == bytes((7, 1))
+    # Reuse the very same details panel after painting a final-level weapon.
+    smith.press(0x20)
+    assert badges[-1] == (0, 0)
+    smith.press(LEFT)
+    assert badges[-1] == (1, 1)
     smith.press(A)
     assert g.cpu.mem_read(smith.owner + 5, 1) == bytes([1])
     smith.press(B)
@@ -260,6 +324,37 @@ def verify(sdk_last):
 
     g.cpu.hook_del(g.traps.pop(0x276278))
     verify_equipment(g, api)
+    verify_notes(g)
+
+
+def verify_member_icon(g, manager):
+    panel, actor, vtable, tint = (g.alloc(size) for size in (96, 5200, 420, 4))
+    g.put(panel + 88, 6)
+    g.put(manager + 28, actor)
+    g.put(actor, vtable)
+    g.put(vtable + 416, tint)
+    g.stub(tint, lambda *_: 0)
+    g.put(actor + 5060, manager + 124)
+    draws = []
+    hooks = []
+    # Capture both the native atlas request and the SDK override at the renderer.
+    for addr in (0x56E530, 0x56E6FC, 0x560F80, 0x56E6A8):
+        def intercept(cpu, pc, _, __):
+            from unicorn import arm_const as arm
+            if pc == 0x56E6A8:
+                draws.append((cpu.reg_read(arm.UC_ARM_REG_R3), g.get(cpu.reg_read(UC_ARM_REG_SP))))
+            cpu.reg_write(arm.UC_ARM_REG_R0, 0)
+            cpu.reg_write(arm.UC_ARM_REG_PC, cpu.reg_read(arm.UC_ARM_REG_LR))
+        hooks.append(g.cpu.hook_add(UC_HOOK_CODE, intercept, begin=addr, end=addr))
+    g.run(g.hooks[0x634124], panel)
+    assert draws == [(4, g.cpu.mem_read(manager + 124 + 1236, 1)[0]), (0, ICON)], draws
+    g.put(actor + 5068, 4)
+    draws.clear()
+    g.run(g.hooks[0x634124], panel)
+    assert draws == [(5, 2)], draws
+    g.put(manager + 28, 0)
+    for hook in hooks:
+        g.cpu.hook_del(hook)
 
 
 def verify_icon(g):
@@ -269,7 +364,7 @@ def verify_icon(g):
     assert any(tex[27::4]) and not all(tex[27::4])
 
     panel, layout, groups, group, nodes, sprite = [
-        g.alloc(size) for size in (96, 680, 28, 240, 48, 300)
+        g.alloc(size) for size in (200, 680, 28, 240, 48, 300)
     ]
     g.put(panel + 36, layout)
     g.put(layout + 248, groups)
@@ -318,6 +413,81 @@ def verify_icon(g):
         assert struct.unpack("<4f", g.cpu.mem_read(sprite + 268, 16)) == (128, 64, 32, 32)
     assert requests == [(0x21255D0, r"GUI\frontier_magnet_spike\icon", 1)]
     g.put(0x2126A64, previous)
+    return panel, layout, groups, group, nodes, sprite
+
+
+def verify_room_icons():
+    g = boot((REPO / "mhgu/main.elf").read_bytes(), None, order=())
+    g.inline_hooks |= {0x56E6A8}
+    for path, base in ((PROVIDER, 0x9000000), (PLUGIN, 0x9200000)):
+        exports = g.load(path, base)
+        for cb in ("forge_onLoad", "forge_onInit"):
+            g.run(exports[cb], MANAGER)
+    data = json.loads(character_save({}))
+    data["data"]["inventory"] = {"instances": {"1": {"equipment": 0x1001, "upgrade": 0}},
+                                 "equipped": 1, "sets": {}}
+    g.files[SAVE] = json.dumps(data).encode()
+    select_character(g, 0)
+    panel, layout, groups, group, nodes, sprite = verify_icon(g)
+    manager, network, peer = g.alloc(40032), g.alloc(3200), g.alloc(1376)
+    g.put(0x1885B58, manager)
+    g.put(0x188CA48, network)
+    g.put(network + 48, 2)
+    g.stub(0x27617C, lambda _, slot, *__: peer if slot == 0 else 0)
+    for eq in (manager + 124, peer):
+        g.cpu.mem_write(eq + 1236, bytes([7]))  # same stock category
+    native = []
+    g.stub(g.originals[0x56E6A8], lambda _, grp, part, atlas: native.append((grp, part, atlas)))
+    quest = g.alloc(280)
+    g.stub(0x3B9FD4, lambda *_: quest)
+    for address in (0x60DCEC, 0x56E530, 0x56ED3C, 0x56DF00, 0x56E528, 0x3BF718,
+                    0x3B598C, 0x55BC7C, 0x56E538, 0x56EA08, 0x3B57D0, 0x56E808,
+                    0x560E90, 0x56E6FC):
+        g.stub(address, lambda *_: 0)
+    g.put(panel + 80, 6)
+    g.cpu.mem_write(panel + 141, bytes([1]))
+    g.put(panel + 144, 2)
+    g.put(panel + 136, 2)
+    g.run(g.hooks[0x60DB68], panel)
+    assert not native and g.get(g.get(sprite + 260)) == 0xffffffff, (native, g.get(sprite + 260))
+    g.put(panel + 136, 0)
+    g.run(g.hooks[0x60DB68], panel)
+    assert native.pop() == (6, 11, 4)
+    g.cpu.mem_write(panel + 168, bytes([1]))
+    g.run(g.hooks[0x60DB68], panel)
+    assert native.pop() == (6, 11, 22)
+
+    quests = g.alloc(2 * 10328)
+    posting = quests + 10328
+    g.put(posting, 1)
+    g.put(posting + 10272, 3)
+    for row, slot in enumerate((0, 3, 2)):
+        g.put(posting + 10280 + row * 12, slot)
+    row_groups = [g.get(0x163476C + 4 * row) for row in range(4)]
+    groups = g.alloc(4 * (max(row_groups) + 1))
+    g.put(layout + 248, groups)
+    g.put(layout + 664, max(row_groups) + 1)
+    g.put(groups + 4 * row_groups[2], group)
+    g.put(nodes + 8, sprite)
+    g.put(sprite + 260, 0)
+    g.run(g.hooks[0x61225C], panel, 0, 1, quests, 0)
+    assert native == [(row_groups[0], 2, 4)] and g.get(g.get(sprite + 260)) == 0xffffffff, (native, g.get(sprite + 260))
+    # A copied peer record carries its own identity. Replacing that copy with
+    # an untagged weapon of the same stock class must stop the override.
+    g.stub(g.originals[0xE175C], lambda *_: 0)
+    g.put(groups + 4 * row_groups[0], group)
+    g.put(groups + 6 * 4, group)
+    g.run(g.hooks[0xE175C], peer + 4, manager + 128)
+    native.clear()
+    g.run(g.hooks[0x61225C], panel, 0, 1, quests, 0)
+    assert not native
+    g.cpu.mem_write(panel + 168, bytes([0]))
+    g.run(g.hooks[0x60DB68], panel)
+    assert not native
+    g.run(g.hooks[0xE175C], peer + 4, g.alloc(1376) + 4)
+    g.run(g.hooks[0x60DB68], panel)
+    assert native == [(6, 11, 4)]
+    print("Room player info and posted quest rows: local/peer identity, replaced equipment, hidden and masked rows passed")
 
 
 def verify_equipment(g, api):
@@ -345,10 +515,12 @@ def verify_equipment(g, api):
     g.put(part + 48, actor)
     g.stub(0x3F8398, lambda *_: 0)
 
-    def equip(id, upgrade=0):
+    def equip(id, upgrade=0, jewels=None):
         saved = json.loads(character_save({}))
         saved["data"]["inventory"] = {"instances": {"1": {"equipment": id, "upgrade": upgrade}},
                                       "equipped": 1, "sets": {}}
+        if jewels is not None:
+            saved["data"]["inventory"]["decorations"] = {"1":jewels}
         g.files[SAVE] = json.dumps(saved).encode()
         select_character(g, 0)
 
@@ -362,7 +534,7 @@ def verify_equipment(g, api):
     fallback = bytes(g.cpu.mem_read(eq+24, 44))
     g.stub(0x13EFD7C, lambda dst, n, *_: g.cpu.mem_write(dst, bytes(n)))
     g.stub(0xDF824, lambda *_: 0)
-    g.run(g.hooks[0xDEE34], eq+4)
+    g.run(0xDEE34, eq+4)
     assert struct.unpack("<8h", g.cpu.mem_read(eq+336, 16)) == (150, 25, 2, 1, 6, 20, 14, 8)
     assert bytes(g.cpu.mem_read(eq+24, 44)) == fallback
 
@@ -377,8 +549,99 @@ def verify_equipment(g, api):
     assert [g.run(g.hooks[0x29CDFC], actor, n) for n in (20, 21, 150, 151)] == [0, 1, 3, 4]
 
     equip(0x1001, 7)  # Load a saved Lv.8 trial instance through the equipment hook.
-    g.run(g.hooks[0xDEE34], eq + 4)
+    g.run(0xDEE34, eq + 4)
     assert struct.unpack("<8h", g.cpu.mem_read(eq + 336, 16)) == (320, 0, 10, 0, 0, 0, 0, 0)
+    # Run GU's DDD48 skill tally on the transient weapon row with two installed
+    # jewels. The native fallback has a different jewel and must keep it.
+    equip(0x1001,7,[2638,2639,0])
+    table, entries, data = (g.alloc(n) for n in (56,112,36))
+    g.put(0x18583A8,table)
+    g.put(table+44,entries)
+    g.put(entries+100,3)
+    g.put(entries+108,data)
+    for i,(cost,points) in enumerate([(2,3),(1,1),(1,7)]):
+        g.cpu.mem_write(data+12*i+4,bytes([cost,11,0,points,0]))
+    for part_index in range(7):
+        g.put(eq+64+44*part_index,g.alloc(44))
+    skills=g.get(eq+64)
+    g.put(eq+396,g.alloc(1100))
+    skill_manager = g.alloc(324)
+    g.put(0x1896c20,skill_manager)
+    g.stub(0x4CF018,lambda *_: 0)
+    g.cpu.mem_write(eq+34,struct.pack("<3H",2640,0,0))
+    original_record = bytes(g.cpu.mem_read(eq+24,44))
+    g.cpu.hook_del(g.traps.pop(0xDF824))
+    g.run(0xDEE34,eq+4)
+    assert g.half(skills)==11 and g.cpu.mem_read(skills+2,1)==bytes([4])
+    assert bytes(g.cpu.mem_read(eq+24,44))==original_record
+    # GU E1EEC applies Handicraft to the level derived by DEE34, then caps at 12.
+    for skill, expected in ((0, 10), (84, 11), (83, 12)):
+        words = g.get(eq + 396) + 988
+        g.cpu.mem_write(words, bytes(40))
+        if skill:
+            g.put(words + 4 * (skill // 32), 1 << (skill % 32))
+        g.run(0xE1EEC, eq + 4)
+        assert g.run(0xE173C, eq + 4, 14) == expected
+    assert g.run(0xDB7E0, eq + 24) == 320
+    assert g.run(0xDB028, eq + 24) == 8
+    saved_slot = json.loads(g.files[SAVE])
+    saved_slot["slot"] = 1
+    saved_slot["data"]["inventory"]["decorations"]["1"] = [2639, 0, 0]
+    saved_slot["data"]["inventory"]["instances"]["1"]["upgrade"] = 3
+    g.files[SAVE.replace("-0.", "-1.")] = json.dumps(saved_slot).encode()
+    preview_eq, select_manager, file_data = g.alloc(1376), g.alloc(200), g.alloc(4096)
+    g.put(select_manager + 40, file_data)
+    for slot in (0, 1, 2):
+        g.put(select_manager + 44 + slot * 4, 1)
+        g.cpu.mem_write(file_data + 4 + slot, bytes([1]))
+        g.put(file_data + 16 + 4 * slot, 128)
+    g.stub(0x13EFDD0, lambda dst, src, n, *_: g.cpu.mem_write(dst, bytes(g.cpu.mem_read(src, n))))
+    native_weapon = file_data + 128 + 268
+    g.cpu.mem_write(native_weapon + 4, struct.pack("<HH", 7, 1))
+    g.cpu.mem_write(native_weapon + 10, struct.pack("<3H", 2640, 0, 0))
+    candidate_points = g.alloc(44)
+    g.put(manager + 12508 + 64, candidate_points)
+    # A real title slot read, its aggregate copy, and the native weapon getters.
+    for slot, level, power in ((1, 4, 170), (0, 8, 320), (2, 1, 0)):
+        assert g.run(0x3E1208, select_manager, slot, preview_eq)
+        g.run(0x274488, manager, preview_eq)
+        target = manager + 12508
+        assert g.run(0xDB028, target + 24) == level
+        assert g.run(0xDB7E0, target + 24) == power
+        assert g.run(0xDB568, target + 24) == (2 if slot == 0 else 1)
+        if slot == 1:
+            assert g.run(0xDB7B8, target + 24, 0) == data + 12
+            assert g.run(0xDB66C, target + 24) == 0  # Lv.4 has one socket.
+        g.run(0xDDD48, target + 24)
+        assert g.half(candidate_points) == 11
+        assert g.cpu.mem_read(candidate_points + 2, 1)[0] == {0: 4, 1: 1, 2: 7}[slot]
+        assert g.run(0xDB028, eq + 24) == 8  # Hover never switches the active save.
+    g.run(0x3E1208, select_manager, 1, preview_eq)
+    # A copy made from another copy retains the viewed slot, even after the
+    # source changes. Replacing an armour part must preserve weapon identity.
+    nested = g.alloc(1376)
+    g.run(0x26E600, nested, preview_eq)
+    g.run(0xDADF0, nested + 68, file_data + 440)
+    assert g.run(0xDB028, nested + 24) == 4 and g.run(0xDB7E0, nested + 24) == 170
+    g.run(0xDADF0, preview_eq + 24, file_data + 396)
+    assert g.run(0xDB7E0, preview_eq + 24) == 0
+    assert g.run(0xDB028, nested + 24) == 4
+    sent = []
+    def capture(_, equipment, flags, target):
+        sent.append((flags, struct.unpack("<3H", g.cpu.mem_read(equipment + 34, 6)), target))
+        return 1
+    sender = g.originals[0x202764]
+    g.stub(sender, capture)
+    assert g.run(0x202764, 0, nested, 1, 2) == 1
+    assert sent[-1] == (0x98000001 | (3 << 17) | (0x1001 << 1), (2639, 0, 0), 2)
+    assert g.half(nested + 34) == 2640
+    g.run(0x26E600, nested, preview_eq)
+    assert g.run(0xDB028, nested + 24) == 1
+    assert g.run(0x202764, 0, nested, 1, 2) == 1
+    assert sent[-1] == (1, (2640, 0, 0), 2)
+    g.cpu.hook_del(g.traps.pop(sender))
+    g.put(eq+396,0)
+    g.cpu.mem_write(eq+34,bytes(6))
     equip(0x1001)
     resources, requests = {}, []
     def load(_, kind, path, flags):
@@ -397,7 +660,7 @@ def verify_equipment(g, api):
     vt, bind = g.alloc(96), g.alloc(4)
     g.put(part, vt)
     g.put(vt+88, bind)
-    g.stub(bind, lambda owner, mesh, *_: binds.append((owner, mesh)))
+    g.stub(bind, lambda owner, mesh, *_: binds.append((owner, mesh)) or g.put(owner + 240, mesh))
     g.stub(0x13EFF20, lambda dst, n, value, *_: g.cpu.mem_write(dst, bytes([value & 255]) * n))
     g.stub(0x957480, lambda *_: 0)
     g.stub(0x957400, lambda *_: 0)
@@ -413,6 +676,20 @@ def verify_equipment(g, api):
     equip(0x1002)
     g.run(g.hooks[0x307F18], part, args)
     assert binds[-1] == (part, stock)
+
+    # Hold the native fallback constant while hovering a different character.
+    title_actor = g.alloc(14000)
+    title = manager + 12508
+    g.put(manager + 44, title_actor)
+    g.put(title_actor + 5060, title)
+    g.put(part + 48, title_actor)
+    for slot, expected_mesh in ((1, resources[requests[1]]), (2, stock)):
+        assert g.run(0x3E1208, select_manager, slot, preview_eq)
+        g.run(0x274488, manager, preview_eq)
+        g.run(0x307F18, part, args)
+        assert binds[-1] == (part, expected_mesh)
+    g.put(manager + 44, 0)
+    g.put(part + 48, actor)
 
     def native_copy(out, inp, *_):
         g.cpu.mem_write(out, bytes(g.cpu.mem_read(inp, 1376)))
@@ -466,11 +743,34 @@ def verify_equipment(g, api):
     g.stub(g.originals[0x303790], lambda *_: seen.append(g.get(mannequin + 5068)))
     g.run(0x303790, part)
     assert seen == [1] and g.get(mannequin + 5068) == 0x11
+    # Cold open: GU binds the fallback while the extension mesh is pending.
+    # The card must replace it on its next update once load flags become ready.
+    ready = resources[requests[1]]
+    g.put(ready + 80, 0)
+    g.run(g.hooks[0x307F18], part, args)
+    assert g.get(part + 240) == stock
+    g.run(0x303790, part)
+    assert g.get(part + 240) == stock
+    g.put(ready + 80, 1)
+    g.run(0x303790, part)
+    assert g.get(part + 240) == ready
+    # A copy received from another hunter resolves its stamped weapon even
+    # though the native identity comparison rejects it as the local card.
+    copy = g.alloc(6328)
+    g.cpu.mem_write(copy, bytes(g.cpu.mem_read(card, 6328)))
+    for offset, byte in ((1, b"F"), (5, b"Z"), (43, b"W")):
+        g.cpu.mem_write(copy + 84 + offset, byte)
+    g.cpu.mem_write(copy + 90, struct.pack("<H", 0x1001))
+    g.put(preview + 24, copy)
+    g.run(0x15FADC, preview)
+    g.run(g.hooks[0x307F18], part, args)
+    assert binds[-1] == (part, ready)
+    seen.clear()
     g.run(0x2744BC, manager, 0, eq)
     g.run(g.hooks[0x307F18], part, args)
     assert binds[-1] == (part, stock)
     g.run(0x303790, part)
-    assert seen == [1, 0x11]
+    assert seen == [0x11]
 
 
 
@@ -531,6 +831,7 @@ def verify_turn_table():
 
 
 if __name__ == "__main__":
+    verify_room_icons()
     verify_action_tables()
     verify_turn_table()
     verify(sdk_last=False)

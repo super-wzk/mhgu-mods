@@ -109,6 +109,16 @@ fn load(slot: u8) -> Result<Save, ()> {
     Ok(empty(slot))
 }
 
+// The title screen reads all three slots before it selects a character.
+pub(crate) fn preview_weapon(slot: u8) -> Option<(super::OwnedWeapon, [u16; 3])> {
+    if slot >= 3 { return None; }
+    let _mount = Mount::open().ok()?;
+    let bytes = read_file(&path(slot, ".json")).ok()??;
+    let inventory = Save::decode(&bytes, slot)?.data.inventory;
+    let id = inventory.equipped?;
+    Some((*inventory.instances.get(&id)?, inventory.decorations.get(&id).copied().unwrap_or_default()))
+}
+
 static SESSION: Shared<Option<Save>> = Shared::new(None);
 static PENDING: Shared<Option<(u8, Option<Save>)>> = Shared::new(None);
 

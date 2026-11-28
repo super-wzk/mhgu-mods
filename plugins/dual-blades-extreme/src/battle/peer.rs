@@ -93,7 +93,7 @@ impl Battle {
                 return;
             };
             let sample = action::MotionFrame::sample(actor);
-            let wrapped = cursor.time.observe(sample.frame, sample.blend);
+            let wrapped = cursor.time.observe(sample.frame, sample.blend * 0.5);
             let finished = if step.op == 3 && step.until != 0 {
                 step.reached_frame(sample.frame)
             } else {

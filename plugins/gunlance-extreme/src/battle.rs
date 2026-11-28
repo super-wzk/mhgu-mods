@@ -12,6 +12,7 @@ use mhfz_sdk::{
     sprint::{self, Flick, Resume},
 };
 use mhgu_sdk::{
+    sync::Shared,
     weapon::style::{
         ActionRequest, Input, NATIVE_ACTION, PASS,
         action::{self, Attack, MotionFrame, command::CommandSet, melee},
@@ -20,7 +21,6 @@ use mhgu_sdk::{
         movement,
         remote::{self, PeerStates, Roster},
     },
-    sync::Shared,
 };
 
 const SHEATHE: u8 = 13;
@@ -101,6 +101,12 @@ pub unsafe extern "C" fn commands(actor: u32, table: u32) -> *const CommandSet {
 }
 
 impl Battle {
+    // A peer may have ignited before it came into view. An explicitly
+    // powered action carries that information until we observe its expiry.
+    fn powered_shell(&self) -> bool {
+        self.heat_blade > 0. || (!self.local && self.ignition_cooldown == 0.)
+    }
+
     fn replay_shells(&self) -> bool {
         self.local || self.synced_ammo
     }
@@ -234,7 +240,7 @@ impl Battle {
             } else {
                 // Stay on this step if GU defers the native transition.
                 self.transition(step.clip, unsafe {
-                    movement::live_relative_stick_yaw(self.actor)
+                    movement::command_stick_yaw(self.actor)
                 });
             }
             return;
@@ -258,7 +264,7 @@ impl Battle {
         self.packed = packed;
         cursor.time.cycles = 0;
         cursor.time.frame = f32::from(start);
-        cursor.time.blend = f32::from(step.blend / 2);
+        cursor.time.blend = mhfz_sdk::action::blend_ticks(step.blend);
         self.motion_fx.seek(step.clip, cursor.time.frame);
         unsafe {
             sound::update(
@@ -363,7 +369,7 @@ impl Battle {
         unsafe {
             self.burst_started = true;
             let spread = matches!(state, 43 | 45);
-            let sequential = matches!(state, 31 | 44 | 45);
+            let sequential = matches!(state, 31 | 44 | 45) && self.powered_shell();
             let (kind, variant) = if spread { (3, 0) } else { (2, 0) };
             // Wide simultaneous bursts divide their shells among four
             // contacts. GU accepts at most three requests per update.
@@ -492,7 +498,9 @@ impl Battle {
                             13 | 26 | 36 | 55 | 58 => 2,
                             _ => 0,
                         };
-                        let charged = kind == 18;
+                        // These heat-blade shell actions can outlive the buff that
+                        // selected them. Resolve the shell at its firing event.
+                        let charged = kind == 18 && self.powered_shell();
                         if replay_shells {
                             if self.rounds == 0 {
                                 continue;
@@ -547,8 +555,36 @@ impl Battle {
             return;
         }
         let sample = unsafe { MotionFrame::sample(actor) };
+        if input.is_some() {
+            use mhfz_sdk::combat::{EvadeClock, EvadeDistance as Travel};
+            let travel = match step.clip {
+                1014 => Some(Travel::side(180., 0., 18.)),
+                1015 => Some(Travel::side(-180., 0., 18.)),
+                1016 => Some(Travel::forward(-180., 0., 24.)),
+                1465 => Some(Travel::forward(-180., 0., 42.)),
+                1466 => Some(Travel::side(180., 0., 42.)),
+                1467 => Some(Travel::side(-180., 0., 42.)),
+                _ => None,
+            };
+            if let Some(travel) = travel {
+                unsafe { travel.apply(actor, sample, EvadeClock::Common) };
+            }
+        }
+        if input.is_some() && matches!(state, 63..=66) {
+            use mhfz_sdk::combat::{EvadeClock, EvadeDistance as Travel};
+            let travel = match step.clip {
+                1465 => Some(Travel::forward(-200., 10., 30.)),
+                1466 => Some(Travel::side(200., 10., 30.)),
+                1467 => Some(Travel::side(-200., 10., 30.)),
+                1473 => Some(Travel::forward(300., 10., 40.)),
+                _ => None,
+            };
+            if let Some(travel) = travel {
+                unsafe { travel.apply(actor, sample, EvadeClock::WeaponMotion) };
+            }
+        }
         let previous = cursor.time.frame;
-        let wrapped = cursor.time.observe(sample.frame, sample.blend);
+        let wrapped = cursor.time.observe(sample.frame, sample.blend * 0.5);
         let phase = cursor.time.step;
         unsafe {
             // 81207560 starts the blade at frame 100 on both cycles of 1427.
@@ -743,6 +779,7 @@ impl Battle {
         let cooling_time = (dt - self.heat_blade).max(0.);
         if self.heat_blade > 0. && dt >= self.heat_blade {
             self.ignition_cooldown = program::timer(program::IGNITION_COOLDOWN);
+            self.flame.stop();
         }
         self.heat_blade = (self.heat_blade - dt).max(0.);
         self.ignition_cooldown = (self.ignition_cooldown - cooling_time).max(0.);
@@ -752,7 +789,7 @@ impl Battle {
         let actor = self.actor;
         unsafe {
             let dt = read::<f32>(actor, 28).max(0.);
-            let yaw = movement::live_relative_stick_yaw(actor);
+            let yaw = movement::command_stick_yaw(actor);
             self.tick_ignition(dt);
             self.quick_reload = (self.quick_reload - dt).max(0.);
             self.poise = (self.poise - dt).max(0.);
@@ -1066,7 +1103,7 @@ unsafe extern "C" fn observe(local: u32) {
     unsafe {
         PEERS.visit_live(crate::WEAPON, |_, actor, battle| {
             let elapsed = read::<f32>(actor, 28).max(0.);
-            battle.heat_blade = (battle.heat_blade - elapsed).max(0.);
+            battle.tick_ignition(elapsed);
             battle.quick_reload = (battle.quick_reload - elapsed).max(0.);
             let (group, slot) = action::current(actor);
             let state = action::custom_id(group, slot);

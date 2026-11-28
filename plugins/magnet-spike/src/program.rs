@@ -317,7 +317,17 @@ impl Mode {
         }
     }
 
+    // The bind uses slash motions for both forms. Event 40 on the
+    // preceding twin attack saves the form to resume after it.
     pub fn for_state(self, state: u8) -> Self {
+        match state {
+            94 => Self::Impact,
+            98 | 99 => self,
+            _ => self.motion_mode(state),
+        }
+    }
+
+    pub fn motion_mode(self, state: u8) -> Self {
         match DATA[MODES + usize::from(state)] {
             0 => Self::Slash,
             1 => Self::Impact,

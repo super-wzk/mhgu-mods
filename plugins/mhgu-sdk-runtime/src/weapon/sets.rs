@@ -1,4 +1,5 @@
 //! GU's hunter My Set mutations. The native record still owns equipment and arts.
+use crate::weapon::records;
 use super::{
     inventory, local_hunter, profile,
     style::{Entry, active, choose_style, registered_entry},
@@ -39,11 +40,11 @@ pub(super) unsafe fn preview(slot: u32, equipment: u32) -> Option<&'static Entry
         .or_else(|| saved_style(slot, fingerprint, weapon))
 }
 
-pub(super) unsafe fn equipment_display(slot: u32) -> Option<profile::DisplayEquipment> {
+pub(super) unsafe fn equipment_display(slot: u32) -> Option<records::DisplayEquipment> {
     let save = unsafe { *((forge::mem::text_addr() + 0x1856fe8) as *const u32) };
     let record = unsafe { record(save, slot) }?;
     let (item, _) = saved_weapon(slot, unsafe { fingerprint(record) })?;
-    profile::DisplayEquipment::registered(item.equipment.get(), item.upgrade)
+    records::DisplayEquipment::owned(item)
 }
 
 fn saved_style(slot: u32, fingerprint: u32, weapon: u32) -> Option<&'static Entry> {

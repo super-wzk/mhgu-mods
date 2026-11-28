@@ -101,7 +101,7 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
     stub(g.get(vtable + 460), lambda *_: 5)  # Stock w06 uses bits 16–19.
 
     def set_mode(buttons):
-        set_action(1, 0)
+        set_action(2, 0)
         g.cpu.mem_write(local + 10057, b"\0")
         tick(buttons, native_pad=True)
 
@@ -135,7 +135,7 @@ def verify_peer(g, local, vtable, part, monster, status, collision, credit, set_
     set_action(16, 0x8000 + 162)
     enhanced_step_follow_up = capture(1)
     set_action(16, 0x8000 + 94)
-    impact_bind = capture(0)
+    impact_bind = capture(1)
     attraction_branches = []
     for follow in (61, 62, 71, 72):
         set_action(16, 0x8000 + follow)

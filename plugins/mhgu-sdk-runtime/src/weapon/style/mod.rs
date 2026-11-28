@@ -199,13 +199,8 @@ extern "C" fn selected(weapon: u32) -> u32 {
 
 unsafe fn actor_entry(actor: u32) -> Option<&'static Entry> {
     let equipment = unsafe { inventory::actor_equipment(actor) };
-    // When GU spawns the local hunter from its own equip record (2758A4),
-    // that record holds the retail fallback. Arena and other scratch records
-    // must still use the weapon that GU assigned to them.
-    if unsafe { inventory::is_native_local(equipment) }
-        && let Some((_, entry)) = inventory::selected()
-    {
-        return Some(entry);
+    if let Some(weapon) = unsafe { crate::weapon::records::display(equipment) } {
+        return inventory::definition(weapon.definition.equipment.id.get()).map(|(entry, _)| entry);
     }
     unsafe { active_equipment(equipment) }
 }

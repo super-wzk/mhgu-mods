@@ -1,5 +1,5 @@
 use mhfz_sdk::motion::{DrawnRoll, MotionBanks, sprint_sheathe};
-use mhgu_sdk::weapon::style::{PASS, action};
+use mhgu_sdk::weapon::style::PASS;
 
 // FZ common action 202, weapon row in 825901F4.
 const SPRINT_SHEATHE: u16 = 1412;
@@ -80,12 +80,5 @@ pub(super) extern "C" fn finish_sheathe(slot: u16, phase: u8, motion: u32) -> bo
 }
 
 pub unsafe fn play(actor: u32, clip: u16, start: u16, blend: u16) -> Option<u16> {
-    unsafe {
-        action::play_motion(
-            actor,
-            PRIVATE | u32::from(clip),
-            f32::from(start),
-            f32::from(blend / 2),
-        )
-    }
+    unsafe { mhfz_sdk::motion::play_step(actor, PRIVATE | u32::from(clip), start, blend) }
 }

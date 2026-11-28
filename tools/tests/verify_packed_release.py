@@ -8,7 +8,7 @@ import zlib
 
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
-from package_weapon_styles import KINDS, MAGNET_SPIKE, PLUGINS, RELEASE_DIR, REPO, WEAPONS
+from package_weapon_styles import KINDS, MAGNET_SPIKE, PLUGINS, RELEASE_DIR, RELEASE_FOLDERS, REPO, WEAPONS
 
 sys.path.insert(0, str(PLUGINS / "great-sword-extreme/tests"))
 sys.path.insert(0, str(PLUGINS / "mhgu-sdk-runtime/tests"))
@@ -77,22 +77,26 @@ def verify_magnet_effects(resources, ordered):
 
 def verify_payloads(release, *, include_magnet_spike=False):
     path = "romfs/nativeNX/arc/frontier"
-    sdk = release / "mhgu-sdk"
+    folders = ["0-mhgu-sdk", "1-great-sword-extreme", "2-dual-blades-extreme",
+               "3-long-sword-extreme", "4-switch-axe-extreme", "5-sword-shield-extreme",
+               "6-gunlance-extreme"]
+    if include_magnet_spike:
+        folders.append("7-magnet-spike")
+    assert sorted(path.name for path in release.iterdir()) == folders
+    sdk = release / "0-mhgu-sdk"
     assert (sdk / "romfs/nativeNX/plugins/mhgu-sdk.nro").read_bytes() == SDK_NRO.read_bytes()
     common = assets(sdk / path / "common.arc")
     used = Counter()
     expected_files = 14 + 3 * int(include_magnet_spike)
     assert len([f for f in release.rglob("*") if f.is_file()]) == expected_files
     if include_magnet_spike:
-        relative = Path(MAGNET_SPIKE) / "romfs/nativeNX/plugins/magnet_spike.nro"
-        assert (release / relative).read_bytes() == (
-            PLUGINS / MAGNET_SPIKE / "dist" / relative
-        ).read_bytes()
-        arc = Path(MAGNET_SPIKE) / path / "magnet_spike.arc"
-        assert (release / arc).read_bytes() == (PLUGINS / MAGNET_SPIKE / "dist" / arc).read_bytes()
-        icon = Path(MAGNET_SPIKE) / "romfs/nativeNX/GUI/frontier_magnet_spike/icon.tex"
-        assert (release / icon).read_bytes() == (PLUGINS / MAGNET_SPIKE / "dist" / icon).read_bytes()
-        resources = assets(release / arc)
+        magnet = release / RELEASE_FOLDERS[MAGNET_SPIKE]
+        source = PLUGINS / MAGNET_SPIKE / "dist" / MAGNET_SPIKE
+        arc = Path(path) / "magnet_spike.arc"
+        for relative in ("romfs/nativeNX/plugins/magnet_spike.nro", arc,
+                         "romfs/nativeNX/GUI/frontier_magnet_spike/icon.tex"):
+            assert (magnet / relative).read_bytes() == (source / relative).read_bytes()
+        resources = assets(magnet / arc)
         model = r"weapon\frontier\magnet_spike\wk451"
         mesh = resources[model, KINDS[".mod"]]
         assert mesh[:5] == b"MOD\0\xd4" and all(struct.unpack_from("<3H", mesh, 6))
@@ -151,8 +155,8 @@ def verify_payloads(release, *, include_magnet_spike=False):
         package = f"{name}-extreme"
         nx = PLUGINS / package / "dist" / package / "romfs/nativeNX"
         plugin = f"plugins/{package.replace('-', '_')}.nro"
-        assert (release / package / "romfs/nativeNX" / plugin).read_bytes() == (nx / plugin).read_bytes()
-        private = assets(release / package / path / f"{tag}.arc")
+        assert (release / RELEASE_FOLDERS[package] / "romfs/nativeNX" / plugin).read_bytes() == (nx / plugin).read_bytes()
+        private = assets(release / RELEASE_FOLDERS[package] / path / f"{tag}.arc")
         available = dict(common)
         source = {}
         for file in nx.rglob("*"):
@@ -256,7 +260,7 @@ def verify_native_directory(release, *, include_magnet_spike=False):
     if include_magnet_spike:
         bundles.append((MAGNET_SPIKE, "magnet_spike"))
         # Register the actual equipment archive so the runtime selects sequential loading.
-        nro = release / MAGNET_SPIKE / "romfs/nativeNX/plugins/magnet_spike.nro"
+        nro = release / RELEASE_FOLDERS[MAGNET_SPIKE] / "romfs/nativeNX/plugins/magnet_spike.nro"
         plugin = g.load(nro, 0x9200000)
         for callback in ("forge_onLoad", "forge_onInit"):
             g.run(plugin[callback], MANAGER)
@@ -291,7 +295,7 @@ def verify_native_directory(release, *, include_magnet_spike=False):
     g.stub(child_fn, child)
 
     for directory, tag in bundles:
-        path = release / directory / "romfs/nativeNX/arc/frontier" / f"{tag}.arc"
+        path = release / RELEASE_FOLDERS[directory] / "romfs/nativeNX/arc/frontier" / f"{tag}.arc"
         blob = path.read_bytes()
         expected = list(assets(path))
         consumed = 0

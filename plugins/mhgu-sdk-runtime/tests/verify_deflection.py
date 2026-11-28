@@ -95,6 +95,13 @@ def source():
     m.call(0x811EF3BA, player, 91)
     m.call(0x811F0C32, player)
     assert transitions == [(0, 200, 12), (1, 78, 12)], transitions
+    m.trap(0x811EEEC6, lambda *_: 0)
+    for phase, expected in ((2, 40), (3, 84)):
+        m.c.mem_write(player + 3148, bytes([phase]))
+        for entry in (0x811F08D4, 0x811F0C32):
+            transitions.clear()
+            m.call(entry, player)
+            assert transitions == [(1, expected, 4)]
     print("FZ w06: native blade polish follow-ups and facing passed")
 
     m.trap(0x817C45EC, lambda *_: 1)
@@ -438,7 +445,7 @@ def polish_followups(g, actor, begin, tick, transition, skills, set_action, subm
         g.cpu.mem_write(actor + 5188, bytes(16))
         begin(state)
 
-    for activation, frame, state, strike_frame in ((68, 48, 36, 12), (69, 86, 83, 10)):
+    for activation, frame, state, strike_frame in ((68, 48, 40, 12), (69, 86, 84, 10)):
         enter(activation)
         tick(frame)
         set_action(1, 0)
@@ -448,10 +455,33 @@ def polish_followups(g, actor, begin, tick, transition, skills, set_action, subm
         assert g.half(actor + 1204) == 1426
         for at in range(2, strike_frame, 2):
             assert pad(at) == state
-        if state == 83:
+        if state == 84:
             assert not submitted
         assert pad(strike_frame) == state
         assert submitted == [12320, 12504], (state, submitted)
+        for aim in (0x4000, 0x8000, 0xc000):
+            set_action(1, 0)
+            g.put(actor + 4076, 0)
+            g.put(actor + 5280, 0)
+            assert pad(0, stick=100, common=1 << 3) == state
+            assert g.half(actor + 4076) == g.half(actor + 5280) == aim
+        for aim, true_next, extreme_next in ((0, 36, 85), (0x8000, 37, 86),
+                                             (0x4000, 38, 87), (0xc000, 39, 88)):
+            enter(state)
+            g.put(actor + 5280, 0)
+            expected = true_next if activation == 68 else extreme_next
+            if activation == 68:
+                assert pad(30, stick=100, common=1 << 3) == state
+                assert pad(48) == expected
+            else:
+                assert pad(28, stick=100, common=1 << 3) == expected
+        enter(state)
+        assert pad(10, a) == state
+        assert pad(12, a) == state
+        assert pad(28) == (state if activation == 68 else 72)
+        aim = 0
+        g.put(actor + 4076, 0)
+        g.put(actor + 5280, 0)
     print("GU DB: free-state forward demon evade plays 1426 and submits both strikes")
 
     # FZ states 7 and 19 can execute X or X+A as soon as frame 60.
@@ -521,8 +551,8 @@ def polish_followups(g, actor, begin, tick, transition, skills, set_action, subm
     assert pad(37) == 24
     assert pad(38, stick=100) == 24
     assert pad(50, stick=100) == 89
-    assert pad(1, a, stick=100) == 89
-    assert pad(2, stick=100) == 78
+    assert pad(29, a, stick=100) == 89
+    assert pad(30, stick=100) == 78
 
     shoulder_layout = g.get(0x1897F78) + 17518
     old_layout = bytes(g.cpu.mem_read(shoulder_layout, 1))
@@ -538,6 +568,7 @@ def polish_followups(g, actor, begin, tick, transition, skills, set_action, subm
         tick(86 if activation == 69 else 2)
         enter(24)
         g.put(actor + 4076, 0x1234)
+        g.put(actor + 5280, 0x1234)
         aim = 0x5234 if delta >= 0 else 0xd234
         assert pad(0) == 24
         for frame in range(40 - lead, 40):
@@ -586,6 +617,7 @@ def polish_followups(g, actor, begin, tick, transition, skills, set_action, subm
                                  (0x2000, 13), (0xc000, 13)):
             enter(state)
             g.put(actor + 4076, 0)
+            g.put(actor + 5280, 0)
             aim = yaw
             assert pad(12, a, stick=64 if yaw else 0) == state
             assert pad(13) == state  # The stick can return to neutral before GU confirms A.
@@ -615,6 +647,8 @@ def polish_followups(g, actor, begin, tick, transition, skills, set_action, subm
     g.cpu.mem_write(actor + 11990, b"\x01")
     assert pad(30, stick=100) == 0
     g.cpu.mem_write(camera + 96, struct.pack("<3f", 100, 0, 0))
+    aim = 0x4000  # GU command direction uses the captured world heading.
+    g.put(actor + 5280, 0)
     assert pad(34, stick=100, common=1 << 3) == 74
     assert g.cpu.mem_read(actor + 11990, 1) == b"\x01"
     g.cpu.mem_write(actor + 11990, b"\0")
@@ -666,11 +700,20 @@ def cancel_windows(g, actor, begin, tick, pad, enter, skills):
             assert pad(execute) == 89
 
         enter(89)
-        assert pad(8, 0x100) == 89
-        assert pad(9, 0x100) == 89
-        assert pad(10, 0x100, common=evade) == sprint_roll
+        assert pad(28, 0x100, stick=100) == 89
+        assert pad(29, 0x100, stick=100) == 89
+        assert pad(30, 0x100, common=evade) == sprint_roll
         enter(89)
-        assert pad(10, common=evade) == sprint_roll
+        assert pad(29, common=evade) == 89
+        assert pad(30, common=evade) == sprint_roll
+
+        for key, target in ((0x20, 82), (0x100, 78), (0x120, 89), (shoulder, 89)):
+            enter(89)
+            assert pad(28, key, stick=100) == 89
+            assert pad(29, key, stick=100) == 89
+            assert pad(30, key, stick=100) == target, (activation, key)
+        enter(89)
+        assert pad(30, stick=100, common=polish) == 89
 
         for at, target in ((48, 18), (66, 21), (122, 18), (146, 21), (148, 18)):
             begin(activation)
@@ -718,9 +761,9 @@ def cancel_windows(g, actor, begin, tick, pad, enter, skills):
     assert pad(116, common=evade) == 83
     enter(89)
     g.cpu.mem_write(actor + 5088, bytes(4))
-    assert pad(8, 0x100) == 89
-    assert pad(9, 0x100) == 89
-    assert pad(10, 0x100) == 78
+    assert pad(28, 0x100, stick=100) == 89
+    assert pad(29, 0x100, stick=100) == 89
+    assert pad(30, 0x100) == 78
     g.cpu.mem_write(actor + 10500, bytes(4))
     print("GU DB: flurry, whirlwind and other multi-clip cancels, sprint priority and stamina passed")
 

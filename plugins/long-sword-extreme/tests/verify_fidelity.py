@@ -74,7 +74,6 @@ def replay(g, actor, descriptor, set_action, allow_transition):
         return g.half(actor + 9482) - 0x8000
 
     stub(0x53A06C, motion)
-    g.cpu.hook_del(g.traps.pop(0x27E608))
     stub(0x27F678, lambda p, *_: (g.half(p + 5132) - 0x4000) & 65535)
     for addr in (0x27D5C4, 0x3A5ED0, 0x5584A0, 0x27F728):
         stub(addr, lambda *_: 0)
@@ -133,7 +132,7 @@ def replay(g, actor, descriptor, set_action, allow_transition):
         assert tick(30, weapon=weapon) == 85
         put_float(actor + 1268, 0)
         assert tick(30, weapon=weapon) == dest
-        assert motions[-1] == ((1401, 10, 2) if dest == 0 else (1416, 0, 1))
+        assert motions[-1] == ((1401, 10, 6) if dest == 0 else (1416, 0, 4))
     for yaw, expected in (
         (0x4000, 35),
         (-0x4000, 33),
@@ -526,6 +525,19 @@ def replay(g, actor, descriptor, set_action, allow_transition):
         state = tick(0, common=1 << 8)
         assert state == 84, (sheath_delta, state)
 
+    for sprint in (85, 71, 82):
+        begin(0)
+        tick(56)
+        for _ in range(32):
+            g.run(g.hooks[0x119F574], actor, hit, target, 1)
+        set_action(16, 0x8000 + sprint)
+        tick(0, common=1 << 27)
+        g.put(actor + 10096, g.get(actor + 10096) | 1)
+        g.put(actor + 5124, 0x1000)
+        assert tick(2) == 84, sprint
+        g.put(actor + 10096, g.get(actor + 10096) & ~1)
+        g.put(actor + 5124, 0)
+
     from verify_hud import replay as replay_hud
     replay_hud(g, actor, begin, tick, set_action, drawn, target, shape)
 
@@ -535,6 +547,7 @@ def replay(g, actor, descriptor, set_action, allow_transition):
     part_vt, body, bone, getter, idx = [g.alloc(n) for n in (480, 460, 64, 4, 16)]
     g.put(target, part_vt)
     g.put(target + 5160, body)
+    g.put(part_vt + 84, getter)
     g.put(part_vt + 208, getter)
     g.cpu.mem_write(bone, struct.pack("<16f", *(float(i % 5 == 0) for i in range(16))))
     g.stub(getter, lambda *_: bone)
@@ -572,6 +585,7 @@ def replay(g, actor, descriptor, set_action, allow_transition):
     manager = g.get(0x1857830)
     for tier, first, power in ((76, 14, 10), (83, 12, 60), (84, 12, 180)):
         for group_id in (64, 1):
+            half(part, 1010 if tier == 83 else 0)
             begin(tier)
             tick(first)
             g.run(g.hooks[0x119F574], actor, hit, target, 1)
@@ -616,7 +630,7 @@ def replay(g, actor, descriptor, set_action, allow_transition):
         g.run(g.hooks[0x898AC0], view)
         assert seen[-1] == 0
         put_float(view + 28, 0)
-    assert any(clip == 1443 and blend == 1 for clip, _, blend in motions)
+    assert any(clip == 1443 and blend == 4 for clip, _, blend in motions)
     # Run the charge controller over a dry and submerged sample of the same
     # rotated node offset. Capture GU particle selectors and positional cues.
     routes = list(

@@ -25,6 +25,17 @@ pub const fn sheathe_motions(sprints: &'static [u8], sprint_clip: u16) -> Sheath
     }
 }
 
+/// Start a Frontier step with its original pose interpolation clock.
+///
+/// # Safety
+/// The actor and motion request must be valid for the active hunter.
+pub unsafe fn play_step(actor: u32, request: u32, start: u16, blend: u16) -> Option<u16> {
+    let frames = 2. * crate::action::blend_ticks(blend);
+    let packed = unsafe { action::play_motion(actor, request, f32::from(start), frames) }?;
+    unsafe { mhgu_sdk::weapon::style::part_motion::begin_motion(actor, packed, frames) };
+    Some(packed)
+}
+
 pub struct MotionBanks(GuMotionBanks<3>);
 
 impl MotionBanks {

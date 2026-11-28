@@ -133,6 +133,78 @@ fn upgrade_offer(item: mhgu_sdk::weapon::WeaponInstance) -> Option<Offer> {
     Some(Offer { equipment, kind, instance: Some(item.id), recipe })
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum SalePrice { Fixed(u32), Native(u32) }
+static SALE_PRICES: Shared<BTreeMap<(u16, u16), SalePrice>> = Shared::new(BTreeMap::new());
+
+extern "C" fn register_sale(id: u16, level: u16, zenny: u32) -> u32 {
+    if zenny > 9_999_999 { return 1; }
+    register_price(id, level, SalePrice::Fixed(zenny))
+}
+
+extern "C" fn register_native_sale(id: u16, level: u16, header: u32) -> u32 {
+    if !(7..=21).contains(&(header & 31)) || header >> 16 == 0 || header & 0xfc00 != 0 { return 1; }
+    register_price(id, level, SalePrice::Native(header))
+}
+
+fn register_price(id: u16, level: u16, price: SalePrice) -> u32 {
+    if !inventory::definition(id).is_some_and(|(_, d)| level <= d.max_upgrade()) {
+        return 1;
+    }
+    SALE_PRICES.with(|rows| match rows.entry((id, level)) {
+        alloc::collections::btree_map::Entry::Vacant(entry) => { entry.insert(price); 0 }
+        alloc::collections::btree_map::Entry::Occupied(entry) => if *entry.get() == price { 0 } else { 2 }
+    })
+}
+
+pub(super) fn native_level_header(equipment: u16, upgrade: u16) -> Option<u32> {
+    SALE_PRICES.with(|rows| match rows.get(&(equipment, upgrade)) {
+        Some(SalePrice::Native(header)) => Some(*header),
+        _ => None,
+    })
+}
+
+pub(super) fn sale_price(item: mhgu_sdk::weapon::WeaponInstance) -> Option<u32> {
+    let source = SALE_PRICES.with(|rows| rows.get(&(item.equipment.get(), item.upgrade)).copied())?;
+    let mut price = match source {
+        SalePrice::Fixed(price) => price,
+        SalePrice::Native(header) => {
+            let mut record = [0u32; 11];
+            record[1] = header;
+            let save = global(0x1856fe8);
+            if save == 0 { return None; }
+            unsafe { gu!(0x1434e4, save, record.as_ptr() as u32) }
+        }
+    };
+    // GU 1434E4 includes the item sale price of each installed decoration.
+    for jewel in super::decorations::installed(item.id).into_iter().filter(|&j| j != 0) {
+        let record = item_record(jewel);
+        if record == 0 { return None; }
+        price = price.saturating_add(unsafe { read::<u32>(record + 28) });
+    }
+    Some(price.min(9_999_999))
+}
+
+pub(super) fn sell(item: mhgu_sdk::weapon::WeaponInstance, quote: u32) -> bool {
+    let player = wallet();
+    if player == 0 || !character_loaded() || inventory::owned_equipment(item.id).map(|r| r.0) != Some(item)
+        || sale_price(item) != Some(quote) { return false; }
+    let removed = CHARACTER.with(|p| {
+        let bag = &mut p.inventory;
+        if bag.equipped == Some(item.id) || bag.instances.remove(&item.id).is_none() { return false; }
+        bag.decorations.remove(&item.id);
+        bag.sets.retain(|slot, link| {
+            if link.instance != item.id { return true; }
+            p.equipment_sets.remove(slot);
+            false
+        });
+        if let Some(slot) = bag.slots.iter_mut().find(|id| **id == item.id) { *slot = 0; }
+        true
+    });
+    // The native sale controller credits its wallet exactly once.
+    removed
+}
+
 fn wallet() -> u32 {
     global(0x1897f78)
 }
@@ -146,7 +218,7 @@ fn balance() -> u32 {
     }
 }
 
-fn item_record(item: u16) -> u32 {
+pub(super) fn item_record(item: u16) -> u32 {
     let table = global(0x18583a8);
     if table == 0 || unsafe { read::<u32>(table + 28) } == 0 {
         0
@@ -155,7 +227,7 @@ fn item_record(item: u16) -> u32 {
     }
 }
 
-fn available(item: u16) -> u32 {
+pub(super) fn available(item: u16) -> u32 {
     if global(0x18584b8) == 0 || global(0x1858438) == 0 {
         return 0;
     }
@@ -269,6 +341,8 @@ pub(super) fn install(base: u32) {
         forge,
         upgrade,
     };
+    static SALE: trade::SaleRegistration = trade::SaleRegistration { price: register_sale, native_row: register_native_sale };
+    unsafe { trade::publish_sale(&SALE); }
     if unsafe { trade::publish(&API) } {
         menu::install(base);
     }
