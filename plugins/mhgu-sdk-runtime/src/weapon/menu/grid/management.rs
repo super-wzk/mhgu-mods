@@ -1,9 +1,9 @@
 //! Inventory operations called by GU's sale, arrange and decoration controllers.
-use super::{GRID, for_save, gu, inventory, projected, row, set};
+use super::{GRID, box_size, for_save, gu, inventory, projected, row, set};
 use super::{panel_owner, read, scope};
 use crate::{
     save::{CHARACTER, INVENTORY_LIMIT},
-    weapon::{decorations, records, trade},
+    weapon::{decorations, records, sets, trade},
 };
 use mhgu_sdk::weapon::WeaponInstance;
 
@@ -41,13 +41,6 @@ unsafe fn sell(save: u32, kind: u32, slot: u32) -> u32 {
     price
 }
 
-// Both entries have a PC-relative second instruction. Resume original code
-// with the literal load / conditional branch evaluated at its GU address.
-#[unsafe(naked)]
-unsafe extern "C" fn retail_eligibility(_: u32, _: u32, _: u32, _: u32) -> u32 {
-    core::arch::naked_asm!("push {{r4-r9,r11,lr}}", "ldr r0, [r3, #0x228]", "bx r3");
-}
-
 #[forge::hook(offset = 0x14426c)]
 unsafe fn eligibility(save: u32, kind: u32, slot: u32) -> u32 {
     if kind == 0 && for_save(save).is_some() {
@@ -61,12 +54,23 @@ unsafe fn eligibility(save: u32, kind: u32, slot: u32) -> u32 {
             2
         };
     }
-    unsafe { retail_eligibility(save, kind, slot, forge::mem::text_addr() + 0x144274) }
-}
-
-#[unsafe(naked)]
-unsafe extern "C" fn retail_set(_: u32, _: u32, _: u32, _: u32) -> u32 {
-    core::arch::naked_asm!("cmp r1, #0", "addeq r3, r3, #0x50", "bx r3");
+    // 14426C has a PC-relative prologue. Use the complete GU entry for the
+    // equipped check and the physical record in the global save for the rest.
+    unsafe {
+        if slot == 0xffff || slot >= box_size(save, kind) {
+            return 3;
+        }
+        if gu!(0x1444b4, save, kind, slot) != 0 {
+            return 1;
+        }
+        let native_save = read::<u32>(forge::mem::text_addr(), 0x1856fe8);
+        let first = if kind == 0 { 28 } else { 88028 };
+        let record = native_save + first + 44 * slot;
+        if read::<u8>(record, 4) & 31 == 0 {
+            return 3;
+        }
+        2 * gu!(0xdb070, record)
+    }
 }
 
 #[forge::hook(offset = 0x148340)]
@@ -84,7 +88,8 @@ unsafe fn set_index(save: u32, kind: u32, slot: u32) -> u32 {
             })
             .unwrap_or(255);
     }
-    unsafe { retail_set(save, kind, slot, forge::mem::text_addr() + 0x148348) }
+    // The native prologue branches PC-relatively and Recomp needs full entry points.
+    unsafe { sets::stock_set_index(save, kind, slot) }
 }
 
 #[forge::hook(offset = 0x143a14)]

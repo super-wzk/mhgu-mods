@@ -1,5 +1,5 @@
 //! A timed ground restraint through GU's common monster action graph.
-use super::{HurtScene, Monster, MonsterSpawn, monster_in_area};
+use super::{HurtScene, Monster, MonsterSpawn, ROSTER_SLOTS, monster_in_area};
 use crate::{
     memory::{Field, Object, singleton},
     service,
@@ -106,7 +106,7 @@ impl MonsterSpawn {
         let Some(roster) = (unsafe { singleton(super::ROSTER) }) else {
             return false;
         };
-        (0..10)
+        (0..ROSTER_SLOTS)
             .filter_map(|slot| monster_in_area(roster, slot, area))
             .find(|monster| monster.spawn == *self)
             .is_some_and(|monster| monster.accepts_paralysis())

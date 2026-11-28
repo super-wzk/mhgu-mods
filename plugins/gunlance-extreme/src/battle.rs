@@ -24,6 +24,8 @@ use mhgu_sdk::{
 };
 
 const SHEATHE: u8 = 13;
+// Ignition keeps the loaded shells. Its packet can use the spare ammo value.
+const FAST_IGNITION: u8 = 7;
 const TERRAIN: CommandSet = CommandSet::new(&[]).retaining_native(1, movement::CLIMBS);
 
 #[derive(Default)]
@@ -44,7 +46,7 @@ struct Battle {
     steam: f32,
     next_steam: f32,
     reload_rounds: u8,
-    received_ammo: Option<(u8, u8)>,
+    received_state: Option<(u8, u8)>,
     synced_ammo: bool,
     area: u8,
     rounds: u8,
@@ -146,16 +148,26 @@ impl Battle {
         }
         unsafe {
             let a = self.actor;
-            let count = self
-                .received_ammo
+            let received = self
+                .received_state
                 .take()
                 .filter(|&(action, _)| action == state);
-            self.synced_ammo = count.is_some();
-            if let Some((_, count)) = count {
+            let fast_ignition = state == program::HEAT_BLADE
+                && if self.local {
+                    shell::artillery_expert(a)
+                } else {
+                    received == Some((state, FAST_IGNITION))
+                };
+            self.synced_ammo = received.is_some() && !fast_ignition;
+            if let Some((_, count)) = received.filter(|_| !fast_ignition) {
                 shell::sync_ammo(a, count);
             }
             write(a, 5, 1u8);
             native!(0x282fd8, a, 0, u32::from(state != program::SPRINT), 0);
+            if state == program::HEAT_BLADE {
+                // FZ 81207560 sets the rate for both steps of ignition.
+                action::set_motion_rate(a, if fast_ignition { 1.5 } else { 1. });
+            }
             if native!(0x2a2444, a) == 0 {
                 native!(0x2a264c, a, 1);
             }
@@ -1025,16 +1037,16 @@ pub unsafe extern "C" fn request(actor: u32, raw: *const ActionRequest) -> u32 {
 }
 
 // GU sends its action before the first animation event consumes or reloads shells.
-unsafe extern "C" fn encode_ammo(actor: u32) -> u8 {
+unsafe extern "C" fn encode_state(actor: u32) -> u8 {
     let (group, slot) = unsafe { action::current(actor) };
-    if action::custom_id(group, slot).is_some() {
-        unsafe { shell::ammo(actor) }
-    } else {
-        u8::MAX
+    match action::custom_id(group, slot) {
+        Some(program::HEAT_BLADE) if unsafe { shell::artillery_expert(actor) } => FAST_IGNITION,
+        Some(_) => unsafe { shell::ammo(actor) },
+        None => u8::MAX,
     }
 }
 
-unsafe extern "C" fn decode_ammo(actor: u32, count: u8) {
+unsafe extern "C" fn decode_state(actor: u32, value: u8) {
     unsafe {
         if read::<u8>(actor, 5) != 0 {
             return;
@@ -1052,7 +1064,7 @@ unsafe extern "C" fn decode_ammo(actor: u32, count: u8) {
                 fx_owner: index + 1,
                 ..Battle::default()
             });
-            battle.received_ammo = (count != u8::MAX).then_some((state, count));
+            battle.received_state = (value != u8::MAX).then_some((state, value));
         });
     }
 }
@@ -1061,8 +1073,8 @@ pub(super) static PLAYBACK: remote::Playback = remote::Playback {
     tick: peer,
     observe: Some(observe),
     action_state: Some(&remote::ActionState {
-        encode: encode_ammo,
-        decode: decode_ammo,
+        encode: encode_state,
+        decode: decode_state,
     }),
 };
 

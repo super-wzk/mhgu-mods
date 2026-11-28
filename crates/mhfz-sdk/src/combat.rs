@@ -1,10 +1,8 @@
 //! Frontier attack, guard and evade timing on GU's motion clock.
 
-/// Convert the SDT attacker's stop time (byte 29) to a GU HDP factor.
-/// FZ 816F9840 / 81820D7A count 30 Hz ticks. GU 16DB68 uses three 60 Hz
-/// frames per factor for a full stop and keeps its native slowdown rules.
+/// Preserve SDT byte 29, which FZ 816F9840 / 81820D7A count in 30 Hz ticks.
 pub const fn attacker_hitstop(source_ticks: u8) -> u8 {
-    ((2 * source_ticks as u16 + 1) / 3) as u8
+    mhgu_sdk::weapon::style::action::hitstop::frontier(source_ticks)
 }
 
 /// Convert SDT delay and duration to GU contact clock units. 8183F4DE

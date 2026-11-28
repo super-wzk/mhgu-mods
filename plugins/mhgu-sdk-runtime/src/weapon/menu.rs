@@ -15,16 +15,33 @@ pub(super) unsafe fn details(
     level: u32,
     jewels: crate::weapon::decorations::Jewels,
 ) {
-    unsafe { details_with_stats(panel, entry, level, jewels, 0) }
+    if panel != 0 {
+        unsafe {
+            gu!(0x57f468, panel, 0, 0, 0, 0, 0, 0, 0);
+            set(panel, 80, 0u32);
+            details_with_stats(panel, entry, level, jewels, DetailStats::default());
+        }
+    }
 }
 
-unsafe fn details_with_stats(panel: u32, entry: Option<inventory::RegisteredEquipment>, level: u32,
-    jewels: crate::weapon::decorations::Jewels, aggregate: u32) {
+#[derive(Clone, Copy, Default)]
+struct DetailStats {
+    equipment: u32,
+    compared_record: u32,
+    compared_equipment: u32,
+}
+
+unsafe fn details_with_stats(
+    panel: u32,
+    entry: Option<inventory::RegisteredEquipment>,
+    level: u32,
+    jewels: crate::weapon::decorations::Jewels,
+    stats: DetailStats,
+) {
     if panel == 0 {
         return;
     }
     unsafe {
-        gu!(0x57f468, panel, 0, 0, 0, 0, 0, 0, 0);
         if let Some(entry) = entry {
             gu!(0x56e528, panel, 17, 1);
 
@@ -45,7 +62,15 @@ unsafe fn details_with_stats(panel: u32, entry: Option<inventory::RegisteredEqui
                     gu!(0x56ea08, panel, 6, 1, entry.details.as_ptr() as u32);
                     gu!(0x56e530, panel, 6, 5, 0);
                 } else {
-                    stat_page(panel, records::DisplayEquipment { definition: entry, upgrade: upgrade as u16, jewels }, aggregate);
+                    stat_page(
+                        panel,
+                        records::DisplayEquipment {
+                            definition: entry,
+                            upgrade: upgrade as u16,
+                            jewels,
+                        },
+                        stats,
+                    );
                 }
             }
         }
@@ -95,22 +120,57 @@ pub(super) fn owned_count(equipment: u16, upgrade: u16) -> (u32, bool) {
     (count, room)
 }
 
-/// Populate GU's native weapon stat groups (57F9BC / 57FBC0). The scratch object is used
-/// as the identity for the native stat readers during this synchronous draw.
-unsafe fn stat_page(
-    panel: u32,
-    weapon: records::DisplayEquipment,
-    aggregate: u32,
-) {
+fn affinity(base: i32, equipment: u32) -> (i32, bool) {
+    unsafe {
+        // DEE34 stores base affinity at cEquip+338. Only use GU's skill
+        // result when the aggregate was calculated from the displayed base.
+        if equipment != 0
+            && i32::from(read::<i16>(equipment, 338)) == base
+            && gu!(0xe1bb0, equipment + 4, 16) != 0
+        {
+            return ((gu!(0xe173c, equipment + 4, 16) as i32).min(100), true);
+        }
+    }
+    (base, false)
+}
+
+unsafe fn stat_color(panel: u32, group: u32, part: u32, color: u32) {
+    unsafe {
+        let palette = read::<u32>(forge::mem::text_addr(), 0x1899458);
+        gu!(0x56e6fc, panel, group, part, gu!(0x560e90, palette, color));
+    }
+}
+
+fn comparison_color(value: i32, compared: Option<i32>, default: u32) -> u32 {
+    match compared.map(|other| value.cmp(&other)) {
+        Some(core::cmp::Ordering::Less) => 3,
+        Some(core::cmp::Ordering::Greater) => 10,
+        _ => default,
+    }
+}
+
+/// Populate GU's weapon stat groups from the displayed instance on either
+/// side of the comparison. The scratch record supplies identity to native widgets.
+unsafe fn stat_page(panel: u32, weapon: records::DisplayEquipment, stats: DetailStats) {
     unsafe {
         let e = weapon.definition;
         let level = weapon.level();
         let jewels = weapon.jewels;
         let scratch = [0u32; 11];
         let record = scratch.as_ptr() as u32;
-        set(panel, 80, 0u32);
+        let compared = stats.compared_record;
+        let flags = (read::<u32>(panel, 80) & !0xc000)
+            | (u32::from(compared != 0) * 0x4000)
+            | (u32::from(stats.equipment != 0) * 0x8000);
+        set(panel, 80, flags);
+        set(panel, 184, stats.equipment);
+        set(panel, 188, stats.compared_equipment);
         let ranged = e.kind.ranged;
         let group = if ranged { 4 } else { 2 };
+        let layout = read::<u32>(panel, 36);
+        if layout != 0 {
+            gu!(0x54533c, layout, if ranged { 2 } else { 4 }, 0);
+        }
         gu!(0x56e528, panel, group, 1);
         let messages = read::<u32>(forge::mem::text_addr(), 0x1899220);
         if messages == 0 {
@@ -119,30 +179,55 @@ unsafe fn stat_page(
         let hidden: &[u32] = if ranged {
             &[20, 28]
         } else {
-            &[3, 4, 7, 9, 10, 20, 33, 34, 35, 39, 41, 45, 50]
+            &[3, 4, 5, 6, 7, 33, 34, 35, 38, 39, 41, 42, 43, 44, 45, 50]
         };
         for &part in hidden {
             gu!(0x56e530, panel, group, part, 0);
         }
+        let compared_level = records::for_record(compared).map(|other| other.level());
+        let other_attack = (compared != 0).then(|| {
+            compared_level.map_or_else(|| gu!(0xdb7e0, compared) as i32, |l| i32::from(l.attack))
+        });
+        let other_affinity = (compared != 0).then(|| {
+            let base = compared_level
+                .map_or_else(|| gu!(0xdb88c, compared) as i32, |l| i32::from(l.affinity));
+            affinity(base, stats.compared_equipment).0
+        });
+        let attack = i32::from(level.attack);
+        gu!(0x56e808, panel, group, 1, gu!(0x55bc4c, messages, 1, 54));
+        gu!(0x56fde0, panel, group, 2, attack as u32, 0, 0);
+        stat_color(panel, group, 2, comparison_color(attack, other_attack, 0));
+
+        let (affinity_value, enhanced) = affinity(i32::from(level.affinity), stats.equipment);
+        let (label, penalty, number, penalty_label, percent) =
+            if ranged { (7, 8, 10, 9, 11) } else { (25, 26, 28, 27, 29) };
+        gu!(0x56e530, panel, group, penalty, 0);
+        gu!(0x56e530, panel, group, penalty_label, 0);
+        gu!(0x56e808, panel, group, label, gu!(0x55bc4c, messages, 9, 261));
+        gu!(0x56fde0, panel, group, number, affinity_value as u32, 0, 0);
+        stat_color(panel, group, label, if enhanced { 6 } else { 5 });
+        let color = comparison_color(affinity_value, other_affinity, u32::from(enhanced) * 6);
+        stat_color(panel, group, number, color);
+        stat_color(panel, group, percent, color);
+
         records::with_record(record, weapon, || {
-            gu!(0x585910, panel, record, 0, group, 1, 2);
             if ranged {
-                gu!(0x585e98, panel, record, 0, 4, 7, 8, 10, 9, 11);
-                gu!(0x586398, panel, record, 0, 4, 12, 14, 13);
-                return;
+                gu!(0x586398, panel, record, compared, 4, 12, 14, 13);
+            } else {
+                gu!(0x586398, panel, record, compared, 2, 30, 32, 31);
+                if e.equipment.elements.iter().any(|element| element.id() != 0) {
+                    let first = [2u32, 38 | (5 << 16), 6];
+                    let second = [2u32, 42 | (43 << 16), 44];
+                    gu!(
+                        0x586574,
+                        panel,
+                        record,
+                        compared,
+                        first.as_ptr() as u32,
+                        second.as_ptr() as u32
+                    );
+                }
             }
-            gu!(0x585e98, panel, record, 0, 2, 25, 26, 28, 27, 29);
-            gu!(0x586398, panel, record, 0, 2, 30, 32, 31);
-            let first = [2u32, 38 | (5 << 16), 6];
-            let second = [2u32, 42 | (43 << 16), 44];
-            gu!(
-                0x586574,
-                panel,
-                record,
-                0,
-                first.as_ptr() as u32,
-                second.as_ptr() as u32
-            );
         });
         let slot_label = if ranged { 3 } else { 21 };
         gu!(
@@ -156,11 +241,23 @@ unsafe fn stat_page(
         if ranged {
             return;
         }
-        sharpness_bar(panel, level, aggregate);
+        sharpness_bar(panel, level, stats.equipment, stats.compared_equipment);
     }
 }
 
-unsafe fn sharpness_bar(panel: u32, level: mhgu_sdk::weapon::EquipmentLevel, aggregate: u32) {
+fn handicraft(equipment: u32) -> u32 {
+    if equipment == 0 {
+        return 0;
+    }
+    let has_skill = |skill| unsafe { gu!(0x26fe08, equipment, skill) != 0 };
+    if [83, 277, 295].into_iter().any(has_skill) {
+        2
+    } else {
+        u32::from([84, 281, 299, 309].into_iter().any(has_skill))
+    }
+}
+
+unsafe fn sharpness_bar(panel: u32, level: mhgu_sdk::weapon::EquipmentLevel, aggregate: u32, compared: u32) {
     unsafe {
         let messages = read::<u32>(forge::mem::text_addr(), 0x1899220);
         if messages == 0 { return; }
@@ -172,19 +269,38 @@ unsafe fn sharpness_bar(panel: u32, level: mhgu_sdk::weapon::EquipmentLevel, agg
             return;
         }
         gu!(0x56e808, panel, 2, 8, gu!(0x55bc4c, messages, 9, 259));
-        // E173C stat 14 is the final sharpness level, including Handicraft.
-        let rank = if aggregate != 0 {
-            gu!(0xe173c, aggregate + 4, 14)
-        } else { u32::from(level.sharpness_level) };
-        let limit = (150 + 25 * rank.min(12)).min(450);
+        let base_rank = u32::from(level.sharpness_level);
+        let bonus = if base_rank < 12 { handicraft(aggregate) } else { 0 };
+        let limit = 150 + 25 * (base_rank + bonus).min(12);
         let scale = read::<f32>(panel, 192) / 450.;
-        for i in 0..7 {
-            let part = read::<u32>(forge::mem::text_addr() + 0x163010c, 4 * i);
-            let boundary = u32::from(curve[i as usize]).min(limit);
-            let width = (scale * boundary as f32) as u32 as f32;
+        let width_at = |boundary| (scale * u32::from(boundary).min(limit) as f32) as u32 as f32;
+        let set_part = |offset: u32, part: u32, value: f32| {
+            core::arch::asm!("blx {draw}", draw = in(reg) forge::mem::text_addr() + offset,
+                in("r0") layout, in("r1") 2u32, in("r2") part, in("s0") value, clobber_abi("C"));
+        };
+        for (i, boundary) in curve.into_iter().enumerate() {
+            let part = read::<u32>(forge::mem::text_addr(), 0x163010c + 4 * i as u32);
             gu!(0x56e530, panel, 2, part, 1);
-            core::arch::asm!("blx {draw}",draw=in(reg) forge::mem::text_addr()+0x546afc,
-                in("r0") layout,in("r1") 2u32,in("r2") part,in("s0") width,clobber_abi("C"));
+            set_part(0x546afc, part, width_at(boundary));
+        }
+        gu!(0x56e530, panel, 2, 9, u32::from(bonus == 2));
+        gu!(0x56e530, panel, 2, 10, u32::from(bonus == 1));
+        gu!(0x56e530, panel, 2, 20, u32::from(bonus != 0));
+        if bonus != 0 {
+            // 5859F4 anchors the selected marker at the end of the coloured bar.
+            let start = gu!(0x545ce8, layout, 2, 12);
+            let x = read::<f32>(start, 0) + width_at(curve[6]) + 1.;
+            set_part(0x545c78, 11 - bonus, x);
+            let color = if compared == 0 { 6 } else {
+                match bonus.cmp(&handicraft(compared)) {
+                    core::cmp::Ordering::Less => 3,
+                    core::cmp::Ordering::Equal => 6,
+                    core::cmp::Ordering::Greater => 10,
+                }
+            };
+            let palette = read::<u32>(forge::mem::text_addr(), 0x1899458);
+            gu!(0x56e6fc, panel, 2, 20, gu!(0x560e90, palette, color));
+            gu!(0x56ffac, panel, 2, 20, gu!(0x55bc4c, messages, 1, 5), bonus);
         }
     }
 }
@@ -194,7 +310,8 @@ unsafe fn sharpness_detail(panel: u32, record: u32) -> u32 {
         unsafe {
             let flags = read::<u32>(panel, 80);
             let aggregate = if flags & 0x8000 != 0 { read(panel, 184) } else { 0 };
-            sharpness_bar(panel, w.definition.levels[usize::from(w.upgrade)], aggregate);
+            let compared = if flags & 0x4000 != 0 { read(panel, 188) } else { 0 };
+            sharpness_bar(panel, w.level(), aggregate, compared);
         }
         return 0;
     }
@@ -531,8 +648,8 @@ unsafe fn equipment_overview(ui: u32) -> u32 {
     out
 }
 
-// 674880 renders the pause menu with a stack copy of cEquip for totals,
-// while passing the selected row from the real character as the item.
+// 674880 (pause menu) and 72AB38 (change equipment) pass a weapon record
+// and separate cEquip copies for skill-adjusted values.
 #[forge::hook(offset = 0x57f468)]
 unsafe fn status_weapon_details(
     panel: u32,
@@ -556,68 +673,44 @@ unsafe fn status_weapon_details(
     );
     unsafe {
         let page = read::<u32>(panel, 248);
-        if let Some(weapon) = records::for_record(record)
-            && compared == 0 && other == 0 && matches!(page, 0..=2 | 5)
-        {
+        if let Some(weapon) = records::for_record(record) && matches!(page, 0..=2 | 5) {
+            let compare = flags & 0x4000 != 0 && other != 0;
             details_with_stats(
                 panel,
                 Some(weapon.definition),
                 u32::from(weapon.upgrade) + 1,
                 weapon.jewels,
-                if flags & 0x8000 != 0 { equipment } else { 0 },
+                DetailStats {
+                    equipment: if flags & 0x8000 != 0 { equipment } else { 0 },
+                    compared_record: if compare { compared } else { 0 },
+                    compared_equipment: if compare { other } else { 0 },
+                },
             );
         }
     }
     out
 }
 
-static STATUS_LIST: Shared<Option<(u32, records::DisplayEquipment)>> = Shared::new(None);
-
-unsafe fn draw_status_list(ui: u32) {
-    let weapon = STATUS_LIST.with(|list| list.filter(|(panel, _)| *panel == ui));
-    if let Some((_, weapon)) = weapon {
-        unsafe {
-            let group = read(forge::mem::text_addr(), 0x163053c);
-            gu!(
-                0x56e808,
-                ui,
-                group,
-                2,
-                weapon.definition.name.as_ptr() as u32
-            );
-            icon::equipment(ui, group, 1, weapon.definition);
-        }
-    }
-}
-
 #[forge::hook(offset = 0x589bc4)]
 unsafe fn init_status_list(ui: u32) -> u32 {
-    STATUS_LIST.with(|list| {
-        if list.is_some_and(|(panel, _)| panel == ui) {
-            *list = None;
-        }
-    });
+    records::assign(ui + 80, None);
     original!(ui)
 }
 
 #[forge::hook(offset = 0x589d50)]
 unsafe fn load_status_list(ui: u32, equipment_data: u32) -> u32 {
     let out = original!(ui, equipment_data);
-    STATUS_LIST.with(|list| {
-        *list = equipment_data
+    unsafe {
+        let weapon = equipment_data
             .checked_sub(4)
-            .and_then(|equip| unsafe { records::display(equip) })
-            .map(|weapon| (ui, weapon));
-    });
-    unsafe { draw_status_list(ui) };
-    out
-}
-
-#[forge::hook(offset = 0x589c74)]
-unsafe fn refresh_status_list(ui: u32) -> u32 {
-    let out = original!(ui);
-    if unsafe { gu!(0x553b64, ui + 388) } == 1 {
-        unsafe { draw_status_list(ui) };
+            .and_then(|equip| records::display(equip));
+        // 589C74 redraws from the panel's copy after consuming the UI revision.
+        records::assign(ui + 80, weapon);
+        if let Some(weapon) = weapon {
+            let group = read(forge::mem::text_addr(), 0x163053c);
+            gu!(0x56e808, ui, group, 2, weapon.definition.name.as_ptr() as u32);
+            icon::equipment(ui, group, 1, weapon.definition);
+        }
     }
     out
 }
@@ -706,7 +799,6 @@ pub(super) fn install(base: u32) {
     forge::install_hook!(base, status_weapon_details);
     forge::install_hook!(base, init_status_list);
     forge::install_hook!(base, load_status_list);
-    forge::install_hook!(base, refresh_status_list);
     forge::install_hook!(base, load_set_preview);
     forge::install_hook!(base, init_set_label);
     forge::install_hook!(base, draw_set_label);

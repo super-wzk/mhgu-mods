@@ -8,8 +8,9 @@
 同向推两次{摇杆}	持刀冲刺
 
 【斩击与打击】
-斩击中 <SIZE 28><COL E6E6E6FF><ICON PAD_ZR></COL></SIZE>	防御反击
+斩击中 <SIZE 28><COL E6E6E6FF><ICON PAD_ZR></COL></SIZE>	防御反击，威力最高三档
 打击中 <SIZE 28><COL E6E6E6FF><ICON PAD_ZR></COL></SIZE>	精准防御
+挡下怪物攻击	停顿，连挡会延长停顿
 精准防御成功后{X}或{X}+{A}	防御强袭
 打击中{摇杆}+{A}	移动攻击
 打击中连续三次{A}	第三击按住蓄力

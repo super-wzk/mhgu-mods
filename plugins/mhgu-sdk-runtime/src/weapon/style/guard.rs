@@ -236,7 +236,7 @@ pub(super) unsafe extern "C" fn take(actor: u32) -> u32 {
             return 0;
         }
         clear(actor);
-        let monster = ((actor + 12826) as *const u16).read() != 0xffff;
+        let monster = guard::is_monster_contact(actor);
         // Finish native recoil setup before the style starts its follow-up.
         let recoil: unsafe extern "C" fn(u32) -> u32 =
             core::mem::transmute(forge::mem::text_addr() + 0x2c4eec);

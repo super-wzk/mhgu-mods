@@ -78,7 +78,7 @@ impl Strike {
         row[3] = self.damage as u32;
         row[4] = 2;
         row[8] = (255 << 24) | (u32::from(self.stun.min(127)) << 16);
-        row[9] = 255 | (u32::from(self.hitstop) << 8);
+        row[9] = 255 | (u32::from(super::hitstop::native_factor(self.hitstop)) << 8);
         row[10] = 1f32.to_bits();
         row[11] = 1f32.to_bits();
         row[12] = row[1];
@@ -166,6 +166,19 @@ pub unsafe fn hitstop_active(actor: u32) -> bool {
     unsafe {
         ((actor + FULL_HITSTOP) as *const f32).read() > 0.
             || ((actor + SLOW_HITSTOP) as *const f32).read() > 0.
+    }
+}
+
+/// Add GU scene frames to the full-stop clock and return its remaining time.
+///
+/// # Safety
+/// The actor must be the live local hunter on the game thread.
+pub unsafe fn extend_full_hitstop(actor: u32, frames: f32) -> f32 {
+    let timer = (actor + FULL_HITSTOP) as *mut f32;
+    unsafe {
+        let remaining = timer.read().max(0.) + frames;
+        timer.write(remaining);
+        remaining
     }
 }
 

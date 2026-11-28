@@ -684,7 +684,9 @@ impl Meters {
                 self.network.end(ticket);
             }
         }
-        for monster in scene.monsters() {
+        let monsters = scene.snapshot_monsters();
+        let meter_candidates = (!self.meters.is_empty()).then(|| monsters.iter().flatten());
+        for monster in meter_candidates.into_iter().flatten() {
             let Some(meter) = self
                 .meters
                 .iter_mut()
@@ -720,7 +722,7 @@ impl Meters {
                     }
                 }
                 if !monster.ground_held() {
-                    meter.flashes.update(&monster, frames);
+                    meter.flashes.update(monster, frames);
                 }
             }
             if local && let Some(member) = monster.network_controller() {
@@ -763,7 +765,7 @@ impl Meters {
                 meter.sent = None;
             }
         }
-        self.update_effects(scene, pulse, aura);
+        self.update_effects(&monsters, area, pulse, aura);
         outgoing
     }
 
@@ -789,22 +791,28 @@ impl Meters {
         }
     }
 
-    fn update_effects(&mut self, scene: &HurtScene<'_>, pulse: bool, aura: bool) {
-        let area = scene.area();
+    fn update_effects(
+        &mut self,
+        monsters: &[Option<Monster<'_>>],
+        area: u8,
+        pulse: bool,
+        aura: bool,
+    ) {
+        let monsters = || monsters.iter().flatten();
         self.effects.retain(|saved| {
             if saved.area != area {
                 return false;
             }
-            let Some(monster) = scene.find_spawn(saved.spawn) else {
+            let Some(monster) = monsters().find(|monster| monster.spawn() == saved.spawn) else {
                 return false;
             };
             if monster.ground_held() {
                 return true;
             }
-            saved.effects.release(&monster, saved.joint);
+            saved.effects.release(monster, saved.joint);
             false
         });
-        for monster in scene.monsters().filter(Monster::ground_held) {
+        for monster in monsters().filter(|monster| monster.ground_held()) {
             let spawn = monster.spawn();
             let index = self.effects.iter().position(|saved| saved.spawn == spawn);
             let effect = if let Some(index) = index {
@@ -819,7 +827,7 @@ impl Meters {
                 });
                 self.effects.last().unwrap()
             };
-            effect.emit(&monster, pulse, aura);
+            effect.emit(monster, pulse, aura);
         }
     }
 }

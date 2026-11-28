@@ -41,7 +41,7 @@ SET_STYLE_HOOKS |= {0x26E964, 0x5B90A8, 0x143390, 0x1437E0, 0x143A14, 0x14426C, 
                     0x1450F0, 0x14526C, 0x1454A8, 0x1456BC, 0x148340, 0x72C7E0, 0x72CEC4}
 
 PROFILE_HOOKS = {0x202640, 0x202764, 0x202894, 0x274400, 0x2776D4, 0x273BE0}
-PROFILE_HOOKS |= {0x62E258, 0x57F468, 0x546F84, 0x303790, 0x589BC4, 0x589C74, 0x589D50,
+PROFILE_HOOKS |= {0x62E258, 0x57F468, 0x546F84, 0x303790, 0x589BC4, 0x589D50, 0x553B5C, 0xDAD24,
                   0x1623B4, 0x5A41A0, 0x15FADC, 0x2744BC, 0x388AB4, 0x38EAE4,
                   0x162758, 0x5A7B00, 0x59EAA0, 0x59F560, 0x5A6CB4}
 HIT_ROW = 0x2A8A88
@@ -277,6 +277,7 @@ def boot(elf, config, order=("registry", "sword"), mount_ok=True):
             0x9FC3D8, 0x1FFFF4, 0x1F51F4,
             0x1748A8, 0x178030,  # Both GU melee hitzone resolvers.
             0x17885C,  # Native affinity multiplier.
+            0x16DB68,  # Convert a Frontier contact's attacker stop at settlement.
             0x169548,
             CHANGE_ACTION,
             COMMAND_BIND,
@@ -871,8 +872,9 @@ def verify_battle(g, p, remote, resources):
         route = g.run(DRAW_ROUTE, p, kind)
         g.run(GS_CHANGE_ACTION, p, *struct.unpack("<3H", g.cpu.mem_read(route, 6)))
 
-    def tick(frame=None, held=0, pressed=0, draw=False, native_pad=False):
+    def tick(frame=None, held=0, pressed=0, draw=False, native_pad=False, blend=0.):
         if frame is not None:
+            f(1268, blend)
             f(1276, frame + 1)
             f(1280, frame)
             f(5332, frame)
@@ -906,7 +908,7 @@ def verify_battle(g, p, remote, resources):
     def value():
         return g.half(p + 12320 + 56)
 
-    def hitstop_rates():
+    def hitstop_rates(ticks=0):
         # Run GU's contact feedback and read the actual hunter motion rate
         # for both slowdown and full stop. Preserve the surrounding scene.
         result = p + 12320 + 6
@@ -916,7 +918,8 @@ def verify_battle(g, p, remote, resources):
         rates = []
         for kind in (3, 4):
             g.cpu.mem_write(result, bytes([kind]))
-            g.run(0x16DB68, 0, p + 12320)
+            g.run(g.hooks[0x16DB68], 0, p + 12320)
+            assert struct.unpack("<2f", g.cpu.mem_read(timers, 8)) == (2. * ticks, 0.)
             g.run(0x2A80F8, p)
             rates.append(g.cpu.reg_read(arm.UC_ARM_REG_S0))
         g.cpu.mem_write(result, old_result)
@@ -1858,8 +1861,8 @@ def verify_battle(g, p, remote, resources):
     tick(86)
     hit = p + 12320
     assert value() == 200 and not whiff() and not units
-    assert g.cpu.mem_read(hit + 108, 1) == b"\x03"  # FZ melee row 247 has five ticks.
-    assert hitstop_rates() == (0x3E4CCCCD, 0)  # Blade contact: 0.2x or stopped.
+    assert g.cpu.mem_read(hit + 108, 1) == b"\x85"  # FZ melee row 247 has five ticks.
+    assert hitstop_rates(5) == (0, 0)
     shape = resources[r"player\hit\frontier_gs\guard_counter"]
     assert g.get(hit + 132) == shape and g.get(hit + 136) == 0
     assert not g.get(hit + 48) & 0x08000000
@@ -1887,11 +1890,9 @@ def verify_battle(g, p, remote, resources):
     assert guard(8, 1, False) == 1
     tick(20, held=32, pressed=32)
     tick(90)
-    f(1268, 1.)
     units.clear()
-    tick(91)
+    tick(91, blend=1.)
     assert not units
-    f(1268, 0.)
     for frame, count in [(99, 0), (101, 1), (108, 0), (109, 1)]:
         units.clear()
         tick(frame)

@@ -43,7 +43,7 @@ pub(super) fn remember(equipment: u32, weapon: Option<DisplayEquipment>) {
     assign(equipment + 24, weapon);
 }
 
-fn assign(record: u32, weapon: Option<DisplayEquipment>) -> Option<DisplayEquipment> {
+pub(super) fn assign(record: u32, weapon: Option<DisplayEquipment>) -> Option<DisplayEquipment> {
     COPIES.with(|rows| {
         if let Some(weapon) = weapon {
             rows.insert(record, weapon)
@@ -100,6 +100,24 @@ unsafe fn replace_part(dest: u32, src: u32) -> u32 {
     original!(dest, src)
 }
 
+#[forge::hook(offset = 0x553b5c)]
+unsafe fn copy_detail_part(cache: u32, src: u32) -> u32 {
+    // The original entry tail-branches to DADF0 after advancing to the record.
+    let dest = cache + 4;
+    unsafe {
+        let weapon = for_record(src);
+        let out = gu!(0xdadf0, dest, src);
+        assign(dest, weapon);
+        out
+    }
+}
+
+#[forge::hook(offset = 0xdad24)]
+unsafe fn destroy_part(record: u32) -> u32 {
+    assign(record, None);
+    original!(record)
+}
+
 #[forge::hook(offset = 0xe15f4)]
 unsafe fn clear_stats(stats: u32) -> u32 {
     remember(stats - 4, None);
@@ -137,6 +155,8 @@ pub(super) fn install(base: u32) {
     forge::install_hook!(base, read_slot);
     forge::install_hook!(base, copy_stats);
     forge::install_hook!(base, replace_part);
+    forge::install_hook!(base, copy_detail_part);
+    forge::install_hook!(base, destroy_part);
     forge::install_hook!(base, clear_stats);
     forge::install_hook!(base, destroy_stats);
 }

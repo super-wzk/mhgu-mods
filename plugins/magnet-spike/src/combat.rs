@@ -35,7 +35,7 @@ pub unsafe fn events(
     bonus: u8,
     mut on_event: impl FnMut(u16, u16, f32),
 ) {
-    while let Some((event, value, late)) = cursor.next_motion_event() {
+    while let Some((event, value, late)) = cursor.next_event() {
         match event {
             // 81225C3E switches the bind opener to airborne mode mid-clip.
             1 if value == 3 && program::is_bind_drop(cursor.state) => {

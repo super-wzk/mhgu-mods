@@ -9,6 +9,8 @@ pub use ground_hold::{
 };
 
 const ROSTER: u32 = 0x1851fe0;
+const ROSTER_SLOTS: u8 = 10;
+const ROSTER_ACTORS_OFFSET: usize = 28;
 const BACKGROUND: u32 = 0x21270e0;
 const AREA: Field<u8> = Field::at(4180);
 const MONSTER_ID: Field<u16> = Field::at(46576);
@@ -328,7 +330,15 @@ impl<'a> HurtScene<'a> {
     pub fn monsters(&self) -> impl Iterator<Item = Monster<'_>> + '_ {
         let roster = unsafe { singleton(ROSTER) };
         let area = self.area();
-        (0..10).filter_map(move |slot| monster_in_area(roster?, slot, area))
+        (0..ROSTER_SLOTS).filter_map(move |slot| monster_in_area(roster?, slot, area))
+    }
+
+    /// Capture the living same-area occupants once for several consumers in this pass.
+    /// The borrowed monsters are valid only within the current scene callback.
+    pub fn snapshot_monsters(&self) -> [Option<Monster<'_>>; ROSTER_SLOTS as usize] {
+        let roster = unsafe { singleton(ROSTER) };
+        let area = self.area();
+        core::array::from_fn(|slot| monster_in_area(roster?, slot as u8, area))
     }
 
     /// Resolve a living spawn in this area by identity, independent of its slot.
@@ -381,10 +391,8 @@ impl<'a> HurtScene<'a> {
         let Some(roster) = (unsafe { singleton(ROSTER) }) else {
             return Ok(None);
         };
-        let get: unsafe extern "C" fn(u32, u32) -> u32 =
-            unsafe { core::mem::transmute(entry(0x5ceb4)) };
-        for slot in 0..10 {
-            let Some(monster) = (unsafe { Object::at(get(roster.addr(), slot)) }) else {
+        for slot in 0..ROSTER_SLOTS {
+            let Some(monster) = roster_actor(roster, slot) else {
                 continue;
             };
             let Some(status) = (unsafe { Object::at(monster.get(Field::at(5160))) }) else {
@@ -422,7 +430,7 @@ impl<'a> HurtScene<'a> {
             {
                 return Err(LostTarget);
             }
-            target.slot = slot as u8;
+            target.slot = slot;
             target.area = self.area();
             target.monster = monster.addr();
             target.status = status.addr();
@@ -438,7 +446,7 @@ impl<'a> HurtScene<'a> {
             return None;
         }
         let roster = unsafe { singleton(ROSTER) }?;
-        let (slot, monster, status) = (0..10).find_map(|slot| {
+        let (slot, monster, status) = (0..ROSTER_SLOTS).find_map(|slot| {
             let (monster, status) = self.monster(roster, slot)?;
             (status.get(SET_ID) == contact.set_id && status.get(REVISION) == contact.revision)
                 .then_some((slot, monster, status))
@@ -482,7 +490,7 @@ impl<'a> HurtScene<'a> {
         };
         let mut nearest = None;
         let mut distance = f32::INFINITY;
-        for slot in 0..10 {
+        for slot in 0..ROSTER_SLOTS {
             let Some((monster, status)) = self.monster(roster, slot) else {
                 continue;
             };
@@ -531,10 +539,18 @@ impl<'a> HurtScene<'a> {
     }
 }
 
+fn roster_actor(roster: Object<'_>, slot: u8) -> Option<Object<'_>> {
+    if slot >= ROSTER_SLOTS {
+        return None;
+    }
+    // GU 5CEB4 bounds-checks and reads this table. GU owns slot insertion
+    // and eviction (5D410, 5D4FC), including after a hunt has started.
+    let address = roster.get(Field::at(ROSTER_ACTORS_OFFSET + 4 * usize::from(slot)));
+    unsafe { Object::at(address) }
+}
+
 fn monster_in_area(roster: Object<'_>, slot: u8, area: u8) -> Option<Monster<'_>> {
-    let get: unsafe extern "C" fn(u32, u32) -> u32 =
-        unsafe { core::mem::transmute(entry(0x5ceb4)) };
-    let actor = unsafe { Object::at(get(roster.addr(), u32::from(slot))) }?;
+    let actor = roster_actor(roster, slot)?;
     let status = live_status(actor, area)?;
     Some(Monster {
         actor,

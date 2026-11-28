@@ -68,6 +68,8 @@ GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提�
 
 [HurtScene](src/combat/collision/hurt.rs) 在碰撞回调中提供当前任务等级和按 GU 怪物表顺序迭代的同区活体怪物。借用的 `Monster` 可查询其出生标识、本地是否控制该怪物、当前启用的受击关节及关节的世界坐标，也可用 `overlaps` 查询世界坐标球是否接触其受击体积。用 `emit_joint_particle` 可在当前怪物关节上发射按世界方向定向的粒子，由 GU 原生模型父节点维持挂载。用 [observe_hurt](src/weapon/style/world_contact.rs) 可在当前猎人装备其他武器时继续观察碰撞通行，并查询本地或复制的受制动作。
 
+GU 在任务中持续维护怪物管理器的 10 个槽。SDK 直接读取 `5CEB4` 对应的槽表，并按当前区域和存活状态筛选。同一回调有多处使用名单时，可用 `HurtScene::snapshot_monsters` 在栈上采样一次。快照里的怪物借用只在该回调内有效。
+
 可对借用的 `Monster` 调用 [try_ground_hold](src/combat/collision/hurt/ground_hold.rs)，为本机控制且符合条件的地面怪物请求一段 GU 原生受制动作。联机任务须有活动的 GU 怪物动作同步流程，时长以整数 GU 帧同步。返回的 `GroundHold` 在游戏线程上重新校验怪物出生身份和当前动作。可通过 `observe_ground_hold` 借用本地或复制的现有受制，查询是否仍在受制和怪物的位置。控制权变化后句柄随同一出生实例查询当前控制成员，只有当前控制端可提前结束计时。受制结束后的效果可用 `resolve` 在当前 `HurtScene` 查询同区存活的原目标。
 
 [preload](src/weapon/style/preload.rs) 登记本地风格在 GU 完成任务猎人初始化后执行的资源准备回调。[MotionBanks](src/weapon/style/action/motion_bank.rs) 缓存男女模型共用的 LMT。首次播放时才绑定运行时 bank，按装备模型选择基础片段或槽号加 128 的专用片段。私有 HTS 可通过 [CachedHitShape](src/combat/collision/shapes.rs) 复用已加载资源。
@@ -81,6 +83,10 @@ GU 从武器动作组派发已登记的招式编号（0–255）。`Input` 提�
 [physical](src/weapon/style/physical.rs) 提供统一的物理攻击力回调登记。回调可限定在 GU 的左右刀身碰撞槽，也可覆盖同一猎人的独立武器碰撞。风格插件负责数值与生效条件。
 
 扩展武器可用 [melee::Strike](src/weapon/style/action/melee.rs) 提交斩击或打击，提供动作值、命中窗口、眩晕积蓄、命中停顿和一组已加载的 HTS。SDK 通过 GU 构造命中，在可用的两槽中保留重叠窗口。已创建的扩展近战窗口随场景时间到期，跨动作保留剩余时间。同一 HTS 组的多个形状共用一个命中编号。HTS 可以使用 `0x4000 + 关节编号` 锚定猎人的主武器部件，GU 在每次展开时读取对应骨骼矩阵。
+
+从 FZ SDT 导入攻击时，可用 [hitstop::frontier](src/weapon/style/action/hitstop.rs) 把源 30 Hz 停顿刻数交给 `Strike`、`Attack::submit_with_hitstop` 或独立场景接触。SDK 在 GU 命中确认时按原时长停住攻击者动作。
+
+格挡停顿可在 `GuardResult::on_block` 中用 `guard::is_monster_contact` 识别来袭来源，并用 `action::melee::extend_full_hitstop` 延长格挡者的停顿时钟。该函数返回剩余的 GU 场景帧。
 
 设置 `Strike::deflectable` 后，已登记的 `Rules::deflection` 会处理匹配的近战接触。运行时检查 GU 的心眼等豁免，风格控制器用 `melee::take_deflection` 取得结果并切换动作。
 

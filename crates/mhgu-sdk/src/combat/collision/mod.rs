@@ -112,8 +112,14 @@ impl<'a> Contact<'a> {
             );
         }
         // The raw 168960 constructor interprets factor 1 as a stock default.
-        self.0.set(CONTACT_HITSTOP, strike.hitstop);
+        self.set_attacker_hitstop(strike.hitstop);
         self.set_window(strike.delay, strike.duration);
+    }
+
+    /// Supply native or imported hitstop after GU initializes the contact.
+    pub fn set_attacker_hitstop(self, hitstop: u8) {
+        let value = unsafe { crate::weapon::style::action::hitstop::contact_value(hitstop) };
+        self.0.set(CONTACT_HITSTOP, value);
     }
 
     unsafe fn init_world_attack(

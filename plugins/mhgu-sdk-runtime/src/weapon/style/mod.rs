@@ -37,7 +37,7 @@ pub(super) struct Entry {
     pub(super) weapon_name: Option<&'static CStr>,
     pub(super) name: CString,
     pub(super) details: CString,
-    next: *mut Entry,
+    next: Option<&'static Entry>,
     multiplayer: multiplayer::Bindings,
     input_filter: AtomicPtr<()>,
     physical: AtomicPtr<mhgu_sdk::weapon::style::physical::Rule>,
@@ -115,7 +115,7 @@ pub(super) unsafe fn register_entry(
             weapon_name: weapon.map(|(_, name)| name),
             name,
             details,
-            next: head,
+            next: unsafe { head.as_ref() },
             multiplayer: multiplayer::Bindings::new(),
             input_filter: AtomicPtr::new(ptr::null_mut()),
             physical: AtomicPtr::new(ptr::null_mut()),
@@ -147,7 +147,7 @@ pub(super) unsafe fn register_entry(
 // The head must be null or a node already published in HEAD.
 unsafe fn entries_from(head: *mut Entry) -> impl Iterator<Item = &'static Entry> {
     let first = unsafe { head.as_ref() };
-    core::iter::successors(first, |e| unsafe { e.next.as_ref() })
+    core::iter::successors(first, |entry| entry.next)
 }
 
 pub(super) fn registered_entries() -> impl Iterator<Item = &'static Entry> {
@@ -156,6 +156,55 @@ pub(super) fn registered_entries() -> impl Iterator<Item = &'static Entry> {
 
 pub(super) fn registered_entry(id: u32) -> Option<&'static Entry> {
     registered_entries().find(|entry| entry.style.id == id)
+}
+
+struct Subscription {
+    entry: &'static Entry,
+    next: AtomicPtr<Subscription>,
+}
+
+/// Subscribers in registry order. Their nodes live until exit, like the styles.
+struct Subscribers(AtomicPtr<Subscription>);
+
+impl Subscribers {
+    const fn new() -> Self {
+        Self(AtomicPtr::new(ptr::null_mut()))
+    }
+
+    // SDK bindings run on the serialized game thread. Insert at bind time
+    // so the hot readers need neither a registry scan nor a lock.
+    fn include(&self, entry: &'static Entry) {
+        let mut link = &self.0;
+        for registered in registered_entries() {
+            let next = link.load(Ordering::Acquire);
+            let existing = unsafe { next.as_ref() }.filter(|node| ptr::eq(node.entry, registered));
+            if ptr::eq(entry, registered) {
+                if existing.is_none() {
+                    let node = Box::new(Subscription {
+                        entry,
+                        next: AtomicPtr::new(next),
+                    });
+                    link.store(Box::into_raw(node), Ordering::Release);
+                }
+                return;
+            }
+            if let Some(node) = existing {
+                link = &node.next;
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.load(Ordering::Acquire).is_null()
+    }
+
+    fn entries(&self) -> impl Iterator<Item = &'static Entry> {
+        let first = unsafe { self.0.load(Ordering::Acquire).as_ref() };
+        core::iter::successors(first, |node| unsafe {
+            node.next.load(Ordering::Acquire).as_ref()
+        })
+        .map(|node| node.entry)
+    }
 }
 
 pub(super) fn entries(weapon: u32) -> impl Iterator<Item = &'static Entry> {
@@ -200,7 +249,7 @@ extern "C" fn selected(weapon: u32) -> u32 {
 unsafe fn actor_entry(actor: u32) -> Option<&'static Entry> {
     let equipment = unsafe { inventory::actor_equipment(actor) };
     if let Some(weapon) = unsafe { crate::weapon::records::display(equipment) } {
-        return inventory::definition(weapon.definition.equipment.id.get()).map(|(entry, _)| entry);
+        return Some(weapon.definition.entry);
     }
     unsafe { active_equipment(equipment) }
 }

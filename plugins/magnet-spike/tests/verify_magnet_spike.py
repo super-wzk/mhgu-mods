@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from unicorn import UC_HOOK_CODE
-from unicorn.arm_const import UC_ARM_REG_SP
+from unicorn.arm_const import UC_ARM_REG_S0, UC_ARM_REG_SP
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parents[1]
@@ -490,6 +490,161 @@ def verify_room_icons():
     print("Room player info and posted quest rows: local/peer identity, replaced equipment, hidden and masked rows passed")
 
 
+def verify_status_panels():
+    g = boot((REPO / "mhgu/main.elf").read_bytes(), None, order=("registry",))
+    plugin = g.load(PLUGIN, 0x9200000)
+    for callback in ("forge_onLoad", "forge_onInit"):
+        g.run(plugin[callback], MANAGER)
+
+    manager = g.alloc(40032)
+    g.put(0x1885B58, manager)
+    equipment = manager + 124
+    weapon = equipment + 24
+    g.cpu.mem_write(weapon + 4, struct.pack("<3H", 14, 1, 0))
+    g.cpu.mem_write(weapon + 48, struct.pack("<3H", 1 | (2 << 10), 5, 8))
+    saved = json.loads(character_save({}))
+    saved["data"]["inventory"] = {"instances": {"1": {"equipment": 0x1001, "upgrade": 7}},
+                                   "equipped": 1, "sets": {}}
+    g.files[SAVE] = json.dumps(saved).encode()
+    select_character(g, 0)
+
+    list_panel, detail = g.alloc(464), g.alloc(256)
+    g.put(list_panel + 76, g.alloc(36))
+    palette = g.alloc(17900)
+    g.put(0x1899458, palette)  # GU 553B64 consumes this UI revision on refresh.
+    labels, icons = {}, {}
+
+    def catalog_name(panel, group, part, record):
+        layered = g.cpu.mem_read(palette + 17892, 1)[0] and g.half(record + 8)
+        labels[panel, group, part] = "GU cosmetic armour" if layered else "GU equipment"
+
+    g.stub(g.originals[0x56E810], catalog_name)
+    g.stub(g.originals[0x56EA38], lambda panel, group, part, _: icons.update({(panel, group, part): 7}))
+    g.stub(0x56E6A8, lambda panel, group, part, _: icons.update({(panel, group, part): g.get(g.cpu.reg_read(UC_ARM_REG_SP))}))
+    for address in (0x56E808, 0x56EA08):
+        g.stub(address, lambda panel, group, part, message: labels.update({(panel, group, part): g.string(message)}))
+    for address in (0x545AC0, 0x54533C, 0x545C20, 0x56E6FC, 0x560EF0):
+        g.stub(address, lambda *_: 0)
+
+    weapon_group, armour_group = g.get(0x163053C), g.get(0x1630540)
+    g.run(0x589D50, list_panel, equipment + 4)
+    assert labels[list_panel, weapon_group, 2] == NAME and icons[list_panel, weapon_group, 1] == ICON
+    g.run(0x553B5C, detail + 196, weapon)
+    g.put(detail + 248, 5)
+    g.cpu.mem_write(palette + 17892, bytes([1]))
+    g.run(0x589C74, list_panel)
+    assert labels[list_panel, weapon_group, 2] == NAME and icons[list_panel, weapon_group, 1] == ICON
+    assert labels[list_panel, armour_group, 2] == "GU cosmetic armour"
+    g.run(0x57E6F0, detail)
+    assert labels[detail, 17, 3] == NAME
+    g.run(0xDAD24, detail + 200)
+    g.cpu.mem_write(palette + 17892, bytes([0]))
+    g.run(0x57E6F0, detail)
+    assert labels[detail, 17, 3] == "GU equipment"
+    g.files[SAVE] = character_save({})
+    select_character(g, 0)
+    g.run(0x589D50, list_panel, equipment + 4)
+    assert labels[list_panel, weapon_group, 2] == "GU equipment" and icons[list_panel, weapon_group, 1] == 7
+    g.run(0x553B5C, detail + 196, weapon)
+    g.cpu.mem_write(palette + 17892, bytes([1]))
+    g.run(0x57E6F0, detail)
+    assert labels[detail, 17, 3] == "GU equipment"
+
+    # Keep GU's widget positioning calls. Supply only the layout, colour widths,
+    # and labels so the test observes the marker's real X coordinate.
+    g.files[SAVE] = json.dumps(saved).encode()
+    select_character(g, 0)
+    tables, curves, entries = g.alloc(256), g.alloc(112), g.alloc(20 * 15)
+    g.put(0x1856B18, tables)
+    g.put(tables + 252, curves)
+    g.put(curves + 100, 15)
+    g.put(curves + 108, entries)
+    g.cpu.mem_write(entries + 20 * 14 + 4, struct.pack("<7H", 60, 100, 146, 306, 356, 410, 450))
+    layout, groups, group, parts = (g.alloc(n) for n in (668, 12, 220, 84))
+    g.put(detail + 36, layout)
+    g.put(layout + 248, groups)
+    g.put(layout + 664, 3)
+    g.put(groups + 8, group)
+    g.put(group + 216, parts)
+    sprites = {part: g.alloc(132) for part in (9, 10, 12)}
+    for part, sprite in sprites.items():
+        g.put(parts + 4 * part, sprite)
+    g.put(sprites[12] + 128, struct.unpack("<I", struct.pack("<f", 17.0))[0])
+    g.put(detail + 192, struct.unpack("<I", struct.pack("<f", 180.0))[0])
+    g.put(detail + 80, 0x8000)
+    g.put(detail + 184, equipment)
+    g.put(equipment + 396, g.alloc(1100))
+    message = g.alloc(4)
+    g.cpu.mem_write(message, b"%d\0")
+    g.put(0x1899220, g.alloc(4))
+    g.stub(0x55BC4C, lambda *_: message)
+    g.stub(0x560E90, lambda *_: 0)
+    visible, widths, bonuses = {}, {}, []
+    g.stub(0x56E530, lambda _, group, part, show: visible.update({(group, part): show}))
+    g.stub(0x546AFC, lambda _, group, part, __: widths.update({(group, part): struct.unpack("<f", struct.pack("<I", g.cpu.reg_read(UC_ARM_REG_S0)))[0]}))
+    g.stub(0x56FFAC, lambda *_: bonuses.append(g.get(g.cpu.reg_read(UC_ARM_REG_SP))))
+    skill_words = g.get(equipment + 396) + 988
+    for skill, bonus, bar_end in ((83, 2, 180), (84, 1, 170), (0, 0, 160)):
+        g.put(skill_words + 8, 1 << (skill % 32) if skill else 0)
+        g.run(0xE174C, equipment + 4, 14, 10 + bonus)
+        g.run(0x5859F4, detail, weapon)
+        assert widths[2, 18] == bar_end
+        assert [visible[2, part] for part in (9, 10, 20)] == [bonus == 2, bonus == 1, bonus != 0]
+        if bonus:
+            sprite = sprites[11 - bonus]
+            assert struct.unpack("<f", g.cpu.mem_read(sprite + 128, 4))[0] == bar_end + 18
+            assert bonuses[-1] == bonus
+    assert bonuses == [2, 1]
+
+    # The pause details redraw the weapon stats after the native page returns.
+    # Verify that the redraw keeps the same marker when passed its stats copy.
+    numbers = {}
+    clears = []
+    def native_preview(panel, record, compared, *_):
+        if not record:
+            clears.append(panel)
+            return
+        g.put(panel + 248, 1)
+        # Simulate the original renderer leaving values from the fallback
+        # catalogue record in the two panels.
+        numbers[2, 2] = 90 if compared else 0
+        numbers[2, 28] = 30 if compared else 0
+        visible[2, 5] = visible[2, 6] = int(compared != 0)
+
+    g.stub(g.originals[0x57F468], native_preview)
+    g.stub(0x56FDE0, lambda _, group, part, value: numbers.update({(group, part): value}))
+    for address in (0x13F03C, 0x550534, 0x560E5C, 0x56E528, 0x56EDB0, 0x56FE88,
+                    0x585910, 0x585E98, 0x586398, 0x586574):
+        g.stub(address, lambda *_: 0)
+    preview, preview_skills = g.alloc(1376), g.alloc(1100)
+    g.put(preview + 396, preview_skills)
+    g.put(preview_skills + 996, 1 << (83 % 32))
+    g.run(0x57F468, detail, weapon, 0, preview, 0, 0x8000, 0, 0)
+    assert labels[detail, 17, 3] == NAME
+    assert (numbers[2, 2], numbers[2, 28]) == (320, 0), numbers
+    assert visible[2, 9] and bonuses[-1] == 2 and widths[2, 18] == 180
+    assert struct.unpack("<f", g.cpu.mem_read(sprites[9] + 128, 4))[0] == 198
+
+    # A second Lv.8 instance uses the same SDK definition but has its own
+    # native comparison cEquip. A fallback base must not carry over.
+    candidate = g.alloc(1376)
+    g.run(0x553B5C, candidate + 20, weapon)
+    g.put(candidate + 338, 30)
+    g.put(candidate + 952, 1)  # cEquip+4 + E1BB0 affinity index.
+    g.put(candidate + 832, 30)
+    g.run(0x57F468, detail, candidate + 24, weapon, candidate, preview, 0xc000, 0, 0)
+    assert labels[detail, 17, 3] == NAME
+    assert (numbers[2, 2], numbers[2, 28]) == (320, 0), numbers
+    assert not visible[2, 5] and not visible[2, 6]
+    assert not visible[2, 9] and not visible[2, 10] and widths[2, 18] == 160
+
+    g.put(candidate + 338, 0)
+    g.run(0x57F468, detail, candidate + 24, weapon, candidate, preview, 0xc000, 0, 0)
+    assert numbers[2, 28] == 30  # A genuine skill result can modify affinity.
+    assert not clears  # Updating the values keeps the GU page and comparison widgets.
+    print("GU equipment details: identity, stats, comparison and Handicraft markers passed")
+
+
 def verify_equipment(g, api):
     register, base, level = (g.get(api + offset) for offset in (20, 24, 28))
     # A second model of the same class, with different stats at Lv.1 and Lv.2.
@@ -832,6 +987,7 @@ def verify_turn_table():
 
 if __name__ == "__main__":
     verify_room_icons()
+    verify_status_panels()
     verify_action_tables()
     verify_turn_table()
     verify(sdk_last=False)

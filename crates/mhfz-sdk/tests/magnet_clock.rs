@@ -39,7 +39,7 @@ fn w13_events() {
         cursor.time.cycles = cycles;
         cursor.time.frame = f32::from(frame);
         cursor.time.blend = f32::from(blend);
-        while let Some((kind, value, _)) = cursor.next_motion_event() {
+        while let Some((kind, value, _)) = cursor.next_event() {
             let row = &events[12 * usize::from(seen)..];
             assert_eq!(
                 (kind, value),

@@ -1,4 +1,5 @@
 //! Native particle drawing and release dispatch.
+use super::Subscribers;
 use alloc::boxed::Box;
 use core::{
     ffi::c_void,
@@ -99,6 +100,7 @@ unsafe extern "C" fn draw_model(generator: u32, context: u32, gain: u32) -> u32 
 }
 
 static RELEASE_SERVICE: particle::ReleaseService = particle::ReleaseService(bind_release);
+static RELEASE_OBSERVERS: Subscribers = Subscribers::new();
 
 extern "C" fn bind_release(id: u32, released: OnRelease) -> bool {
     let Some(entry) = super::registered_entry(id) else {
@@ -107,12 +109,13 @@ extern "C" fn bind_release(id: u32, released: OnRelease) -> bool {
     entry
         .particle_release
         .store(released as *mut (), Ordering::Release);
+    RELEASE_OBSERVERS.include(entry);
     true
 }
 
 #[forge::hook(offset = 0x32a104)]
 unsafe fn release_unit(unit: u32) -> u32 {
-    for entry in crate::weapon::style::registered_entries() {
+    for entry in RELEASE_OBSERVERS.entries() {
         let callback = entry.particle_release.load(Ordering::Acquire);
         if !callback.is_null() {
             let released: OnRelease = unsafe { core::mem::transmute(callback) };

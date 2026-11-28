@@ -47,10 +47,10 @@ pub(super) unsafe fn setup(
         hdp[1] = hdp[1] & 0xffff0000 | u32::from(power);
         hdp[2] = hdp[2] & !255 | 1;
         hdp[3] &= 0x7fff_ffff;
-        // GU 16DB68 resolves hitstop from the copied HDP byte 37.
-        hdp[9] = hdp[9] & !(255 << 8) | u32::from(hitstop) << 8;
+        hdp[9] &= !(255 << 8);
         hdp[12] &= 0x00ff_ffff;
         contact.prepare_world_attack(actor, &hdp, shape);
+        contact.set_attacker_hitstop(hitstop);
         clear_native_spirit(contact.as_raw());
     }
 }

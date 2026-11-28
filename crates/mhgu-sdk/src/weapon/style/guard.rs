@@ -38,6 +38,14 @@ pub enum Contact {
     Monster,
 }
 
+/// Whether GU's current incoming hit names a monster (2F643C).
+///
+/// # Safety
+/// Call on the game thread while GU still holds the local hunter's incoming hit record.
+pub unsafe fn is_monster_contact(actor: u32) -> bool {
+    unsafe { ((actor + 12826) as *const u16).read() != 0xffff }
+}
+
 /// Consume the precise block confirmed by GU's recoil transition.
 ///
 /// # Safety

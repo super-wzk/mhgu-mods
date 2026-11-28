@@ -694,21 +694,21 @@ def verify_peer_damage(g, actor, registry, receive, load, stub, equip):
     hitstop = 16 + 56 + 37  # Native w08 HDP row 1.
     assert hdp[hitstop] == 5
     for state in (106, 107, 108, 152, 153, 154):
-        assert contact(state, 10.) == 1, state
-        for grade, timers in ((3, (0., 2.)), (4, (3., 0.))):
+        assert contact(state, 10.) == 0x81, state
+        for grade in (3, 4):
             g.cpu.mem_write(hit + 6, bytes([grade]))
-            g.run(0x16DB68, 0, hit)
-            assert struct.unpack("<2f", g.cpu.mem_read(actor + 10156, 8)) == timers
+            g.run(g.hooks[0x16DB68], 0, hit)
+            assert struct.unpack("<2f", g.cpu.mem_read(actor + 10156, 8)) == (2., 0.)
     for template in (8, 1):
         g.cpu.mem_write(data + hitstop, bytes([template]))
-        assert contact(106, 10.) == 1
-        assert contact(0, 56.) == 2
+        assert contact(106, 10.) == 0x81
+        assert contact(0, 56.) == 0x83
     g.cpu.mem_write(data + hitstop, bytes([5]))
     g.cpu.mem_write(actor + 10156, bytes(8))
     print("GU peer: all six slash dodges and axe overhead use their Frontier hitstop.")
 
     monster, status, _, _, collision, credit = damage_target(g, g.get(actor))
-    assert contact(0, 56.) == 2
+    assert contact(0, 56.) == 0x83
     assert (g.get(hit + 12), g.get(hit + 132), g.half(hit + 52)) == (actor, shape, 17)
     # Supply the live bone mapping used by GU to expand the shipped HTS.
     mapping, matrices = g.alloc(256), g.alloc(512)

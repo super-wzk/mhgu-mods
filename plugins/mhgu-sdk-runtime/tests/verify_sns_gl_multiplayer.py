@@ -305,13 +305,13 @@ def gunlance():
 
     shells = shell_factory(g)
 
-    def send(actor, slot, ammo, marked=True):
+    def send(actor, slot, ammo, marked=True, state_value=None):
         action(g, sender, 0x8000 + slot)
         g.cpu.mem_write(sender + 11138, bytes([ammo]))
         g.put(manager + 28, sender)
         g.run(g.hooks[0x1FED90], packet, sender, 0)
         flags = g.get(packet + 16)
-        assert flags >> 16 & 15 == 8 + ammo
+        assert flags >> 16 & 15 == 8 + (ammo if state_value is None else state_value)
         if not marked:
             g.put(packet + 16, flags & ~(15 << 16))
         g.put(manager + 28, local)
@@ -412,6 +412,14 @@ def gunlance():
     wide = consume_shots(peer, 50)
     assert len(wide) == 3 and ammo(peer) == 0 and not consume_shots(peer, 52)
     assert len({apply(shell, 1) for shell in wide}) == 1
+    if 0x2864C4 in g.traps:
+        g.cpu.hook_del(g.traps.pop(0x2864C4))
+    g.stub(0x2864C4, lambda actor, skill, *_: int(actor == sender and skill == 175))
+    send(peer, 28, 2, state_value=7)
+    assert ammo(peer) == 0
+    assert struct.unpack("<f", g.cpu.mem_read(peer + 5296, 4)) == (1.5,)
+    send(other, 28, 2, marked=False, state_value=7)
+    assert struct.unpack("<f", g.cpu.mem_read(other + 5296, 4)) == (1.,)
     print("GL: mixed-weapon room, per-peer ammo, reload, normal/charged shells, full burst and Wyvern HP passed")
 
 

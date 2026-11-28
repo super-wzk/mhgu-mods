@@ -143,15 +143,15 @@ def replay():
     # index and a translated, rotated pose expose wrong-bone and axis errors.
     probe = itertools.count()
 
-    def verify_hitstop(hit, expected):
-        assert g.cpu.mem_read(hit + 108, 1) == bytes([expected])
+    def verify_hitstop(hit, ticks):
+        assert g.cpu.mem_read(hit + 108, 1) == bytes([0x80 | ticks])
         actor = g.get(hit + 112)
         original_grade = bytes(g.cpu.mem_read(hit + 6, 1))
         g.cpu.hook_del(g.traps.pop(0x16DB68))
-        for grade, timers in ((3, (0., 2. * expected)), (4, (3. * expected, 0.))):
+        for grade in (3, 4):
             byte(hit + 6, grade)
-            g.run(0x16DB68, 0, hit)
-            assert struct.unpack("<2f", g.cpu.mem_read(actor + 10156, 8)) == timers
+            g.run(g.hooks[0x16DB68], 0, hit)
+            assert struct.unpack("<2f", g.cpu.mem_read(actor + 10156, 8)) == (2. * ticks, 0.)
         g.cpu.mem_write(hit + 6, original_grade)
         g.cpu.mem_write(actor + 10156, bytes(8))
         g.stub(0x16DB68, zero)
@@ -288,7 +288,7 @@ def replay():
     for hit in contacts:
         assert g.cpu.mem_read(hit + 87, 1) == b"\0"
         # Family 108 row 4 carries its own value instead of a blanket override.
-        verify_hitstop(hit, 2)  # Convert three FZ ticks to six GU full-stop frames.
+        verify_hitstop(hit, 3)  # Three FZ ticks are six GU full-stop frames.
         z = 1000 * peers.index(g.get(hit + 12))
         offset = 8240 + 32 * g.get(hit + 28)
         assert struct.unpack("<B3x7f", g.cpu.mem_read(collision + offset, 32)) == (

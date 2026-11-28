@@ -1,5 +1,5 @@
 //! GU action packets and dispatch for remote weapon styles.
-use super::{Entry, entries, local_entry, local_hunter, registered_entries, registered_entry};
+use super::{Entry, Subscribers, entries, local_entry, local_hunter, registered_entry};
 use core::{
     ptr,
     sync::atomic::{AtomicPtr, Ordering},
@@ -50,6 +50,7 @@ impl Bindings {
 }
 
 static REMOTE: remote::Service = remote::Service(bind_playback);
+static OBSERVERS: Subscribers = Subscribers::new();
 
 static SHEATHE: remote::SheatheService = remote::SheatheService(bind_sheathe);
 
@@ -89,6 +90,9 @@ unsafe extern "C" fn bind_playback(id: u32, playback: &'static remote::Playback)
         .multiplayer
         .playback
         .store(ptr::from_ref(playback).cast_mut(), Ordering::Release);
+    if playback.observe.is_some() {
+        OBSERVERS.include(entry);
+    }
     true
 }
 
@@ -263,7 +267,7 @@ pub(super) unsafe fn observe_peers(actor: u32) {
                 }
             });
         }
-        for entry in registered_entries() {
+        for entry in OBSERVERS.entries() {
             if let Some(poll) = entry
                 .multiplayer
                 .playback()

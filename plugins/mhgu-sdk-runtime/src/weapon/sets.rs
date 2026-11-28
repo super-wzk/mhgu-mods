@@ -1,17 +1,37 @@
 //! GU's hunter My Set mutations. The native record still owns equipment and arts.
-use crate::weapon::records;
 use super::{
-    inventory, local_hunter, profile,
+    inventory, local_hunter, profile, read, records,
     style::{Entry, active, choose_style, registered_entry},
 };
 use crate::save::{CHARACTER, SETS, SetStyle, SetWeapon, WEAPONS, custom_id};
+
+// GU 146408: 40 hunter records of 136 bytes starting at save manager +254028.
+const HUNTER_SET_BASE: u32 = 254028;
+const HUNTER_SET_STRIDE: u32 = 136;
 
 unsafe fn record(save: u32, slot: u32) -> Option<u32> {
     if save == 0 || slot >= SETS {
         return None;
     }
-    // GU 146408: 40 records of 136 bytes starting at save manager +254028.
-    Some(save + 254028 + 136 * slot)
+    Some(save + HUNTER_SET_BASE + HUNTER_SET_STRIDE * slot)
+}
+
+pub(super) unsafe fn stock_set_index(save: u32, kind: u32, slot: u32) -> u32 {
+    // GU 148340 returns the last set that references the physical box slot.
+    let (first, stride, count, parts) = if kind == 0 {
+        (HUNTER_SET_BASE + 42, HUNTER_SET_STRIDE, SETS, 7)
+    } else {
+        (0x3f5b6, 68, 24, 3)
+    };
+    (0..count)
+        .rev()
+        .find(|&index| {
+            (0..parts).any(|part| {
+                let entry = unsafe { read::<u16>(save, first + stride * index + 2 * part) };
+                u32::from(entry) == slot
+            })
+        })
+        .unwrap_or(255)
 }
 
 unsafe fn fingerprint(record: u32) -> u32 {

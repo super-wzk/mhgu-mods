@@ -12,6 +12,7 @@ mod motion_bank;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub use motion_bank::MotionBanks;
 pub mod command;
+pub mod hitstop;
 #[cfg(all(target_arch = "arm", target_endian = "little"))]
 pub mod melee;
 

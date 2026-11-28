@@ -38,6 +38,7 @@ const SHOT: u16 = 19;
 const GUARD_FOLLOW_UP: u16 = 20;
 const REPEL: u16 = 23;
 const ATTRACT: u16 = 24;
+const GUARD_PROTECTION: f32 = 8.;
 const RESERVED: u32 = (1 << REPEL)
     | (1 << ATTRACT)
     | (1 << SHOT)
@@ -242,6 +243,7 @@ impl Charge {
 struct StateTimers {
     poise: bool,
     charge: Charge,
+    guard_stop: u8,
     sprint_frames: f32,
 }
 
@@ -250,6 +252,7 @@ impl StateTimers {
         Self {
             poise: false,
             charge: Charge::NEW,
+            guard_stop: 0,
             sprint_frames: 0.,
         }
     }
@@ -425,6 +428,8 @@ impl Battle {
                     let timer = (actor + 10288) as *mut f32;
                     timer.write(timer.read().max(8.));
                 }
+                // FZ 8122612C records the stop ticks for a successful GP.
+                24 => timers.guard_stop = value as u8,
                 26 => timers.charge.start(actor, true),
                 41 => {
                     movement::steer(actor);
@@ -1008,7 +1013,7 @@ pub unsafe extern "C" fn guard_policy(
         }
         result.write(guard::GuardResult {
             // FZ 81744DA0 applies four simulation ticks of protection.
-            invulnerability: 8.,
+            invulnerability: GUARD_PROTECTION,
             on_block: Some(record_guard),
             ..guard::GuardResult::default()
         });
@@ -1023,10 +1028,16 @@ pub(super) unsafe fn launch_sound(actor: u32, offset: [f32; 3]) {
 }
 
 unsafe extern "C" fn record_guard(actor: u32) {
-    let first = LOCAL.with(|battle| {
+    let (first, stop) = LOCAL.with(|battle| {
         battle.guard_hits = battle.guard_hits.saturating_add(1).min(3);
-        battle.guard_hits == 1
+        (battle.guard_hits == 1, battle.timers.guard_stop)
     });
+    // FZ 816F7328 queues the authored stop. 81820D7A adds it to the active timer.
+    if stop != 0 && unsafe { guard::is_monster_contact(actor) } {
+        let remaining = unsafe { action::melee::extend_full_hitstop(actor, f32::from(stop) * 2.) };
+        // FZ 81820BD4 pauses the protection countdown during full stop.
+        unsafe { movement::grant_evade_invulnerability(actor, remaining + GUARD_PROTECTION) };
+    }
     let (group, slot) = unsafe { action::current(actor) };
     match action::custom_id(group, slot) {
         Some(14) if first => unsafe {

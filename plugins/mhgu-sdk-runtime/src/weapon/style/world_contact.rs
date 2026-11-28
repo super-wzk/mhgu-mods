@@ -1,5 +1,6 @@
 //! Bind style handlers for contacts with non-bone-relative shapes.
-use core::sync::atomic::Ordering;
+use super::Subscribers;
+use core::sync::atomic::{AtomicBool, Ordering};
 use mhgu_sdk::{
     combat::collision::{attack::AttackScene, hurt::HurtScene},
     weapon::style::{
@@ -9,6 +10,9 @@ use mhgu_sdk::{
 };
 
 static SERVICE: world_contact::Service = world_contact::Service(bind);
+static PASSES: Subscribers = Subscribers::new();
+static HURT_OBSERVERS: Subscribers = Subscribers::new();
+static LOCAL_QUERIES: AtomicBool = AtomicBool::new(false);
 
 unsafe extern "C" fn bind(id: u32, callback: Expand) {
     if let Some(entry) = super::registered_entry(id) {
@@ -45,6 +49,7 @@ unsafe extern "C" fn bind_pass(id: u32, pass: world_contact::CollisionPass) {
         entry
             .collision_pass
             .store(pass as *mut (), Ordering::Release);
+        PASSES.include(entry);
     }
 }
 
@@ -53,6 +58,7 @@ extern "C" fn bind_hurt(id: u32, pass: HurtPass) -> bool {
         return false;
     };
     entry.hurt_pass.store(pass as *mut (), Ordering::Release);
+    LOCAL_QUERIES.store(true, Ordering::Release);
     true
 }
 
@@ -63,6 +69,7 @@ extern "C" fn observe_hurt(id: u32, observe: HurtObserver) -> bool {
     entry
         .hurt_observer
         .store(observe as *mut (), Ordering::Release);
+    HURT_OBSERVERS.include(entry);
     true
 }
 
@@ -71,16 +78,13 @@ extern "C" fn bind_attack(id: u32, pass: AttackPass) -> bool {
         return false;
     };
     entry.attack_pass.store(pass as *mut (), Ordering::Release);
+    LOCAL_QUERIES.store(true, Ordering::Release);
     true
 }
 
 #[forge::hook(offset = 0x16abac)]
 unsafe fn collision_pass(manager: u32) -> u32 {
-    let mut observes_contacts = false;
-    for entry in crate::weapon::style::registered_entries() {
-        observes_contacts |= !entry.attack_pass.load(Ordering::Acquire).is_null()
-            || !entry.hurt_pass.load(Ordering::Acquire).is_null()
-            || !entry.hurt_observer.load(Ordering::Acquire).is_null();
+    for entry in PASSES.entries() {
         let callback = entry.collision_pass.load(Ordering::Acquire);
         if !callback.is_null() {
             let pass: world_contact::CollisionPass = unsafe { core::mem::transmute(callback) };
@@ -88,7 +92,7 @@ unsafe fn collision_pass(manager: u32) -> u32 {
         }
     }
     let result = original!(manager);
-    if !observes_contacts {
+    if !LOCAL_QUERIES.load(Ordering::Acquire) && HURT_OBSERVERS.is_empty() {
         return result;
     }
     let owner = unsafe { crate::weapon::local_hunter() };
@@ -113,7 +117,7 @@ unsafe fn collision_pass(manager: u32) -> u32 {
             pass(&hurt_scene);
         }
     }
-    for entry in crate::weapon::style::registered_entries() {
+    for entry in HURT_OBSERVERS.entries() {
         let callback = entry.hurt_observer.load(Ordering::Acquire);
         if !callback.is_null() {
             let observe: HurtObserver = unsafe { core::mem::transmute(callback) };

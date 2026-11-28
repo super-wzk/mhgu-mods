@@ -50,7 +50,8 @@ impl Step {
                 (ended || wrapped) && time.completed_cycles(ended, wrapped) >= self.loops
             }
             4 => {
-                time.completed_cycles(sample.ended, wrapped) >= self.loops
+                sample.blend <= 0.
+                    && time.completed_cycles(sample.ended, wrapped) >= self.loops
                     && (self.reached_frame(sample.frame) || sample.ended)
             }
             _ => false,
@@ -90,9 +91,12 @@ impl Time {
             1 => true,
             0 if record[3] as i8 > 0 => self.blend <= f32::from(record[3]),
             0 => {
+                // FZ 81815F30 and 81816422 use 817332B0 for the current cycle.
                 let cycle = half(record, 6);
                 self.cycles > cycle
-                    || self.cycles == cycle && self.frame >= f32::from(half(record, 4))
+                    || self.cycles == cycle
+                        && self.blend <= 0.
+                        && self.frame >= f32::from(half(record, 4))
             }
             _ => false,
         }
@@ -140,22 +144,6 @@ impl Cursor {
             event: 0,
             pending: None,
         }
-    }
-
-    /// 81816422 does not test the current cycle's frame until the incoming
-    /// clip has finished interpolating. Immediate and blend-count rows have
-    /// their own gates and can still fire on entry.
-    pub fn next_motion_event(&mut self) -> Option<(u16, u16, f32)> {
-        let row = self.events.chunks_exact(12).nth(self.event)?;
-        if self.time.blend > 0.
-            && half(row, 0) == u16::from(self.time.step)
-            && row[2] == 0
-            && row[3] as i8 <= 0
-            && half(row, 6) == self.time.cycles
-        {
-            return None;
-        }
-        self.next_event()
     }
 
     pub fn next_event(&mut self) -> Option<(u16, u16, f32)> {
@@ -326,5 +314,37 @@ mod tests {
         assert_eq!(cursor.branch(0, |_| true), Some(74));
         cursor.time.observe(16., 0.);
         assert_eq!(cursor.branch(2, |_| true), Some(20));
+    }
+
+    #[test]
+    fn frame_gates_wait_for_blend_but_blend_count_and_immediate_gates_do_not() {
+        static RULES: BranchRules = BranchRules {
+            order: &[0],
+            combo_override: None,
+            art_commands: 1,
+        };
+        static ROW: [u8; 40] = {
+            let mut row = branch_row(1, 0, 12, 30, 60);
+            row[9] = 1;
+            row
+        };
+        static EVENTS: [u8; 24] = [
+            0, 0, 1, 0, 0, 0, 0, 0, 2, 0, 1, 0,
+            0, 0, 0, 0, 30, 0, 0, 0, 3, 0, 2, 0,
+        ];
+        let mut cursor = Cursor::new(1, &ROW, &EVENTS, &RULES);
+        cursor.time.observe(30., 2.);
+        assert_eq!(cursor.next_event(), Some((2, 1, 0.)));
+        assert_eq!(cursor.next_event(), None);
+        assert_eq!(cursor.branch(1, |_| true), None);
+        assert_eq!(cursor.pending_action(), None);
+        cursor.time.observe(30., 1.);
+        assert_eq!(cursor.branch(1, |_| true), None);
+        assert_eq!(cursor.pending_action(), Some(12));
+        assert!(!cursor.art_window(|_| true));
+        cursor.time.observe(30., 0.);
+        assert_eq!(cursor.next_event(), Some((3, 2, 0.)));
+        assert!(cursor.art_window(|_| true));
+        assert_eq!(cursor.branch(0, |_| true), Some(12));
     }
 }

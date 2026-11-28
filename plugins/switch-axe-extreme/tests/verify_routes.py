@@ -109,7 +109,13 @@ def replay(repo, root):
 
     assert g.get(actor + 13100) == 50
     flick(0x4000)
-    assert state() == (16, 0x8000 + 103) and g.get(actor + 13100) == 44
+    assert state() == (16, 0x8000 + 103) and g.get(actor + 13100) == 50
+    number(actor + 1268, 2.)
+    frame(0)
+    assert g.get(actor + 13100) == 50
+    number(actor + 1268, 0.)
+    frame(2)
+    assert g.get(actor + 13100) == 44
     idle_facing = g.get(actor + 4076), g.get(actor + 5280)
     frame(80)
     assert g.get(actor + 13096) == 1 and g.get(actor + 13100) == 42
@@ -118,7 +124,7 @@ def replay(repo, root):
     set_action(1, 0)
     flick()
     assert state() == (16, 0x8000 + 103), state()
-    assert g.get(actor + 13100) == 36
+    assert g.get(actor + 13100) == 42
     frame(80)
     assert g.get(actor + 13100) == 34
 

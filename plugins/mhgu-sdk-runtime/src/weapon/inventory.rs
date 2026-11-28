@@ -48,6 +48,7 @@ pub(super) fn weapon_type(id: u16) -> Option<(&'static Entry, Weapon)> {
 
 #[derive(Clone, Copy)]
 pub(super) struct RegisteredEquipment {
+    pub entry: &'static Entry,
     pub equipment: &'static WeaponEquipment,
     pub kind: Weapon,
     pub levels: &'static [EquipmentLevel],
@@ -70,7 +71,7 @@ unsafe extern "C" fn register_equipment(
     let Some(equipment) = (unsafe { raw.as_ref() }) else {
         return 1;
     };
-    let Some((_, kind)) = weapon_type(equipment.weapon.get()) else {
+    let Some((entry, kind)) = weapon_type(equipment.weapon.get()) else {
         return 1;
     };
     if equipment.id.get() == 0 || name.is_null() || details.is_null() {
@@ -116,6 +117,7 @@ unsafe extern "C" fn register_equipment(
     EQUIPMENT.with(|models| match models.entry(equipment.id.get()) {
         alloc::collections::btree_map::Entry::Vacant(slot) => {
             slot.insert(RegisteredEquipment {
+                entry,
                 equipment,
                 kind,
                 levels,
@@ -165,7 +167,7 @@ extern "C" fn model_path(equipment: u16, archive: bool) -> *const c_char {
 
 pub(super) fn definition(id: u16) -> Option<(&'static Entry, RegisteredEquipment)> {
     let model = EQUIPMENT.with(|m| m.get(&id).copied())?;
-    Some((weapon_type(model.equipment.weapon.get())?.0, model))
+    Some((model.entry, model))
 }
 
 extern "C" fn grant(weapon: u16) -> u32 {

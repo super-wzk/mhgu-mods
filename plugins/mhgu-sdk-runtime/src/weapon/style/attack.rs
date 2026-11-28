@@ -8,7 +8,7 @@ use mhgu_sdk::{
     sync::Shared,
     weapon::style::{
         action::{
-            self, Attack,
+            self, Attack, hitstop,
             melee::{
                 self, BLADE_CONTACT_OFFSETS, MonsterReaction, MonsterStrikes, Strike,
                 StrikeContact, StrikePower, WorldStrikePower,
@@ -41,6 +41,7 @@ struct MeleeRow {
     row: [u32; 14],
     power: StrikePower,
     reaction: MonsterReaction,
+    hitstop: u8,
 }
 
 static LOCAL_STRIKES: Shared<[Option<RegisteredStrike>; 2]> = Shared::new([None; 2]);
@@ -254,6 +255,35 @@ unsafe fn resolve_affinity(
     result
 }
 
+#[forge::hook(offset = 0x16db68)]
+unsafe fn resolve_hitstop(target: u32, hit: u32) -> u32 {
+    unsafe {
+        let value = (hit + 108) as *mut u8;
+        let encoded = value.read();
+        let Some(frames) = hitstop::frames(encoded) else {
+            return original!(target, hit);
+        };
+        let actor = ((hit + 112) as *const u32).read();
+        let eligible = actor != 0
+            && ((hit + 110) as *const u8).read() == 0
+            && ((hit + 48) as *const u8).read() & 8 != 0
+            && mhgu_sdk::weapon::style::hunter::is_quest(actor);
+        value.write(hitstop::native_factor(encoded));
+        let result = original!(target, hit);
+        value.write(encoded);
+        if eligible {
+            let full = (actor + 10156) as *mut f32;
+            let slow = (actor + 10160) as *mut f32;
+            if full.read() > 0. || slow.read() > 0. {
+                // FZ 81820E3A holds the hunter's playhead for every SDT stop tick.
+                full.write(frames);
+                slow.write(0.);
+            }
+        }
+        result
+    }
+}
+
 #[forge::hook(offset = 0x2a8a88)]
 unsafe fn weapon_row(actor: u32, index: u32) -> u32 {
     if let Some(data) = unsafe { HIT_DATA.load(Ordering::Acquire).as_ref() }
@@ -305,6 +335,7 @@ unsafe extern "C" fn submit_melee(actor: u32, strike: *const Strike, shape: u32)
         row: strike.hdp(),
         power: strike.power,
         reaction: strike.reaction,
+        hitstop: strike.hitstop,
     };
     unsafe { submit_row(actor, &attack, stun, Some(melee)) }
 }
@@ -423,8 +454,8 @@ unsafe fn submit_row(
             }
             if let Some(melee) = &registered {
                 // 168960 treats factor 1 as zero. Explicit Frontier hitstop
-                // retains the authored factor, as in Attack::submit_with_hitstop.
-                ((hit + 108) as *mut u8).write((melee.row[9] >> 8) as u8);
+                // retains the authored time, as in Attack::submit_with_hitstop.
+                ((hit + 108) as *mut u8).write(hitstop::contact_value(melee.hitstop));
                 // 169548 reads the computed melee attack only with bit 0x20.
                 // Set it after 2B76CC, without enabling retail weapon bonuses.
                 let hit_flags = (hit + 48) as *mut u32;
@@ -479,4 +510,6 @@ pub(super) fn install(base: u32) {
     unsafe { melee::publish_strike(&MELEE) };
     forge::install_hook!(base, weapon_row);
     forge::install_hook!(base, resolve_affinity);
+    forge::install_hook!(base, resolve_hitstop);
+    unsafe { hitstop::publish() };
 }

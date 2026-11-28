@@ -985,7 +985,7 @@ def verify_evade_contact(g, actor, reset, press, expect, set_action, tick, sound
             assert all(math.isclose(a, b, abs_tol=0.001) for a, b in zip(active[pulse], expected))
             assert g.get(pulse + 12) == actor and (g.get(pulse + 48) & 0x300) == 0
             assert g.half(pulse + 56) == g.cpu.mem_read(pulse + 86, 1)[0] == 5
-            assert g.cpu.mem_read(pulse + 108, 1) == b"\x01"
+            assert g.cpu.mem_read(pulse + 108, 1) == b"\x81"
             spawned[pulse] = age, active[pulse], g.half(pulse + 52)
             confirm_world_refill(pulse, (x, y, z))
         assert active == {pulse: shape for pulse, (born, shape, _) in spawned.items() if age - born < 30}
@@ -1117,7 +1117,7 @@ def verify_melee(g, actor, vtable, part, shapes, set_action, tick, meter, motion
     tick(frame=42.)
     assert byte(hit + 5) == 1 and g.get(hit + 12) == g.get(hit + 112) == actor
     actual = g.half(hit + 56), byte(hit + 86), byte(hit + 108)
-    assert actual == (43, 0, 1), actual
+    assert actual == (43, 0, 0x82), actual
     assert struct.unpack("<2f", g.cpu.mem_read(hit + 92, 8)) == (0., 14.)
     assert g.get(hit + 132) == shapes[r"player\hit\frontier_ms\melee_1"]
     assert g.get(actor + 12700) == 0
@@ -1466,6 +1466,30 @@ def verify_bind_readiness(g, actor, monster, status, hurt, collision, set_action
     g.cpu.mem_write(actor + 4180, b"\0")
     g.cpu.mem_write(monster + 4180, b"\0")
     point(80.)
+    def check_roster(frames, live):
+        # The stock collision body is stubbed. Count the plugin's getter
+        # calls and visits to GU's eligibility check for same-area actors.
+        slots, candidates = [], []
+        hooks = [g.cpu.hook_add(UC_HOOK_CODE, lambda *_, counts=counts: counts.append(1),
+                                begin=address, end=address)
+                 for address, counts in ((0x5CEB4, slots), (0x7E11C, candidates))]
+        try:
+            advance(frames, 0)
+            assert (len(slots), len(candidates)) == (0, live), (frames, slots, candidates)
+        finally:
+            for hook in hooks:
+                g.cpu.hook_del(hook)
+
+    check_roster(0., 0)
+    g.put(roster + 28, 0)  # GU can remove a monster after loading.
+    check_roster(1., 0)
+    assert g.run(0x5D410, roster, 9, monster) == 1
+    check_roster(2., 1)  # The new roster entry is visible without reloading the quest.
+    g.put(roster + 64, 0)
+    g.put(roster + 68, 0)
+    g.put(roster + 28, monster)
+    g.cpu.mem_write(status + 437, b"\0")
+
     # Drive actual GU hit callbacks. Switch the paralysis row independently
     # of species to prove that neither a known ID nor a high rank enables it.
     tune_slot = g.get(monster + 30188) + 160
@@ -1479,7 +1503,9 @@ def verify_bind_readiness(g, actor, monster, status, hurt, collision, set_action
         advance(2., 0)
     g.cpu.mem_write(paralysis + 6, struct.pack("<H", 200))
     contacts(1)
-    advance(2., 0)  # The ineligible hits did not build a hidden meter.
+    # The ineligible hits did not build a hidden meter. With the first valid
+    # hit recorded, both observers share the same live check.
+    check_roster(2., 1)
     # The same first bind threshold applies across quest ranks and species.
     for i, (kind, rank) in enumerate(((0x50, 1), (0x50, 2), (0x50, 4),
                                       (0x450, 4), (0x0e, 1), (0x7ffe, 3))):
@@ -2624,6 +2650,9 @@ def verify_strike_spawn(g, actor, monster, status, hurt, set_action, tick):
 
 
 def verify_guard(g, actor, set_action, tick, meter, motions, sounds, collision):
+    from unicorn.arm_const import UC_ARM_REG_R4, UC_ARM_REG_S16
+
+    pause_frames = 2 * frontier_guard_stop()
     skills = set()
     g.cpu.hook_del(g.traps.pop(0x2864C4))
     g.stub(0x2864C4, lambda _actor, skill, *_: int(skill in skills))
@@ -2673,10 +2702,23 @@ def verify_guard(g, actor, set_action, tick, meter, motions, sounds, collision):
         g.cpu.mem_write(actor + 1280, struct.pack("<f", 0.))
         g.put(actor + 11072, 0)
 
-    def probe(frame, *, angle=0, flags=0, kind=0, power=100, accepted=1, settle=True):
+    def timers():
+        return struct.unpack("<f", g.cpu.mem_read(actor + 10156, 4))[0], struct.unpack(
+            "<f", g.cpu.mem_read(actor + 11072, 4))[0]
+
+    def elapse(delta):
+        saved = g.get(actor + 28)
+        g.cpu.mem_write(actor + 28, struct.pack("<f", delta))
+        g.cpu.reg_write(UC_ARM_REG_R4, actor)
+        g.cpu.reg_write(UC_ARM_REG_S16, 0x3f800000)
+        g.run(0x29CF04, until=0x29CF3C)  # GU counts down the hitstop and protection together.
+        g.put(actor + 28, saved)
+
+    def probe(frame, *, angle=0, flags=0, kind=0, power=100, accepted=1, settle=True,
+              monster=0xffff):
         g.cpu.mem_write(actor + 1280, struct.pack("<f", frame))
         g.put(actor + 5280, 0)
-        g.cpu.mem_write(actor + 12820, struct.pack("<HBxHHh", flags, kind, angle, 0xffff, power))
+        g.cpu.mem_write(actor + 12820, struct.pack("<HBxHHh", flags, kind, angle, monster, power))
         assert g.run(BLOCK, actor, angle) == accepted
         g.put(damage, power & 0xffffffff)
         g.put(damage + 4, 0xff)
@@ -2693,9 +2735,10 @@ def verify_guard(g, actor, set_action, tick, meter, motions, sounds, collision):
     hp, gauge = g.half(actor + 5078), meter()
     start()
     assert state() == 0x8000 + 14 and motions[-1] == (1034, 0., 14.), (state(), motions[-1])
-    probe(4., angle=0x4000, settle=False)
-    assert g.get(actor + 11072) == 0
-    probe(4., angle=0x4001, accepted=0)
+    probe(4., angle=0x4000, settle=False, monster=123)
+    assert timers() == (0., 0.)
+    probe(4., angle=0x4001, accepted=0, monster=123)
+    assert timers() == (0., 0.)
     probe(4., flags=0x20, accepted=0)
     probe(4., flags=0x100, accepted=0)
     probe(4., kind=0x19, accepted=0)
@@ -2715,7 +2758,7 @@ def verify_guard(g, actor, set_action, tick, meter, motions, sounds, collision):
             # Multiple queries of the same hit precede one native settlement.
             probe(frame, settle=False)
             probe(frame)
-            assert struct.unpack("<f", g.cpu.mem_read(actor + 11072, 4)) == (8.,)
+            assert timers() == (0., 8.)
         at(25.)
         assert state() == 0x8000 + 14
         at(26.)
@@ -2767,6 +2810,32 @@ def verify_guard(g, actor, set_action, tick, meter, motions, sounds, collision):
             g.cpu.hook_del(g.traps.pop(pass_entry))
     slash_counter = capture_action(g, actor)
 
+    for delta in (1, 2):
+        start()
+        for frame in (1., 9., 17., 25.):
+            probe(frame, settle=False, monster=123)
+            assert timers() == (0., 0.)
+            probe(frame, monster=123)
+            assert timers() == (pause_frames, pause_frames + 8), timers()
+            for remaining in range(pause_frames, 0, -delta):
+                g.cpu.reg_write(UC_ARM_REG_R4, actor)
+                g.cpu.reg_write(UC_ARM_REG_S16, 0x3f800000)
+                g.run(0x29BEF4, until=0x29BF34)  # Native animation multiplier.
+                assert g.cpu.reg_read(UC_ARM_REG_S16) == 0
+                assert timers() == (remaining, remaining + 8)
+                at(frame)
+                assert state() == 0x8000 + 14
+                elapse(delta)
+            g.cpu.reg_write(UC_ARM_REG_R4, actor)
+            g.cpu.reg_write(UC_ARM_REG_S16, 0x3f800000)
+            g.run(0x29BEF4, until=0x29BF34)
+            assert g.cpu.reg_read(UC_ARM_REG_S16) == 0x3f800000
+            assert timers() == (0., 8.)
+            for _ in range(8 // delta):
+                elapse(delta)
+        at(26.)
+        assert state() == 0x8000 + 77
+
     for skill, closes in ((169, 28.), (168, 30.)):
         start()
         skills.add(skill)
@@ -2783,11 +2852,14 @@ def verify_guard(g, actor, set_action, tick, meter, motions, sounds, collision):
     skills.clear()
     # Run GU's full received-hit handler, with a queued hit but no chip.
     g.cpu.mem_write(actor + 12768, b"\x01")
-    g.cpu.mem_write(actor + 12820, struct.pack("<HBxHHh", 0, 0, 0, 0xffff, 100))
+    g.cpu.mem_write(actor + 12820, struct.pack("<HBxHHh", 0, 0, 0, 123, 100))
     g.cpu.mem_write(actor + 64, struct.pack("<3f", 400., 10., 500.))
     g.cpu.mem_write(actor + 4076, struct.pack("<H", 0x4000))
     first_effect = len(effects)
     assert g.run(0x2EE508, actor) == 1 and state() == 0x8000 + 112
+    assert timers() == (pause_frames, pause_frames + 8)
+    for _ in range(pause_frames // 2):
+        elapse(2)
     assert effects[first_effect:] == (
         [(i, 0, (500., 130., 500.)) for i in range(37, 56)]
         + [(i, 0, (500., 10., 500.)) for i in range(56, 70)]
@@ -3804,6 +3876,41 @@ def setup_magnet_hud(g, sampler, actor):
         return [16.*max(0,min(per, units-i*per))/per for i in range(segments)], signal
 
     return sample
+
+
+def frontier_guard_stop():
+    from unicorn import arm_const as arm
+    from verify_assets import Machine, MEM
+
+    fz = Machine(REPO / "mhfz/eboot.bin.elf", True)
+    actor, weapon, attacker = (MEM + offset for offset in (0x1000, 0x3000, 0x4000))
+    fz.c.mem_write(actor + 3, b"\x0d")
+    fz.trap(0x81818BF8, lambda *_: weapon)
+    fz.trap(0x8182B54E, lambda *_: 1)  # Local hunter.
+    blob = (ROOT / "target/assets/magnet_spike.fmsa").read_bytes()
+    for state in (14, 112):
+        count, offset = struct.unpack_from("<II", blob, 16 + 24 * state + 16)
+        event, = (row[-1] for row in struct.iter_unpack("<6H", blob[offset:offset + 12 * count])
+                  if row[-2] == 24)
+        fz.call(0x81225C18, actor, 24, event)
+        assert fz.c.mem_read(weapon + 554, 1)[0] == event
+        assert event == 5
+        for hit in range(5):
+            fz.c.mem_write(attacker + 16, bytes([int(hit != 0)]))
+            fz.c.reg_write(arm.UC_ARM_REG_R9, actor)
+            fz.c.reg_write(arm.UC_ARM_REG_R11, attacker)
+            # Start at the source check after the guard has already been accepted.
+            fz.c.emu_start(0x816F72B7, 0x816F61CE, count=1000)
+            assert fz.c.reg_read(arm.UC_ARM_REG_PC) == 0x816F61CE
+            pending = fz.c.mem_read(actor + 1254, 1)[0]
+            assert pending == (event if hit else 0)
+            for remaining in range(pending, -1, -1):
+                fz.call(0x81820D7A, actor)
+                assert fz.c.mem_read(actor + 1253, 2) == bytes((remaining, 0))
+            if hit and state == 14:
+                fz.call(0x8121D310, actor)
+                assert fz.call(0x8121D338, actor) == min(hit, 3)
+    return event
 
 
 def frontier_impact_charge():

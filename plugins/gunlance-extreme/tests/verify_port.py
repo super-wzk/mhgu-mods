@@ -160,6 +160,9 @@ def verify_ignition_hud():
     g.put(a + 28, real(2))
     g.stub(0x53A058, lambda *_: 5001)
     g.stub(g.get(VTABLE + 508), lambda *_: 4)
+    skills = set()
+    g.cpu.hook_del(g.traps.pop(0x2864C4))
+    g.stub(0x2864C4, lambda _, skill, *__: int(skill in skills))
 
     widget, layout, groups, gauge, root, members, marker, ammo = (
         g.alloc(size) for size in (196, 720, 12, 240, 192, 16, 240, 240)
@@ -268,13 +271,15 @@ def verify_ignition_hud():
         g.cpu.mem_write(a + 1206, bytes([4 if end else 0]))
         g.run(tick_style, a, inputs)
 
-    def ignite():
+    def ignite(rate=1.):
         set_action(16, 0x801C)
         tick()
+        assert memory_float(g, a + 5296) == rate
         tick(147, end=True)
         tick()
         tick(147, end=True)
         assert g.half(a + 1204) == 1428
+        assert memory_float(g, a + 5296) == rate
 
     def try_ignite(frame=0):
         g.put(inputs, 1 << 8)
@@ -349,7 +354,11 @@ def verify_ignition_hud():
     g.run(tick_style, 0, 0)  # Quest exit or controller deselection.
     tick()
     draw(False)
-    print("Gunlance HUD and model: native ammo, ignition progress, red barrel, and native restore passed")
+    for skill, rate in ((176, 1.), (175, 1.5), (287, 1.5)):
+        skills.clear()
+        skills.add(skill)
+        ignite(rate)
+    print("Gunlance HUD and model: native ammo, ignition rates and progress, red barrel, and native restore passed")
 
 
 def verify_actions():

@@ -64,12 +64,15 @@ pub unsafe fn cooldown(actor: u32) -> f32 {
     unsafe { read(actor, COOLDOWN) }
 }
 
+pub unsafe fn artillery_expert(actor: u32) -> bool {
+    [175, 287]
+        .into_iter()
+        .any(|id| unsafe { hunter::has_skill(actor, id) })
+}
+
 unsafe fn set_wyvern_cooldown(actor: u32, duration: f32) {
     unsafe {
-        let artillery = if [175, 287]
-            .into_iter()
-            .any(|id| hunter::has_skill(actor, id))
-        {
+        let artillery = if artillery_expert(actor) {
             program::WYVERN_COOLDOWN_STRONG_REDUCTION
         } else if hunter::has_skill(actor, 176) {
             program::WYVERN_COOLDOWN_WEAK_REDUCTION

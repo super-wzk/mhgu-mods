@@ -68,7 +68,7 @@ impl Attack {
         unsafe { super::super::registry::submit_attack(actor, self) }
     }
 
-    /// Submit a strike with an explicit GU attacker hitstop factor.
+    /// Submit a strike with native or imported attacker hitstop.
     ///
     /// # Safety
     /// The actor and shape must satisfy the requirements of `submit`.
@@ -90,9 +90,7 @@ impl Attack {
         } else {
             factor
         };
-        // GU 168960 has decoded HDP byte 37. Leave the template and all
-        // other contact properties intact so 16DB68 selects the reaction.
-        unsafe { ((hit + 108) as *mut u8).write(factor) };
+        unsafe { ((hit + 108) as *mut u8).write(super::hitstop::contact_value(factor)) };
     }
 }
 

@@ -6,6 +6,7 @@ import struct
 
 from unicorn.arm_const import UC_ARM_REG_SP, UC_ARM_REG_S0
 
+from gu_replay import Game
 from verify_style import MANAGER, SAVE, api_for, character_save, save_character, select_character, MENU_OPEN, MENU_UPDATE, REPO, boot, hunters, load_registered_style, service, style_descriptor
 from verify_style import CHANGE_ACTION, COMMAND_BIND, DISPATCH
 
@@ -622,7 +623,7 @@ def verify_set_styles(g):
     assert g.run(equipped) == 0x10010
 
 
-def verify_stock_grid(g):
+def verify_stock_grid(g, elf):
     # Retail callbacks also run outside the extension controller's scoped reads.
     player = g.get(0x1897F78)
     manager, save = g.alloc(40032), g.alloc(270000)
@@ -638,12 +639,45 @@ def verify_stock_grid(g):
     g.cpu.mem_write(manager + 132, struct.pack("<7H", *range(40, 47)))
     for slot in (0, *range(40, 48)):
         assert g.run(0x144590, save, slot) == int(40 <= slot <= 46)
-    # Both entry points have a PC-relative instruction in the original prologue.
-    assert g.run(0x14426C,save,0,0xffff) == 3
-    assert g.run(0x14426C,save,0,41) == 1
-    g.cpu.mem_write(save+254070+136*8,struct.pack("<H",23))
-    assert g.run(0x148340,save,0,23) == 8
-    assert g.run(0x148340,save,1,23) == 255
+    # Recomp cannot resolve a guest indirect call into the middle of GU code.
+    def reject_interior(address):
+        def reject(*_):
+            raise AssertionError(f"SDK jumped into a GU function at {address:#x}")
+        g.stub(address, reject)
+
+    for address in (0x148348, 0x148398, 0x144274):
+        reject_interior(address)
+
+    stock = Game(elf)
+    stock_save = stock.alloc(270000)
+    for game, data in ((g, save), (stock, stock_save)):
+        game.cpu.mem_write(data + 254070, struct.pack("<7H", *range(20, 27)))
+        game.cpu.mem_write(data + 254070 + 136 * 39, struct.pack("<8H", 50, 51, 52, 53, 54, 55, 23, 99))
+        game.cpu.mem_write(data + 0x3F5B6, struct.pack("<3H", 50, 51, 52))
+        game.cpu.mem_write(data + 0x3F5B6 + 68 * 23, struct.pack("<4H", 53, 0xffff, 50, 99))
+    # The BL in the ordinary equipment upgrade check uses the hunter table.
+    assert g.run(0x70AC90, save, 0, 23, until=0x70AC94) == 39
+    for kind in (0, 1, 2):
+        for slot in (0, *range(20, 27), *range(50, 56), 99, 0xffff, 0x10032):
+            assert g.run(0x148340, save, kind, slot) == stock.run(0x148340, stock_save, kind, slot)
+
+    stock_manager = stock.alloc(40032)
+    stock.put(0x1885B58, stock_manager)
+    stock.cpu.mem_write(stock_manager + 132, struct.pack("<7H", *range(40, 47)))
+    for game, data in ((g, save), (stock, stock_save)):
+        game.put(0x1856FE8, data)
+        player = game.get(0x1897F78)
+        game.put(player + 2392, 0)
+        game.put(player + 13844, 0)
+        for first in (28, 88028):
+            game.cpu.mem_write(data + first + 44 * 22 + 4, struct.pack("<HHH", 7, 0, 0))
+            game.cpu.mem_write(data + first + 44 * 23 + 4, struct.pack("<HHH", 7, 0, 1))
+        # Supply the Prowler roster match, leaving the GU eligibility checks intact.
+        game.stub(0x260440, lambda _roster, i, *_: i)
+        game.stub(0x1462D0, lambda i, slot, *_: int(i == 83 and slot == 41))
+    for kind, capacity in ((0, 1000), (1, 300), (2, 0)):
+        for slot in (22, 23, 40, 41, 47, capacity - 1 if capacity else 0, capacity, 0xffff):
+            assert g.run(0x14426C, save, kind, slot) == stock.run(0x14426C, stock_save, kind, slot)
     for kind, entry in enumerate((0x142268, 0x149374)):
         calls = []
         g.stub(entry, lambda arg, *_: calls.append(arg) or 13)
@@ -653,7 +687,7 @@ def verify_stock_grid(g):
 
 def verify():
     elf = (REPO / "mhgu/main.elf").read_bytes()
-    verify_stock_grid(boot(elf, character_save({})))
+    verify_stock_grid(boot(elf, character_save({})), elf)
     config = character_save({11: 11})
     g = boot(elf, config)
     actor, eq, _ = hunters(g)

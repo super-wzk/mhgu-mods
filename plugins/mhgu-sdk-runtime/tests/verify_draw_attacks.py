@@ -121,9 +121,9 @@ def ground_draws():
         # GU's sheathed-run slot 73 becomes the Frontier dash slash.
         (11, "dual-blades", 0x174F2B4, None, 73, 82, (4,), 8, 1, []),
     )
-    # Converted SDT hitstop by state, including the paired shield/blade opener.
-    factors = {(1, 9): (0, 1), (8, 10): (2,), (8, 4): (1,), (9, 20): (1,),
-               (11, 16): (1, 1), (11, 82): (1,)}
+    # Source SDT ticks by state, including the paired shield/blade opener.
+    ticks = {(1, 9): (0, 2), (8, 10): (3,), (8, 4): (1,), (9, 20): (2,),
+             (11, 16): (1, 1), (11, 82): (2,)}
     for weapon, name, vt, route, kind, state, frames, ko, hits, other in cases:
         s = DrawScene(weapon, name, vt)
         for drawn, skills in ((False, {91}), (False, {92}), (False, {91, 92}), (True, {91, 92})):
@@ -145,7 +145,7 @@ def ground_draws():
             stun = ko if 92 in skills and not drawn else 0
             expected = other + [(affinity, stun)] * hits
             assert contacts == expected, (name, drawn, skills, contacts, expected)
-            assert tuple(hitstop) == factors[weapon, state], (name, state, hitstop)
+            assert tuple(value & 127 for value in hitstop) == ticks[weapon, state], (name, state, hitstop)
 
 
 def dual_blade_openings():
@@ -194,10 +194,11 @@ def aerial_hitstop():
         assert s.hits == [s.actor + hand], (frame, s.hits)
         hit = s.hits[0]
         # SDT rows 242/243 both carry two ticks. Native HDP 61/62 differ.
-        assert s.g.cpu.mem_read(hit + 108, 1) == b"\x01"
-        s.g.cpu.mem_write(hit + 6, b"\x04")
-        s.g.run(0x16DB68, 0, hit)
-        assert struct.unpack("<2f", s.g.cpu.mem_read(s.actor + 10156, 8)) == (3., 0.)
+        assert s.g.cpu.mem_read(hit + 108, 1) == b"\x82"
+        for grade in (3, 4):
+            s.g.cpu.mem_write(hit + 6, bytes([grade]))
+            s.g.run(s.g.hooks[0x16DB68], 0, hit)
+            assert struct.unpack("<2f", s.g.cpu.mem_read(s.actor + 10156, 8)) == (4., 0.)
         s.g.cpu.mem_write(s.actor + 10156, bytes(8))
 
 

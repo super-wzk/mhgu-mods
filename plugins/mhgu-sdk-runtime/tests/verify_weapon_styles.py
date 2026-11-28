@@ -9,8 +9,9 @@ sys.path.insert(0, str(REPO / "plugins/great-sword-extreme/tests"))
 from verify_native_fx import binding_stack
 from verify_style import (
     character_save,
-    ENCODE, GAME_STYLE, INIT_HUNTER, MANAGER, PROVIDER, SUBMIT_MODEL, api_for, boot, hunters,
-    load_registered_style, select_character, service, setup_controller,
+    COLLISION_PASS, DISPATCH, ENCODE, FX_RELEASE, GAME_STYLE, INIT_HUNTER, MANAGER, PROVIDER,
+    SUBMIT_MODEL, api_for, boot, hunters, load_registered_style, select_character, service,
+    setup_controller, style_descriptor,
 )
 
 
@@ -307,10 +308,93 @@ def replay_load_order(repo, elf):
     print("All six weapon styles registered in filename order and with the registry last.")
 
 
+def verify_callback_dispatch(elf):
+    from unicorn import UC_HOOK_CODE
+
+    g = boot(elf, character_save({}), ("registry",))
+    actor, _, _ = hunters(g)
+    manager = g.alloc(32)
+    unit = g.alloc(32)
+    calls = []
+    native = ((COLLISION_PASS, manager, "collision"), (DISPATCH, actor, "dispatch"),
+              (FX_RELEASE, unit, "release"))
+    for hook, _, label in native:
+        g.stub(g.originals[hook], lambda *_, label=label: calls.append(label) or 3)
+
+    def frame():
+        counts = []
+        hook = g.cpu.hook_add(UC_HOOK_CODE, lambda *_: counts.append(1),
+                              begin=0x9000000, end=0x90fffff)
+        try:
+            sizes = []
+            for address, arg, _ in native:
+                counts.clear()
+                assert g.run(g.hooks[address], arg) == 3
+                sizes.append(len(counts))
+        finally:
+            g.cpu.hook_del(hook)
+        return sizes
+
+    frame()
+    assert calls == ["collision", "dispatch", "release"]
+    register, _ = service(g)
+    for ident in (60, 61):
+        assert g.run(register, style_descriptor(g, ident, 0), 0, 0) == 0
+
+    def callback(label, expected):
+        addr = g.alloc(4)
+        def record(arg, *_):
+            if expected is not None:
+                assert arg == expected, (label, arg)
+            calls.append(label)
+        g.stub(addr, record)
+        return addr
+
+    passes = g.get(api_for(g, b"mhgu::StyleCollisionPassV1", b"SCP1"))
+    hurt = g.get(api_for(g, b"mhgu::StyleHurtObserverV1", b"SHO1"))
+    playback = g.get(api_for(g, b"mhgu::StylePlaybackV1", b"SPB1"))
+    release = g.get(api_for(g, b"mhgu::ParticleReleaseV1", b"PRL1"))
+    tick = callback("private", actor)
+
+    def observe(ident, poll):
+        desc = g.alloc(12)
+        g.cpu.mem_write(desc, struct.pack("<3I", tick, poll, 0))
+        assert g.run(playback, ident, desc) == 1
+
+    # Bind in reverse order and replace a callback after the first pass.
+    for ident in (61, 60):
+        g.run(passes, ident, callback(f"pass {ident}", manager))
+        assert g.run(hurt, ident, callback(f"hurt {ident}", None)) == 1
+        observe(ident, callback(f"peer {ident}", actor))
+        assert g.run(release, ident, callback(f"release {ident}", unit)) == 1
+    expected = ["pass 61", "pass 60", "collision", "hurt 61", "hurt 60",
+                "peer 61", "peer 60", "dispatch", "release 61", "release 60", "release"]
+    calls.clear()
+    before = frame()
+    assert calls == expected
+
+    for ident in range(62, 94):
+        assert g.run(register, style_descriptor(g, ident, 0), 0, 0) == 0
+    calls.clear()
+    after = frame()
+    assert calls == expected
+    assert before == after, (before, after)
+
+    observe(61, 0)
+    observe(60, callback("peer replaced", actor))
+    g.run(passes, 60, callback("pass replaced", manager))
+    calls.clear()
+    frame()
+    assert calls == ["pass 61", "pass replaced", "collision", "hurt 61", "hurt 60",
+                     "peer replaced", "dispatch", "release 61", "release 60", "release"]
+    print(f"GU callback dispatch: stable instruction counts {after} with 32 unrelated styles; order and replacement passed")
+
+
 def replay(repo=REPO):
     check_case_coverage(repo)
     elf = (repo / "mhgu/main.elf").read_bytes()
     replay_load_order(repo, elf)
+    verify_callback_dispatch(elf)
     from verify_manual import replay as verify_manual
     verify_manual(repo, elf, CASES)
     for case in CASES:
